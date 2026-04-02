@@ -1,0 +1,166 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>AthenaScout</Name>
+  <Repository>athena-scout:latest</Repository>
+  <Branch>
+    <Tag>latest</Tag>
+    <TagDescription>Latest stable release</TagDescription>
+  </Branch>
+  <Registry/>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/YOUR_USERNAME/athena-scout</Project>
+  <Overview>
+    AthenaScout is a self-hosted book library completionist tracker. It syncs with your Calibre library and cross-references metadata sources like Goodreads, Hardcover, and Kobo to find books you're missing from authors and series you already collect.
+
+    Features include multi-source discovery, smart scanning, import/export, series intelligence, Calibre-Web deep linking, and a responsive web UI with dark/dim/light themes.
+  </Overview>
+  <Category>MediaApp:Books</Category>
+  <WebUI>http://[IP]:[PORT:8787]</WebUI>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/YOUR_USERNAME/athena-scout/main/frontend/public/icon.svg</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+  <DonateImg/>
+  <Description>
+    A self-hosted book library completionist tracker that syncs with Calibre and finds missing books via Goodreads, Hardcover, and Kobo.
+  </Description>
+
+  <!-- Web UI Port -->
+  <Config
+    Name="Web UI Port"
+    Target="8787"
+    Default="8787"
+    Mode="tcp"
+    Description="Port for the AthenaScout web interface"
+    Type="Port"
+    Display="always"
+    Required="true"
+    Mask="false">8787</Config>
+
+  <!-- Calibre Library Mount -->
+  <Config
+    Name="Calibre Library Path"
+    Target="/calibre"
+    Default="/mnt/user/appdata/calibre/Calibre Library"
+    Mode="ro"
+    Description="Path to your Calibre library folder containing metadata.db (mounted read-only)"
+    Type="Path"
+    Display="always"
+    Required="true"
+    Mask="false">/mnt/user/appdata/calibre/Calibre Library</Config>
+
+  <!-- App Data -->
+  <Config
+    Name="App Data"
+    Target="/app/data"
+    Default="/mnt/user/appdata/athena-scout"
+    Mode="rw"
+    Description="Persistent storage for database and settings"
+    Type="Path"
+    Display="always"
+    Required="true"
+    Mask="false">/mnt/user/appdata/athena-scout</Config>
+
+  <!-- Calibre DB Path -->
+  <Config
+    Name="CALIBRE_DB_PATH"
+    Target="CALIBRE_DB_PATH"
+    Default="/calibre/metadata.db"
+    Description="Path to metadata.db inside the container"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">/calibre/metadata.db</Config>
+
+  <!-- Calibre Library Path (internal) -->
+  <Config
+    Name="CALIBRE_LIBRARY_PATH"
+    Target="CALIBRE_LIBRARY_PATH"
+    Default="/calibre"
+    Description="Path to the Calibre library root inside the container"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">/calibre</Config>
+
+  <!-- Hardcover API Key -->
+  <Config
+    Name="Hardcover API Key"
+    Target="HARDCOVER_API_KEY"
+    Default=""
+    Description="API key from hardcover.app (include 'Bearer ' prefix). Leave empty to configure in web UI."
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="true"></Config>
+
+  <!-- Calibre-Web URL -->
+  <Config
+    Name="Calibre-Web URL"
+    Target="CALIBRE_WEB_URL"
+    Default=""
+    Description="URL of your Calibre-Web instance for deep book links (e.g. http://192.168.1.100:8083)"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false"></Config>
+
+  <!-- Calibre Library URL -->
+  <Config
+    Name="Calibre Library URL"
+    Target="CALIBRE_URL"
+    Default=""
+    Description="URL of your Calibre content server for dashboard quick-access button"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false"></Config>
+
+  <!-- Sync Interval -->
+  <Config
+    Name="Calibre Sync Interval"
+    Target="SYNC_INTERVAL_MINUTES"
+    Default="60"
+    Description="Minutes between Calibre library re-syncs (0 to disable)"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false">60</Config>
+
+  <!-- Lookup Interval -->
+  <Config
+    Name="Source Scan Interval"
+    Target="LOOKUP_INTERVAL_MINUTES"
+    Default="4320"
+    Description="Minutes between metadata source scans (4320 = 3 days, 0 to disable)"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false">4320</Config>
+
+  <!-- Verbose Logging -->
+  <Config
+    Name="Verbose Logging"
+    Target="VERBOSE_LOGGING"
+    Default="false"
+    Description="Enable detailed debug logging (true/false)"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">false</Config>
+
+  <!-- Web UI Port (env) -->
+  <Config
+    Name="WEBUI_PORT"
+    Target="WEBUI_PORT"
+    Default="8787"
+    Description="Internal web UI port (must match the port mapping above)"
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false">8787</Config>
+</Container>

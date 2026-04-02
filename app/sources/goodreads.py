@@ -1,0 +1,483 @@
+"""
+Goodreads — PRIMARY source. Two-pass scraping:
+1. Author list page for all book IDs, titles, basic series info
+2. Individual book pages for EVERY book to get: language, pub date, expected date, 
+   series details (for set/collection detection), and translator info
+"""
+import httpx, logging, re, asyncio, json
+from datetime import datetime
+from typing import Optional
+from bs4 import BeautifulSoup
+from app.sources.base import BaseSource, AuthorResult, BookResult, SeriesResult
+
+logger = logging.getLogger("athenascout.goodreads")
+BASE = "https://www.goodreads.com"
+HDR = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def _parse_date(text: str) -> Optional[str]:
+    """Try to parse a date from various Goodreads formats."""
+    if not text:
+        return None
+    text = re.sub(r'(\d+)(?:st|nd|rd|th)', r'\1', text.strip())
+    for fmt in ["%B %d, %Y", "%B %d %Y", "%d %b %Y", "%d %B %Y",
+                "%b %d, %Y", "%b %d %Y", "%B %Y", "%b %Y", "%Y"]:
+        try:
+            dt = datetime.strptime(text.strip(), fmt)
+            if dt.year < 100:
+                dt = dt.replace(year=dt.year + 2000)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def _is_future(d: str) -> bool:
+    try:
+        return datetime.strptime(d[:10], "%Y-%m-%d") > datetime.now()
+    except:
+        return False
+
+
+def _is_set_from_series(series_text: str) -> bool:
+    """Detect if series info indicates a box set/collection (e.g. '#1-6', '#1-7')."""
+    return bool(re.search(r'#\d+\s*[-–]\s*\d+', series_text))
+
+
+class GoodreadsSource(BaseSource):
+    name = "goodreads"
+
+    def __init__(self, rate_limit: float = 2.0):
+        self.rate_limit = rate_limit
+        self.client = httpx.AsyncClient(timeout=60.0, headers=HDR, follow_redirects=True)
+
+    async def _get(self, url, retries=1, **kw):
+        for attempt in range(retries + 1):
+            try:
+                await asyncio.sleep(self.rate_limit)
+                r = await self.client.get(url, **kw)
+                r.raise_for_status()
+                return r
+            except Exception as e:
+                if attempt < retries:
+                    logger.debug(f"  Goodreads: retry {attempt+1} for {url}: {e}")
+                    await asyncio.sleep(3)
+                    continue
+                raise
+
+    async def _get_book_details(self, book_id: str, title: str) -> dict:
+        """Visit individual book page to get full details."""
+        details = {
+            "language": None, "pub_date": None, "expected_date": None,
+            "is_unreleased": False, "is_set": False, "is_translation": False,
+            "series_name": None, "series_index": None, "description": None,
+            "page_count": None, "cover_url": None,
+        }
+        try:
+            r = await self._get(f"{BASE}/book/show/{book_id}")
+            soup = BeautifulSoup(r.text, "lxml")
+            page_text = soup.get_text(" ", strip=True)
+
+            # --- Language ---
+            # Look for "Language\s+English" pattern in book details
+            lang_m = re.search(r'Language\s+(\w+)', page_text)
+            if lang_m:
+                details["language"] = lang_m.group(1)
+
+            # --- Translator detection ---
+            if "(translator)" in page_text.lower() or "translator" in page_text.lower()[:2000]:
+                details["is_translation"] = True
+
+            # --- Publication date ---
+            # Try data-testid publicationInfo
+            pub_el = soup.find("p", {"data-testid": "publicationInfo"})
+            if pub_el:
+                pt = pub_el.get_text(strip=True)
+                # "First published January 1, 2020"
+                dm = re.search(r'(?:published|Published)\s+(.+?)$', pt)
+                if dm:
+                    details["pub_date"] = _parse_date(dm.group(1))
+                # "Expected publication April 4, 2026"
+                em = re.search(r'[Ee]xpected\s+(?:publication\s+)?(.+?)$', pt)
+                if em:
+                    details["expected_date"] = _parse_date(em.group(1))
+                    details["is_unreleased"] = True
+
+            # Try JSON-LD structured data
+            for script in soup.select("script[type='application/ld+json']"):
+                try:
+                    data = json.loads(script.string)
+                    if not details["pub_date"] and data.get("datePublished"):
+                        d = data["datePublished"]
+                        details["pub_date"] = d[:10] if len(d) >= 10 else _parse_date(d)
+                    if data.get("numberOfPages"):
+                        try:
+                            details["page_count"] = int(data["numberOfPages"])
+                        except (ValueError, TypeError):
+                            pass
+                    if data.get("inLanguage") and not details["language"]:
+                        details["language"] = data["inLanguage"]
+                    if data.get("image"):
+                        details["cover_url"] = data["image"]
+                except:
+                    pass
+
+            # Fallback: check for "not yet published" text
+            if "not yet published" in page_text.lower():
+                details["is_unreleased"] = True
+
+            # If pub_date is in the future, it's unreleased
+            if details["pub_date"] and _is_future(details["pub_date"]):
+                details["is_unreleased"] = True
+                if not details["expected_date"]:
+                    details["expected_date"] = details["pub_date"]
+                details["pub_date"] = None
+
+            # --- Series info from book page ---
+            series_section = soup.find("div", {"data-testid": "seriesTitle"})
+            series_text = ""
+            if series_section:
+                # Get only the text from series links, not page navigation
+                series_links = series_section.find_all("a")
+                if series_links:
+                    parts = []
+                    for sl in series_links:
+                        parts.append(sl.get_text(strip=True))
+                    series_text = ", ".join(parts)
+                else:
+                    series_text = series_section.get_text(strip=True)
+                    # Truncate at any obvious page-chrome boundary
+                    for boundary in ["|", "Goodreads", "Home", "My Books", "Browse"]:
+                        idx = series_text.find(boundary)
+                        if idx > 0:
+                            series_text = series_text[:idx].strip()
+                            break
+
+            if series_text:
+                # Check for set indicators: multiple series entries or range like #1-6
+                if _is_set_from_series(series_text):
+                    details["is_set"] = True
+
+                # Count distinct series entries (sets are often in 2+ series)
+                series_entries = [s.strip() for s in series_text.split(",") if s.strip()]
+                real_series = [s for s in series_entries if not re.search(r'chronological|reading order|timeline', s, re.I)]
+                if len(real_series) >= 2:
+                    # In multiple real series = likely a set/omnibus
+                    details["is_set"] = True
+
+                # Extract primary series name and index (first non-chronological entry)
+                for entry in series_entries:
+                    if re.search(r'chronological|reading order|timeline', entry, re.I):
+                        continue
+                    sm = re.match(r'(.+?)\s*(?:\(|#)([\d.]+)\)?', entry)
+                    if sm and not _is_set_from_series(entry):
+                        details["series_name"] = sm.group(1).strip()
+                        try:
+                            details["series_index"] = float(sm.group(2))
+                        except ValueError:
+                            pass
+                        break
+                    elif not _is_set_from_series(entry):
+                        # Series without index
+                        sn = re.sub(r'\s*\(.*\)', '', entry).strip()
+                        if sn:
+                            details["series_name"] = sn
+                        break
+
+            # --- Description ---
+            desc_el = soup.find("div", {"data-testid": "description"})
+            if desc_el:
+                # Get text from the expanded version if available
+                spans = desc_el.find_all("span", class_=re.compile("Formatted"))
+                if spans:
+                    details["description"] = spans[-1].get_text(strip=True)[:500]
+                else:
+                    details["description"] = desc_el.get_text(strip=True)[:500]
+
+        except Exception as e:
+            logger.debug(f"  Goodreads: error getting details for book {book_id} '{title}': {e}")
+
+        return details
+
+    async def search_author(self, author_name: str) -> Optional[AuthorResult]:
+        try:
+            r = await self._get(f"{BASE}/search", params={"q": author_name, "search_type": "authors"})
+            soup = BeautifulSoup(r.text, "lxml")
+            links = soup.select("a.authorName")
+            if not links:
+                return None
+            for link in links:
+                nm = link.get_text(strip=True)
+                if nm.lower() == author_name.lower():
+                    m = re.search(r"/author/show/(\d+)", link.get("href", ""))
+                    img = None
+                    parent = link.find_parent("tr") or link.find_parent("div")
+                    if parent:
+                        img_el = parent.select_one("img")
+                        if img_el:
+                            img = img_el.get("src")
+                            if img and "nophoto" in img:
+                                img = None
+                    return AuthorResult(name=nm, external_id=m.group(1) if m else None, image_url=img)
+            first = links[0]
+            m = re.search(r"/author/show/(\d+)", first.get("href", ""))
+            return AuthorResult(name=first.get_text(strip=True), external_id=m.group(1) if m else None)
+        except Exception as e:
+            logger.error(f"Goodreads search error '{author_name}': {e}")
+            return None
+
+    async def get_author_books(self, author_id: str, existing_titles: set = None, owned_titles: list = None) -> Optional[AuthorResult]:
+        """Scrape author's books. Validates author identity before visiting individual pages."""
+        if existing_titles is None:
+            existing_titles = set()
+        if owned_titles is None:
+            owned_titles = []
+        try:
+            r = await self._get(f"{BASE}/author/list/{author_id}", retries=2, params={"per_page": 100})
+            soup = BeautifulSoup(r.text, "lxml")
+
+            nm_el = soup.select_one("a.authorName span")
+            author_name = nm_el.get_text(strip=True) if nm_el else "Unknown"
+
+            # Get author image
+            author_img = None
+            photo_el = soup.select_one("img.authorPhoto, img[alt*='author']")
+            if photo_el:
+                author_img = photo_el.get("src")
+                if author_img and "nophoto" in author_img:
+                    author_img = None
+
+            # Phase 1: Collect all book entries from author list page
+            raw_books = []
+            rows = soup.select("tr[itemtype='http://schema.org/Book']")
+            if not rows:
+                rows = soup.select("table.tableList tr")
+
+            for row in rows:
+                title_el = row.select_one("a.bookTitle span") or row.select_one("a.bookTitle")
+                if not title_el:
+                    continue
+                full_title = title_el.get_text(strip=True)
+
+                # Parse series from title
+                sname = sidx = None
+                sm = re.search(r'\(([^)]+),\s*#([\d.]+)\)', full_title)
+                if sm:
+                    sname = sm.group(1).strip()
+                    try:
+                        sidx = float(sm.group(2))
+                    except ValueError:
+                        pass
+                    full_title = re.sub(r'\s*\([^)]+,\s*#[\d.]+\)', '', full_title).strip()
+
+                # Get book ID
+                title_link = row.select_one("a.bookTitle")
+                book_id = None
+                if title_link:
+                    m = re.search(r"/book/show/(\d+)", title_link.get("href", ""))
+                    if m:
+                        book_id = m.group(1)
+
+                # Get cover from list page (fallback)
+                img = row.select_one("img.bookCover, img.bookSmallImg")
+                cover = img.get("src") if img else None
+                if cover:
+                    if "_SX" in cover:
+                        cover = re.sub(r'_SX\d+_', '_SX300_', cover)
+                    elif "_SY" in cover:
+                        cover = re.sub(r'_SY\d+_', '_SY400_', cover)
+
+                # Quick check from list text for translator or contributor
+                row_text = row.get_text(" ", strip=True)
+                has_translator = "(translator)" in row_text.lower()
+                is_contributor = "(contributor)" in row_text.lower()
+
+                raw_books.append({
+                    "title": full_title, "book_id": book_id,
+                    "list_series": sname, "list_series_idx": sidx,
+                    "list_cover": cover, "has_translator": has_translator,
+                    "is_contributor": is_contributor,
+                })
+
+            # Validate author using list page titles BEFORE visiting individual pages
+            list_titles = [rb["title"] for rb in raw_books]
+
+            def _title_match(a, b):
+                """Quick fuzzy title match."""
+                na = re.sub(r'[^\w\s]', '', a.lower()).strip()
+                nb = re.sub(r'[^\w\s]', '', b.lower()).strip()
+                return na == nb or na in nb or nb in na
+
+            author_confirmed = False
+
+            # Check 1: Do any owned book titles appear on the list page?
+            if owned_titles:
+                for ot in owned_titles:
+                    if any(_title_match(ot, lt) for lt in list_titles):
+                        author_confirmed = True
+                        break
+
+            # Check 2: Do any existing DB titles appear on the list page? (re-scan)
+            if not author_confirmed and existing_titles:
+                for lt in list_titles:
+                    norm_lt = re.sub(r'[^\w\s]', '', lt.lower()).strip()
+                    norm_lt = re.sub(r'\s+', ' ', norm_lt)
+                    if any(norm_lt == et or norm_lt in et or et in norm_lt 
+                           for et in existing_titles):
+                        author_confirmed = True
+                        break
+
+            if not author_confirmed:
+                if owned_titles:
+                    logger.info(f"  Goodreads: author validation failed — none of {len(owned_titles)} owned titles match {len(list_titles)} list titles")
+                    return None
+                else:
+                    # No owned titles to validate against (first sync before Calibre?) — proceed cautiously
+                    logger.info(f"  Goodreads: no owned titles for validation, proceeding with {len(list_titles)} books")
+                    author_confirmed = True
+
+            logger.info(f"  Goodreads: author confirmed via title match")
+
+            # Phase 2: Visit each book's page for full details
+            total = len(raw_books)
+            logger.info(f"  Goodreads: found {total} books on list page, fetching details...")
+
+            books = []
+            series_map = {}
+            skipped = {"foreign": 0, "set": 0, "translation": 0}
+
+            for i, rb in enumerate(raw_books):
+                if not rb["book_id"]:
+                    continue
+
+                # Quick skip: if list page already shows translator or contributor
+                if rb["has_translator"]:
+                    skipped["translation"] += 1
+                    logger.debug(f"    SKIP (translator): '{rb['title']}'")
+                    continue
+                if rb.get("is_contributor"):
+                    skipped.setdefault("contributor", 0)
+                    skipped["contributor"] += 1
+                    logger.debug(f"    SKIP (contributor): '{rb['title']}'")
+                    continue
+
+                # Quick skip: title looks like a set/collection (no page visit needed)
+                title_lower = rb["title"].lower()
+                if any(kw in title_lower for kw in [
+                    "box set", "boxed set", "boxset", "book set", "collection set",
+                    "books collection", "hardcover collection", "paperback collection",
+                    "complete series", "series set", "roleplaying game",
+                ]) or re.search(r'series\s+#?\d+\s*[-–]\s*#?\d+', title_lower) or \
+                   re.search(r'#\d+\s*[-–]\s*\d+', title_lower) or \
+                   re.search(r'books?\s+\d+\s*[-–]\s*\d+', title_lower):
+                    skipped["set"] += 1
+                    logger.debug(f"    SKIP (set/collection title): '{rb['title']}'")
+                    continue
+
+                # Skip books already in DB (avoid unnecessary page visits)
+                # But still emit a minimal result so the merge can backfill the URL
+                if existing_titles:
+                    norm_title = re.sub(r'[^\w\s]', '', rb["title"].lower()).strip()
+                    norm_title = re.sub(r'\s+', ' ', norm_title)
+                    if any(norm_title == et or norm_title in et or et in norm_title 
+                           for et in existing_titles):
+                        skipped.setdefault("known", 0)
+                        skipped["known"] += 1
+                        logger.debug(f"    SKIP (known, URL backfill): '{rb['title']}' → book/{rb['book_id']}")
+                        # Emit minimal result for URL backfill (no page visit needed)
+                        sname = rb["list_series"]
+                        br = BookResult(
+                            title=rb["title"],
+                            series_name=sname,
+                            series_index=rb["list_series_idx"],
+                            external_id=rb["book_id"],
+                            source="goodreads",
+                            source_url=f"https://www.goodreads.com/book/show/{rb['book_id']}",
+                        )
+                        if sname:
+                            if sname not in series_map:
+                                series_map[sname] = SeriesResult(name=sname, books=[])
+                            series_map[sname].books.append(br)
+                        else:
+                            books.append(br)
+                        continue
+
+                # Log progress every 10 books
+                if (i + 1) % 10 == 0 or i == 0:
+                    logger.info(f"  Goodreads: checking book {i+1}/{total}...")
+
+                details = await self._get_book_details(rb["book_id"], rb["title"])
+                logger.debug(f"    PAGE: '{rb['title']}' → lang={details.get('language')}, set={details.get('is_set')}, trans={details.get('is_translation')}, series={details.get('series_name')}, date={details.get('pub_date') or details.get('expected_date')}")
+
+                # Filter: language
+                lang = (details.get("language") or "").lower()
+                if lang and lang not in ("english", "en", "eng", ""):
+                    skipped["foreign"] += 1
+                    logger.debug(f"    SKIP (foreign language '{lang}'): '{rb['title']}'")
+                    continue
+
+                # Filter: translation (detected from book page)
+                if details.get("is_translation") and lang and lang != "english":
+                    skipped["translation"] += 1
+                    logger.debug(f"    SKIP (translation): '{rb['title']}'")
+                    continue
+
+                # Filter: box set / collection
+                if details.get("is_set"):
+                    skipped["set"] += 1
+                    logger.debug(f"    SKIP (set/collection from page): '{rb['title']}'")
+                    continue
+
+                # Build the BookResult
+                sname = details.get("series_name") or rb["list_series"]
+                sidx = details.get("series_index") or rb["list_series_idx"]
+                cover = details.get("cover_url") or rb["list_cover"]
+
+                br = BookResult(
+                    title=rb["title"],
+                    series_name=sname,
+                    series_index=sidx,
+                    cover_url=cover,
+                    pub_date=details["pub_date"] if not details["is_unreleased"] else None,
+                    expected_date=details.get("expected_date"),
+                    is_unreleased=details.get("is_unreleased", False),
+                    description=details.get("description"),
+                    page_count=details.get("page_count"),
+                    external_id=rb["book_id"],
+                    source="goodreads",
+                    source_url=f"https://www.goodreads.com/book/show/{rb['book_id']}",
+                    language=details.get("language") or "English",
+                )
+
+                if sname:
+                    if sname not in series_map:
+                        series_map[sname] = SeriesResult(name=sname, books=[])
+                    series_map[sname].books.append(br)
+                    logger.debug(f"    INCLUDE: '{rb['title']}' → series '{sname}' #{sidx}")
+                else:
+                    books.append(br)
+                    logger.debug(f"    INCLUDE: '{rb['title']}' → standalone")
+
+            if any(skipped.values()):
+                parts = []
+                if skipped.get("known"): parts.append(f"{skipped['known']} already known")
+                if skipped.get("foreign"): parts.append(f"{skipped['foreign']} foreign")
+                if skipped.get("set"): parts.append(f"{skipped['set']} sets")
+                if skipped.get("translation"): parts.append(f"{skipped['translation']} translations")
+                if skipped.get("contributor"): parts.append(f"{skipped['contributor']} contributor-only")
+                logger.info(f"  Goodreads: skipped {', '.join(parts)}")
+
+            return AuthorResult(
+                name=author_name, external_id=author_id, image_url=author_img,
+                books=books, series=list(series_map.values()),
+            )
+        except Exception as e:
+            logger.error(f"Goodreads author error id={author_id}: {type(e).__name__}: {e}")
+            return None
+
+    async def close(self):
+        await self.client.aclose()

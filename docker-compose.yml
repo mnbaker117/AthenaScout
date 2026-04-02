@@ -1,0 +1,52 @@
+services:
+  athena-scout:
+    # ── Image Source ───────────────────────────────────────────
+    # Option 1 (recommended): Use pre-built image
+    image: athena-scout:latest
+    # Option 2: Build from source — uncomment below and comment out 'image:' above
+    # build: .
+
+    container_name: athena-scout
+    ports:
+      # Host port : Container port — change left side to use a different host port
+      - "8787:8787"
+    volumes:
+      # Mount your Calibre library folder (read-only)
+      # Update the left side to match your Calibre library path
+      - /mnt/user/appdata/calibre/Calibre Library:/calibre:ro
+      # Persistent data for the app's database and settings (survives restarts/updates)
+      - ./data:/app/data
+    environment:
+      # ── Calibre Library ──────────────────────────────────────
+      # Path to metadata.db inside the container (matches volume mount above)
+      - CALIBRE_DB_PATH=/calibre/metadata.db
+      # Path to the Calibre library root (for cover images)
+      - CALIBRE_LIBRARY_PATH=/calibre
+
+      # ── Calibre Web Integration (optional) ───────────────────
+      # URL of your Calibre-Web instance (janeczku/calibre-web or calibre-web-automated)
+      # Enables deep "Open in Calibre Web" links to individual books in the sidebar
+      # Example: http://192.168.1.100:8083
+      - CALIBRE_WEB_URL=
+      # URL of your Calibre content server or library management UI
+      # Shown as a quick-access button on the dashboard
+      # Example: https://10.0.10.20:8787
+      - CALIBRE_URL=
+
+      # ── Metadata Sources ─────────────────────────────────────
+      # Hardcover API key (get from hardcover.app → Account → API)
+      # Must include "Bearer " prefix, e.g.: Bearer eyJ...
+      - HARDCOVER_API_KEY=
+
+      # ── Sync Intervals ───────────────────────────────────────
+      # How often to re-sync Calibre library (minutes, 0 = disabled)
+      - SYNC_INTERVAL_MINUTES=60
+      # How often to re-scan metadata sources (minutes, 0 = disabled)
+      - LOOKUP_INTERVAL_MINUTES=4320
+
+      # ── App Settings ─────────────────────────────────────────
+      # Port for the web UI (change if using a non-default port)
+      - WEBUI_PORT=8787
+      # Enable verbose/debug logging on startup (true/false)
+      - VERBOSE_LOGGING=false
+    restart: unless-stopped

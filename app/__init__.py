@@ -1,0 +1,1 @@
+# AthenaScout — Library Completionist Tracker
