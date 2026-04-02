@@ -10,7 +10,7 @@
   <Network>bridge</Network>
   <Privileged>false</Privileged>
   <Support/>
-  <Project>https://github.com/YOUR_USERNAME/athena-scout</Project>
+  <Project>https://github.com/mnbaker117/athena-scout</Project>
   <Overview>
     AthenaScout is a self-hosted book library completionist tracker. It syncs with your Calibre library and cross-references metadata sources like Goodreads, Hardcover, and Kobo to find books you're missing from authors and series you already collect.
 
@@ -19,7 +19,7 @@
   <Category>MediaApp:Books</Category>
   <WebUI>http://[IP]:[PORT:8787]</WebUI>
   <TemplateURL/>
-  <Icon>https://raw.githubusercontent.com/YOUR_USERNAME/athena-scout/main/frontend/public/icon.svg</Icon>
+  <Icon>https://raw.githubusercontent.com/mnbaker117/athena-scout/main/frontend/public/icon.svg</Icon>
   <ExtraParams/>
   <PostArgs/>
   <DonateText/>

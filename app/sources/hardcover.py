@@ -84,7 +84,7 @@ class HardcoverSource(BaseSource):
     def _get_client(self):
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "AthenaScout/1.0 (https://github.com/athena-scout)",
+            "User-Agent": "AthenaScout/1.0 (https://github.com/mnbaker117/AthenaScout)",
         }
         if self.api_key:
             token = self.api_key

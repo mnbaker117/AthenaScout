@@ -68,7 +68,7 @@ Built for readers who want to know: *"What am I missing?"*
 
 ```bash
 # 1. Clone or download
-git clone https://github.com/YOUR_USERNAME/athena-scout.git
+git clone https://github.com/mnbaker117/athena-scout.git
 cd athena-scout
 
 # 2. Build the Docker image
