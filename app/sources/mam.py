@@ -303,7 +303,8 @@ async def register_ip(session_id: str, skip_ip_update: bool = False) -> dict:
     logger.info("Registering server IP with MAM...")
     try:
         async with aiohttp.ClientSession(
-            headers=_build_headers(session_id)
+            headers=_build_headers(session_id),
+            cookie_jar=aiohttp.DummyCookieJar(),
         ) as session:
             async with session.get(MAM_DYNIP_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 body = (await resp.text()).strip()
@@ -332,7 +333,8 @@ async def verify_search_auth(session_id: str) -> dict:
     logger.info("Verifying MAM search API access...")
     try:
         async with aiohttp.ClientSession(
-            headers=_build_headers(session_id)
+            headers=_build_headers(session_id),
+            cookie_jar=aiohttp.DummyCookieJar(),
         ) as session:
             payload = {
                 "tor": {
@@ -435,21 +437,7 @@ async def _mam_search(
             if resp.status in (401, 403):
                 raise _AuthError(f"HTTP {resp.status}")
             resp.raise_for_status()
-            data = await resp.json(content_type=None)
-            # DIAGNOSTIC: Log response structure
-            if data and isinstance(data, dict):
-                d = data.get("data")
-                if isinstance(d, list) and len(d) > 0:
-                    first = d[0]
-                    logger.debug(f"  MAM response: {len(d)} results, first result keys: {list(first.keys())[:15]}")
-                    logger.debug(f"  First result — name='{first.get('name', 'MISSING')[:60]}', title='{first.get('title', 'MISSING')[:60]}', id={first.get('id')}")
-                else:
-                    logger.debug(f"  MAM response: data type={type(d).__name__}, value={str(d)[:100]}")
-            elif data is None:
-                logger.debug(f"  MAM response: None")
-            else:
-                logger.debug(f"  MAM response: type={type(data).__name__}, value={str(data)[:200]}")
-            return data
+            return await resp.json(content_type=None)
     except _AuthError:
         raise
     except Exception as e:
@@ -718,7 +706,8 @@ async def scan_books_batch(
     stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0, "error": None}
 
     async with aiohttp.ClientSession(
-        headers=_build_headers(session_id)
+        headers=_build_headers(session_id),
+        cookie_jar=aiohttp.DummyCookieJar(),
     ) as session:
         for i, row in enumerate(rows):
             book_id, book_title, author_name = row[0], row[1], row[2]
@@ -852,7 +841,8 @@ async def run_full_scan_batch(
     scanned = 0
 
     async with aiohttp.ClientSession(
-        headers=_build_headers(session_id)
+        headers=_build_headers(session_id),
+        cookie_jar=aiohttp.DummyCookieJar(),
     ) as session:
         for i, row in enumerate(book_rows):
             book_id, book_title, author_name = row
