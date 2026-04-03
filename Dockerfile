@@ -24,6 +24,12 @@ COPY --from=frontend-build /frontend/dist ./frontend/dist/
 
 RUN mkdir -p /app/data
 
+LABEL org.opencontainers.image.title="AthenaScout"
+LABEL org.opencontainers.image.description="A self-hosted book library completionist tracker"
+LABEL org.opencontainers.image.source="https://github.com/mnbaker117/AthenaScout"
+LABEL org.opencontainers.image.url="https://github.com/mnbaker117/AthenaScout"
+LABEL org.opencontainers.image.version="1.0.0"
+
 ENV CALIBRE_DB_PATH=/calibre/metadata.db
 ENV CALIBRE_LIBRARY_PATH=/calibre
 ENV SYNC_INTERVAL_MINUTES=60
