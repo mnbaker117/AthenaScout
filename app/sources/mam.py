@@ -33,7 +33,8 @@ import time as _time
 from typing import Optional
 from urllib.parse import urlencode
 
-import aiohttp
+# aiohttp removed — using requests via asyncio.to_thread() instead
+# (MAM's TLS fingerprinting rejects Python aiohttp)
 
 logger = logging.getLogger("athenascout.mam")
 
