@@ -1,30 +1,38 @@
 #!/bin/bash
 # Build the AthenaScout Docker image locally
-# Run this from the project root directory after extracting the tar
 #
 # Usage:
 #   ./build.sh              # builds athena-scout:latest
-#   ./build.sh v11          # builds athena-scout:v11
+#   ./build.sh v12          # builds athena-scout:v12
+#   ./build.sh --push       # builds and pushes to GHCR
 
 TAG="${1:-latest}"
-IMAGE="athena-scout:${TAG}"
+PUSH=false
+if [ "$1" = "--push" ]; then
+    TAG="latest"
+    PUSH=true
+fi
 
-echo "Building ${IMAGE}..."
-docker build -t "${IMAGE}" .
+LOCAL_IMAGE="athena-scout:${TAG}"
+GHCR_IMAGE="ghcr.io/mnbaker117/athenascout:${TAG}"
+
+echo "Building ${LOCAL_IMAGE}..."
+docker build -t "${LOCAL_IMAGE}" -t "${GHCR_IMAGE}" .
 
 if [ $? -eq 0 ]; then
     echo ""
-    echo "✓ Built ${IMAGE} successfully"
+    echo "✓ Built ${LOCAL_IMAGE}"
+    echo "  Also tagged as ${GHCR_IMAGE}"
+    
+    if [ "$PUSH" = true ]; then
+        echo ""
+        echo "Pushing to GHCR..."
+        docker push "${GHCR_IMAGE}"
+    fi
+    
     echo ""
     echo "To run with docker-compose:"
     echo "  docker-compose up -d"
-    echo ""
-    echo "To run standalone:"
-    echo "  docker run -d --name athena-scout \\"
-    echo "    -p 8787:8787 \\"
-    echo "    -v /path/to/calibre/library:/calibre:ro \\"
-    echo "    -v ./data:/app/data \\"
-    echo "    ${IMAGE}"
 else
     echo ""
     echo "✗ Build failed"

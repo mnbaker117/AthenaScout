@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>AthenaScout</Name>
-  <Repository>athena-scout:latest</Repository>
+  <Repository>ghcr.io/mnbaker117/athenascout:latest</Repository>
   <Branch>
     <Tag>latest</Tag>
     <TagDescription>Latest stable release</TagDescription>
