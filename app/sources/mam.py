@@ -433,7 +433,13 @@ async def _mam_search(
             if resp.status in (401, 403):
                 raise _AuthError(f"HTTP {resp.status}")
             resp.raise_for_status()
-            return await resp.json(content_type=None)
+            data = await resp.json(content_type=None)
+            result_count = len(data.get("data", [])) if isinstance(data.get("data"), list) else 0
+            logger.debug(f"Search response: total={data.get('total', '?')}, data_type={type(data.get('data')).__name__}, results={result_count}")
+            if result_count > 0 and data["data"][0]:
+                first = data["data"][0]
+                logger.debug(f"  First result: id={first.get('id')}, title='{first.get('title', first.get('name', '?'))[:80]}', filetype='{first.get('filetype', '?')}'")
+            return data
     except _AuthError:
         raise
     except Exception as e:
