@@ -284,8 +284,13 @@ def _pick_best_result(
 # Session / auth (async versions)
 # ---------------------------------------------------------------------------
 
-def _build_cookies(token: str) -> dict:
-    return {"mam_id": token, "mbsc": token}
+def _build_headers(token: str) -> dict:
+    """Build headers with cookies set directly — bypasses aiohttp cookie jar quirks."""
+    return {
+        "Content-Type": "application/json",
+        "User-Agent": "AthenaScout/2.0",
+        "Cookie": f"mam_id={token}; mbsc={token}",
+    }
 
 
 async def register_ip(session_id: str, skip_ip_update: bool = False) -> dict:
@@ -299,8 +304,7 @@ async def register_ip(session_id: str, skip_ip_update: bool = False) -> dict:
     logger.info("Registering server IP with MAM...")
     try:
         async with aiohttp.ClientSession(
-            cookies=_build_cookies(session_id),
-            headers={"User-Agent": "AthenaScout/2.0"}
+            headers=_build_headers(session_id)
         ) as session:
             async with session.get(MAM_DYNIP_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 body = (await resp.text()).strip()
@@ -329,8 +333,7 @@ async def verify_search_auth(session_id: str) -> dict:
     logger.info("Verifying MAM search API access...")
     try:
         async with aiohttp.ClientSession(
-            cookies=_build_cookies(session_id),
-            headers={"Content-Type": "application/json", "User-Agent": "AthenaScout/2.0"}
+            headers=_build_headers(session_id)
         ) as session:
             payload = {
                 "tor": {
@@ -433,18 +436,7 @@ async def _mam_search(
             if resp.status in (401, 403):
                 raise _AuthError(f"HTTP {resp.status}")
             resp.raise_for_status()
-            raw_text = await resp.text()
-            logger.debug(f"Raw response ({len(raw_text)} chars): {raw_text[:300]}")
-            if not raw_text or raw_text.strip() in ('', 'null', 'false'):
-                logger.debug("Empty/null response from MAM")
-                return None
-            import json as _json
-            try:
-                data = _json.loads(raw_text)
-            except _json.JSONDecodeError as je:
-                logger.debug(f"JSON parse failed: {je}")
-                return None
-            return data
+            return await resp.json(content_type=None)
     except _AuthError:
         raise
     except Exception as e:
