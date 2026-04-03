@@ -26,7 +26,6 @@ Format preference:
 """
 
 import asyncio
-import json
 import logging
 import re
 import time as _time
@@ -465,7 +464,7 @@ def _evaluate_results(
     """
     matches = []
     for item in data:
-        mam_title = item.get("title", "") or ""
+        mam_title = item.get("title", "") or item.get("name", "") or ""
         torrent_id = item.get("id", "")
 
         # Check author match
