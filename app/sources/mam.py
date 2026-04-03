@@ -703,8 +703,7 @@ async def scan_books_batch(
     stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0, "error": None}
 
     async with aiohttp.ClientSession(
-        cookies=_build_cookies(session_id),
-        headers={"Content-Type": "application/json", "User-Agent": "AthenaScout/2.0"}
+        headers=_build_headers(session_id)
     ) as session:
         for i, row in enumerate(rows):
             book_id, book_title, author_name = row[0], row[1], row[2]
@@ -838,8 +837,7 @@ async def run_full_scan_batch(
     scanned = 0
 
     async with aiohttp.ClientSession(
-        cookies=_build_cookies(session_id),
-        headers={"Content-Type": "application/json", "User-Agent": "AthenaScout/2.0"}
+        headers=_build_headers(session_id)
     ) as session:
         for i, row in enumerate(book_rows):
             book_id, book_title, author_name = row
