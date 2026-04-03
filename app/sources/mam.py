@@ -433,7 +433,7 @@ async def _mam_search(
             if resp.status in (401, 403):
                 raise _AuthError(f"HTTP {resp.status}")
             resp.raise_for_status()
-            return await resp.json()
+            return await resp.json(content_type=None)
     except _AuthError:
         raise
     except Exception as e:
