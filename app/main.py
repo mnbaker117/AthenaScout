@@ -22,11 +22,23 @@ uv_access = logging.getLogger("uvicorn.access")
 uv_access.addFilter(QuietAccessFilter())
 from app.calibre_sync import sync_calibre
 from app.lookup import run_full_lookup, run_full_rescan, lookup_author, reload_sources
+from app.sources.mam import (
+    validate_connection as mam_validate,
+    scan_books_batch as mam_scan_batch,
+    start_full_scan as mam_start_full_scan,
+    run_full_scan_batch as mam_run_full_scan_batch,
+    cancel_full_scan as mam_cancel_full_scan,
+    get_full_scan_status as mam_get_full_scan_status,
+    get_mam_stats,
+    build_search_link as mam_build_search_link,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("athenascout")
 scheduler = AsyncIOScheduler()
 HF = "b.hidden = 0"
+_mam_scan_task: asyncio.Task | None = None
+_mam_full_scan_task: asyncio.Task | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -46,6 +58,28 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(run_full_lookup, "interval", minutes=lookup_days*1440, id="author_lookup", replace_existing=True)
     else:
         logger.info("Auto-lookup disabled (interval = 0)")
+    async def _mam_scheduler():
+        while True:
+            s = load_settings()
+            interval = s.get("mam_scan_interval_minutes", 360)
+            if interval <= 0 or not s.get("mam_enabled") or not s.get("mam_session_id"):
+                await asyncio.sleep(60)
+                continue
+            await asyncio.sleep(interval * 60)
+            db = await get_db()
+            try:
+                await mam_scan_batch(
+                    db, session_id=s["mam_session_id"], limit=100,
+                    delay=s.get("rate_mam", 2),
+                    skip_ip_update=s.get("mam_skip_ip_update", False),
+                    format_priority=s.get("mam_format_priority"),
+                )
+            except Exception as e:
+                logger.error(f"MAM scheduled scan error: {e}")
+            finally:
+                await db.close()
+
+    asyncio.create_task(_mam_scheduler())
     scheduler.start(); yield; scheduler.shutdown()
 
 app = FastAPI(title="AthenaScout", lifespan=lifespan)
@@ -57,6 +91,9 @@ async def get_settings():
     d = dict(s)
     if d.get("hardcover_api_key"): d["hardcover_api_key_set"] = True; d["hardcover_api_key"] = d["hardcover_api_key"][:8] + "..."
     else: d["hardcover_api_key_set"] = False
+    if d.get("mam_session_id"):
+        sid = d["mam_session_id"]
+        d["mam_session_id"] = sid[:8] + "..." + sid[-4:] if len(sid) > 12 else "***"
     d["language_options"] = LANGUAGE_OPTIONS
     return d
 
@@ -68,6 +105,8 @@ async def update_settings(body: dict = Body(...)):
             continue
         # Don't overwrite real API key with masked/truncated value
         if k == "hardcover_api_key" and isinstance(v, str) and (v.endswith("...") or v == ""):
+            continue
+        if k == "mam_session_id" and isinstance(v, str) and ("..." in v or v == "***"):
             continue
         cur[k] = v
     save_settings(cur); reload_sources()
@@ -94,7 +133,10 @@ async def get_stats():
         ls = await (await g("SELECT * FROM sync_log WHERE sync_type='calibre' ORDER BY started_at DESC LIMIT 1")).fetchone()
         ll = await (await g("SELECT * FROM sync_log WHERE sync_type='lookup' ORDER BY started_at DESC LIMIT 1")).fetchone()
         s = load_settings()
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", "")}
+        mam_stats = None
+        if s.get("mam_enabled") and s.get("mam_session_id"):
+            mam_stats = await get_mam_stats(db)
+        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats}
     finally: await db.close()
 
 # ─── Authors ─────────────────────────────────────────────────
@@ -324,7 +366,7 @@ async def export_books(filter: str = Query("missing"), format: str = Query("csv"
         elif filter == "missing": c.append("b.owned=0")
         w = " AND ".join(c)
         rows = await (await db.execute(
-            f"SELECT b.title, a.name as author_name, b.pub_date, b.expected_date, b.source, b.source_url, b.is_unreleased "
+            f"SELECT b.title, a.name as author_name, b.pub_date, b.expected_date, b.source, b.source_url, b.is_unreleased, b.mam_url, b.mam_formats "
             f"FROM books b JOIN authors a ON b.author_id=a.id WHERE {w} ORDER BY a.sort_name, b.title", p
         )).fetchall()
         
@@ -372,13 +414,13 @@ async def export_books(filter: str = Query("missing"), format: str = Query("csv"
             import csv, io
             buf = io.StringIO()
             writer = csv.writer(buf)
-            writer.writerow(["Title", "Author", "Release Date", "Source", "Source URL"])
+            writer.writerow(["Title", "Author", "Release Date", "Source", "Source URL", "MAM URL", "MAM Formats"])
             for r in rows:
                 src_name, src_url = _best_url(r["source_url"])
                 date = r["pub_date"] or r["expected_date"] or ""
                 if r["is_unreleased"] and r["expected_date"]:
                     date = f"{r['expected_date']} (upcoming)"
-                writer.writerow([r["title"], r["author_name"], date, src_name or r["source"] or "", src_url])
+                writer.writerow([r["title"], r["author_name"], date, src_name or r["source"] or "", src_url, r["mam_url"] or "", r["mam_formats"] or ""])
             content = buf.getvalue()
             return Response(content=content, media_type="text/csv",
                           headers={"Content-Disposition": f"attachment; filename=books_{filter}.csv"})
@@ -392,7 +434,12 @@ async def export_books(filter: str = Query("missing"), format: str = Query("csv"
                 # Escape commas in titles/authors
                 title = r["title"].replace(",", ";")
                 author = r["author_name"].replace(",", ";")
-                lines.append(f"{title}, {author}, {date}, {src_name or r['source'] or ''}, {src_url}")
+                line = f"{title}, {author}, {date}, {src_name or r['source'] or ''}, {src_url}"
+                if r["mam_url"] and r["mam_formats"]:
+                    line += f" | MAM ({r['mam_formats']}): {r['mam_url']}"
+                elif r["mam_url"]:
+                    line += f" | MAM: {r['mam_url']}"
+                lines.append(line)
             content = "\n".join(lines)
             return Response(content=content, media_type="text/plain",
                           headers={"Content-Disposition": f"attachment; filename=books_{filter}.txt"})
@@ -791,6 +838,218 @@ async def trigger_author_full_rescan(aid: int):
         if not r: raise HTTPException(404)
     finally: await db.close()
     return {"status": "ok", "new_books": await lookup_author(aid, dict(r)["name"], full_scan=True)}
+
+# ─── MAM Integration ─────────────────────────────────────────
+@app.post("/api/mam/validate")
+async def mam_validate_endpoint():
+    """Test MAM session ID — runs IP registration + search auth."""
+    s = load_settings()
+    session_id = s.get("mam_session_id", "")
+    if not session_id:
+        return {"success": False, "message": "No MAM session ID configured"}
+    skip_ip = s.get("mam_skip_ip_update", False)
+    result = await mam_validate(session_id, skip_ip)
+    if result["success"]:
+        s["mam_enabled"] = True
+        save_settings(s)
+    return result
+
+
+@app.get("/api/mam/status")
+async def mam_status_endpoint():
+    """Get MAM integration status and stats."""
+    s = load_settings()
+    enabled = s.get("mam_enabled", False) and bool(s.get("mam_session_id", ""))
+    if not enabled:
+        return {"enabled": False, "stats": None, "full_scan": None}
+    db = await get_db()
+    try:
+        stats = await get_mam_stats(db)
+        scan_status = await mam_get_full_scan_status(db)
+        return {"enabled": True, "stats": stats, "full_scan": scan_status}
+    finally:
+        await db.close()
+
+
+@app.post("/api/mam/scan")
+async def mam_scan_endpoint():
+    """Trigger an incremental MAM scan (100 books)."""
+    global _mam_scan_task
+    s = load_settings()
+    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+        return {"error": "MAM not configured or not enabled"}
+    if _mam_scan_task and not _mam_scan_task.done():
+        return {"error": "A MAM scan is already running"}
+
+    async def _do_scan():
+        db = await get_db()
+        try:
+            result = await mam_scan_batch(
+                db, session_id=s["mam_session_id"], limit=100,
+                delay=s.get("rate_mam", 2),
+                skip_ip_update=s.get("mam_skip_ip_update", False),
+                format_priority=s.get("mam_format_priority"),
+            )
+            import time as _t
+            await db.execute(
+                "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
+                ("mam", _t.time(), _t.time(),
+                 "complete" if not result.get("error") else "error",
+                 result.get("scanned", 0), result.get("found", 0))
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+    _mam_scan_task = asyncio.create_task(_do_scan())
+    return {"status": "started", "message": "MAM scan started (100 books)"}
+
+
+@app.post("/api/mam/full-scan")
+async def mam_full_scan_start():
+    """Start a full MAM library scan (250 books/batch, 1hr between batches)."""
+    global _mam_full_scan_task
+    s = load_settings()
+    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+        return {"error": "MAM not configured or not enabled"}
+    if _mam_full_scan_task and not _mam_full_scan_task.done():
+        return {"error": "A full MAM scan is already running"}
+
+    db = await get_db()
+    try:
+        start_result = await mam_start_full_scan(db)
+        if "error" in start_result:
+            return start_result
+    finally:
+        await db.close()
+
+    async def _full_scan_loop():
+        while True:
+            db = await get_db()
+            try:
+                cs = load_settings()
+                result = await mam_run_full_scan_batch(
+                    db, session_id=cs["mam_session_id"],
+                    skip_ip_update=cs.get("mam_skip_ip_update", False),
+                    delay=cs.get("rate_mam", 2),
+                    format_priority=cs.get("mam_format_priority"),
+                )
+            finally:
+                await db.close()
+            if result["status"] in ("scan_complete", "error", "no_scan"):
+                break
+            elif result["status"] == "batch_complete":
+                wait = result.get("next_batch_in_seconds", 3600)
+                logger.info(f"Full MAM scan: batch done, waiting {wait}s")
+                await asyncio.sleep(wait)
+
+    _mam_full_scan_task = asyncio.create_task(_full_scan_loop())
+    return {"status": "started", "scan_id": start_result["id"],
+            "total_books": start_result["total_books"]}
+
+
+@app.get("/api/mam/full-scan/status")
+async def mam_full_scan_status():
+    """Get progress of the current/most recent full MAM scan."""
+    db = await get_db()
+    try:
+        return await mam_get_full_scan_status(db)
+    finally:
+        await db.close()
+
+
+@app.post("/api/mam/full-scan/cancel")
+async def mam_full_scan_cancel():
+    """Cancel a running full MAM scan."""
+    global _mam_full_scan_task
+    db = await get_db()
+    try:
+        result = await mam_cancel_full_scan(db)
+    finally:
+        await db.close()
+    if _mam_full_scan_task and not _mam_full_scan_task.done():
+        _mam_full_scan_task.cancel()
+    return result
+
+
+@app.post("/api/mam/toggle")
+async def mam_toggle():
+    """Toggle MAM features on/off (only works if session ID exists)."""
+    s = load_settings()
+    if not s.get("mam_session_id"):
+        return {"error": "No MAM session ID configured"}
+    s["mam_enabled"] = not s.get("mam_enabled", False)
+    save_settings(s)
+    return {"enabled": s["mam_enabled"]}
+
+
+@app.get("/api/mam/books")
+async def mam_books_endpoint(section: str = "upload", search: str = "",
+                              sort: str = "title", page: int = 1, per_page: int = 50):
+    """Get books for the MAM page, filtered by section."""
+    db = await get_db()
+    try:
+        if section == "upload":
+            where = "b.owned=1 AND b.mam_status='not_found' AND b.hidden=0"
+        elif section == "download":
+            where = "b.owned=0 AND b.mam_status IN ('found','possible') AND b.is_unreleased=0 AND b.hidden=0"
+        elif section == "missing_everywhere":
+            where = "b.owned=0 AND b.mam_status='not_found' AND b.is_unreleased=0 AND b.hidden=0"
+        else:
+            return {"error": f"Unknown section: {section}"}
+
+        params = []
+        if search:
+            where += " AND (b.title LIKE ? OR a.name LIKE ?)"
+            params.extend([f"%{search}%", f"%{search}%"])
+
+        sort_map = {"title": "b.title ASC", "author": "a.name ASC",
+                    "date": "b.pub_date DESC", "series": "s.name ASC, b.series_index ASC"}
+        order = sort_map.get(sort, "b.title ASC")
+
+        count_sql = f"SELECT COUNT(*) FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {where}"
+        count_row = await db.execute_fetchall(count_sql, params)
+        total = count_row[0][0] if count_row else 0
+
+        offset = (page - 1) * per_page
+        data_sql = f"""SELECT b.id, b.title, a.name, a.id, s.name, b.series_index,
+            b.pub_date, b.cover_url, b.cover_path, b.owned, b.mam_url, b.mam_status,
+            b.mam_formats, b.mam_torrent_id, b.mam_has_multiple,
+            b.source_url, b.calibre_id
+            FROM books b JOIN authors a ON b.author_id=a.id
+            LEFT JOIN series s ON b.series_id=s.id
+            WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?"""
+        rows = await db.execute_fetchall(data_sql, params + [per_page, offset])
+
+        import json as _json
+        books = [{"id": r[0], "title": r[1], "author_name": r[2], "author_id": r[3],
+                  "series_name": r[4], "series_index": r[5], "pub_date": r[6],
+                  "cover_url": r[7], "cover_path": r[8], "owned": bool(r[9]),
+                  "mam_url": r[10], "mam_status": r[11], "mam_formats": r[12],
+                  "mam_torrent_id": r[13], "mam_has_multiple": bool(r[14]),
+                  "source_url": _json.loads(r[15]) if r[15] else {},
+                  "calibre_id": r[16]} for r in rows]
+
+        return {"books": books, "total": total, "page": page, "per_page": per_page,
+                "total_pages": (total + per_page - 1) // per_page}
+    finally:
+        await db.close()
+
+
+@app.post("/api/mam/reset")
+async def mam_reset_scans():
+    """Reset all MAM scan data — clears all mam_* fields on all books."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE books SET mam_url=NULL, mam_status=NULL, mam_formats=NULL, "
+            "mam_torrent_id=NULL, mam_has_multiple=0"
+        )
+        await db.execute("DELETE FROM mam_scan_log")
+        await db.commit()
+        return {"status": "ok", "message": "All MAM scan data cleared"}
+    finally:
+        await db.close()
 
 # ─── Covers ──────────────────────────────────────────────────
 @app.get("/api/covers/{bid}")

@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS books (
     tags TEXT,
     publisher TEXT,
     formats TEXT,
+    mam_url TEXT,
+    mam_status TEXT,
+    mam_formats TEXT,
+    mam_torrent_id TEXT,
+    mam_has_multiple INTEGER NOT NULL DEFAULT 0,
     source_url TEXT,
     first_seen_at REAL NOT NULL DEFAULT (strftime('%s','now')),
     created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
@@ -87,12 +92,23 @@ CREATE TABLE IF NOT EXISTS sync_log (
     error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS mam_scan_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    total_books INTEGER NOT NULL DEFAULT 0,
+    last_offset INTEGER NOT NULL DEFAULT 0,
+    batch_size INTEGER NOT NULL DEFAULT 250,
+    started_at REAL NOT NULL,
+    finished_at REAL,
+    status TEXT NOT NULL DEFAULT 'running'
+);
+
 CREATE INDEX IF NOT EXISTS idx_books_author ON books(author_id);
 CREATE INDEX IF NOT EXISTS idx_books_series ON books(series_id);
 CREATE INDEX IF NOT EXISTS idx_books_owned ON books(owned);
 CREATE INDEX IF NOT EXISTS idx_books_new ON books(is_new);
 CREATE INDEX IF NOT EXISTS idx_books_hidden ON books(hidden);
 CREATE INDEX IF NOT EXISTS idx_authors_name ON authors(name);
+CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status);
 """
 
 # Migrations for existing databases
@@ -115,6 +131,12 @@ MIGRATIONS = [
     "ALTER TABLE books ADD COLUMN formats TEXT",
     "ALTER TABLE books ADD COLUMN source_url TEXT",
     "CREATE INDEX IF NOT EXISTS idx_books_hidden ON books(hidden)",
+    "ALTER TABLE books ADD COLUMN mam_url TEXT",
+    "ALTER TABLE books ADD COLUMN mam_status TEXT",
+    "ALTER TABLE books ADD COLUMN mam_formats TEXT",
+    "ALTER TABLE books ADD COLUMN mam_torrent_id TEXT",
+    "ALTER TABLE books ADD COLUMN mam_has_multiple INTEGER NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status)",
 ]
 
 

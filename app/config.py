@@ -6,6 +6,9 @@ CALIBRE_DB_PATH = os.getenv("CALIBRE_DB_PATH", "/calibre/metadata.db")
 CALIBRE_LIBRARY_PATH = os.getenv("CALIBRE_LIBRARY_PATH", "/calibre")
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
 LOOKUP_INTERVAL_MINUTES = int(os.getenv("LOOKUP_INTERVAL_MINUTES", "4320"))
+MAM_SESSION_ID = os.getenv("MAM_SESSION_ID", "")
+MAM_SKIP_IP_UPDATE = os.getenv("MAM_SKIP_IP_UPDATE", "false").lower() == "true"
+MAM_SCAN_INTERVAL_MINUTES = int(os.getenv("MAM_SCAN_INTERVAL_MINUTES", "360"))
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 APP_DB_PATH = DATA_DIR / "athenascout.db"
 SETTINGS_PATH = DATA_DIR / "settings.json"
@@ -53,6 +56,12 @@ DEFAULT_SETTINGS = {
     "verbose_logging": False,
     "calibre_web_url": "",
     "calibre_url": "",
+    "mam_session_id": "",
+    "mam_enabled": False,
+    "mam_skip_ip_update": False,
+    "mam_scan_interval_minutes": 360,
+    "mam_format_priority": ["epub", "azw3", "mobi", "kfx", "pdf", "html"],
+    "rate_mam": 2,
 }
 
 
@@ -62,7 +71,7 @@ def apply_logging(verbose: bool = False):
     level = logging.DEBUG if verbose else logging.INFO
     # Set source loggers
     for name in ["athenascout", "athenascout.goodreads", "athenascout.hardcover", "athenascout.fantasticfiction",
-                 "athenascout.kobo", "athenascout.lookup", "athenascout.calibre_sync"]:
+                 "athenascout.kobo", "athenascout.lookup", "athenascout.calibre_sync", "athenascout.mam"]:
         logging.getLogger(name).setLevel(level)
     # Keep httpx at INFO always (too noisy at DEBUG)
     logging.getLogger("httpx").setLevel(logging.INFO)
@@ -104,6 +113,10 @@ def _apply_env_overrides(settings: dict):
         settings["calibre_url"] = ENV_CALIBRE_URL
     if ENV_VERBOSE_LOGGING and not settings.get("verbose_logging"):
         settings["verbose_logging"] = True
+    if MAM_SESSION_ID and not settings.get("mam_session_id"):
+        settings["mam_session_id"] = MAM_SESSION_ID
+    if MAM_SKIP_IP_UPDATE and not settings.get("mam_skip_ip_update"):
+        settings["mam_skip_ip_update"] = True
 
 
 def save_settings(settings: dict):
