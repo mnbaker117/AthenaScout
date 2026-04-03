@@ -840,6 +840,60 @@ async def trigger_author_full_rescan(aid: int):
     return {"status": "ok", "new_books": await lookup_author(aid, dict(r)["name"], full_scan=True)}
 
 # ─── MAM Integration ─────────────────────────────────────────
+@app.get("/api/mam/test-requests")
+async def mam_test_requests():
+    """Temporary diagnostic: test MAM search using requests library."""
+    import requests as req
+    s = load_settings()
+    token = s.get("mam_session_id", "")
+    if not token:
+        return {"error": "No session ID"}
+
+    session = req.Session()
+    session.headers.update({
+        "Content-Type": "application/json",
+        "User-Agent": "mam-calibre-check/1.2",
+    })
+    for domain in ("www.myanonamouse.net", "t.myanonamouse.net"):
+        for name in ("mam_id", "mbsc"):
+            session.cookies.set(name, token, domain=domain, path="/")
+
+    # Test 1: IP registration
+    try:
+        ip_resp = session.get("https://t.myanonamouse.net/json/dynamicSeedbox.php", timeout=15)
+        ip_result = {"status": ip_resp.status_code, "body": ip_resp.text[:200]}
+    except Exception as e:
+        ip_result = {"error": str(e)}
+
+    # Test 2: Search
+    payload = {
+        "tor": {
+            "text": "Kirk Mason A Tale of Tail Brushing",
+            "srchIn": {"author": "true", "title": "true"},
+            "searchType": "active",
+            "searchIn": "torrents",
+            "main_cat": ["14"],
+            "sortType": "default",
+            "startNumber": "0",
+        },
+        "perpage": 5,
+    }
+    try:
+        search_resp = session.post(
+            "https://www.myanonamouse.net/tor/js/loadSearchJSONbasic.php",
+            json=payload, timeout=20
+        )
+        search_result = {
+            "status": search_resp.status_code,
+            "body_len": len(search_resp.text),
+            "body_preview": search_resp.text[:300],
+        }
+    except Exception as e:
+        search_result = {"error": str(e)}
+
+    return {"ip_test": ip_result, "search_test": search_result}
+
+
 @app.post("/api/mam/validate")
 async def mam_validate_endpoint():
     """Test MAM session ID — runs IP registration + search auth."""
