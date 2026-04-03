@@ -436,8 +436,14 @@ async def _mam_search(
         ) as resp:
             if resp.status in (401, 403):
                 raise _AuthError(f"HTTP {resp.status}")
-            resp.raise_for_status()
-            return await resp.json(content_type=None)
+            raw = await resp.text()
+            cookie_sent = str(resp.request_info.headers.get('Cookie', 'NOT FOUND'))
+            logger.debug(f"  HTTP {resp.status} | body_len={len(raw)} | cookie_sent={cookie_sent[:40]}...")
+            logger.debug(f"  Body: {raw[:300]}")
+            if not raw or len(raw) < 3:
+                return None
+            import json as _json
+            return _json.loads(raw)
     except _AuthError:
         raise
     except Exception as e:
