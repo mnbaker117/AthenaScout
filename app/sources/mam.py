@@ -285,11 +285,11 @@ def _pick_best_result(
 # ---------------------------------------------------------------------------
 
 def _build_headers(token: str) -> dict:
-    """Build headers with cookies set directly — bypasses aiohttp cookie jar quirks."""
+    """Build headers for MAM API requests. Uses curl User-Agent to pass TLS fingerprinting."""
     return {
         "Content-Type": "application/json",
         "User-Agent": "curl/8.0",
-        "Cookie": f"mam_id={token}; mbsc={token}",
+        "Cookie": f"mam_id={token}",
     }
 
 
@@ -302,27 +302,32 @@ async def register_ip(session_id: str, skip_ip_update: bool = False) -> dict:
         return {"success": True, "message": "Skipped IP registration (ASN-locked session)"}
 
     logger.info("Registering server IP with MAM...")
-    try:
-        async with aiohttp.ClientSession(
-            headers=_build_headers(session_id),
-            cookie_jar=aiohttp.DummyCookieJar(),
-        ) as session:
-            async with session.get(MAM_DYNIP_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                body = (await resp.text()).strip()
-                logger.debug(f"IP registration response: {body}")
 
-                if "Completed" in body or "No Change" in body:
-                    logger.info("IP registration OK")
-                    return {"success": True, "message": body}
-                elif "No Session Cookie" in body:
-                    return {"success": False, "message": "Token not recognised by MAM"}
-                elif "Incorrect session type" in body:
-                    logger.warning("ASN-locked session — IP registration skipped")
-                    return {"success": True, "message": "ASN-locked session — IP registration not needed"}
-                elif "<html" in body.lower():
-                    return {"success": False, "message": "Got HTML login page — token wrong or expired"}
-                else:
-                    return {"success": False, "message": f"Unexpected response: {body[:200]}"}
+    def _do_request():
+        import requests
+        return requests.get(
+            MAM_DYNIP_URL,
+            headers=_build_headers(session_id),
+            timeout=15
+        )
+
+    try:
+        resp = await asyncio.to_thread(_do_request)
+        body = resp.text.strip()
+        logger.debug(f"IP registration response: {body}")
+
+        if "Completed" in body or "No Change" in body:
+            logger.info("IP registration OK")
+            return {"success": True, "message": body}
+        elif "No Session Cookie" in body:
+            return {"success": False, "message": "Token not recognised by MAM"}
+        elif "Incorrect session type" in body:
+            logger.warning("ASN-locked session — IP registration skipped")
+            return {"success": True, "message": "ASN-locked session — IP registration not needed"}
+        elif "<html" in body.lower():
+            return {"success": False, "message": "Got HTML login page — token wrong or expired"}
+        else:
+            return {"success": False, "message": f"Unexpected response: {body[:200]}"}
     except asyncio.TimeoutError:
         return {"success": False, "message": "Timeout connecting to MAM"}
     except Exception as e:
@@ -332,12 +337,13 @@ async def register_ip(session_id: str, skip_ip_update: bool = False) -> dict:
 async def verify_search_auth(session_id: str) -> dict:
     """Verify MAM search API access with a test query."""
     logger.info("Verifying MAM search API access...")
-    try:
-        async with aiohttp.ClientSession(
+
+    def _do_request():
+        import requests
+        return requests.post(
+            MAM_SEARCH_URL,
             headers=_build_headers(session_id),
-            cookie_jar=aiohttp.DummyCookieJar(),
-        ) as session:
-            payload = {
+            data=json.dumps({
                 "tor": {
                     "text": "test",
                     "srchIn": {"title": "true"},
@@ -347,21 +353,22 @@ async def verify_search_auth(session_id: str) -> dict:
                     "startNumber": "0",
                 },
                 "perpage": 5,
-            }
-            async with session.post(
-                MAM_SEARCH_URL, json=payload,
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status == 200:
-                    logger.info("MAM search auth OK")
-                    return {"success": True, "message": "Connection successful"}
-                elif resp.status == 403:
-                    return {"success": False,
-                            "message": "HTTP 403 — session rejected. Check token is valid for this server's IP/ASN."}
-                else:
-                    return {"success": False, "message": f"Unexpected HTTP {resp.status}"}
-    except asyncio.TimeoutError:
-        return {"success": False, "message": "Timeout connecting to MAM search API"}
+            }),
+            timeout=15,
+        )
+
+    try:
+        resp = await asyncio.to_thread(_do_request)
+        if resp.status_code == 200 and len(resp.text) > 0:
+            logger.info("MAM search auth OK")
+            return {"success": True, "message": "Connection successful"}
+        elif resp.status_code == 200 and len(resp.text) == 0:
+            return {"success": False, "message": "HTTP 200 but empty response — token may be invalid or expired"}
+        elif resp.status_code == 403:
+            return {"success": False,
+                    "message": "HTTP 403 — session rejected. Check token is valid for this server's IP/ASN."}
+        else:
+            return {"success": False, "message": f"Unexpected HTTP {resp.status_code}"}
     except Exception as e:
         return {"success": False, "message": f"Network error: {str(e)}"}
 
@@ -393,13 +400,15 @@ class _AuthError(Exception):
 
 
 async def _mam_search(
-    session: aiohttp.ClientSession,
+    token: str,
     authors: Optional[str],
     title: str,
     perpage: int = RESULTS_PER_PAGE,
 ) -> Optional[dict]:
     """
-    POST a search to MAM. Pass authors=None for title-only search (pass 5).
+    Search MAM using requests library (via asyncio.to_thread).
+    Uses curl User-Agent to pass MAM's TLS fingerprinting.
+    Pass authors=None for title-only search (pass 5).
     Returns parsed JSON response or None on error.
     Raises _AuthError on 401/403.
     """
@@ -408,7 +417,7 @@ async def _mam_search(
     else:
         query = _build_query(authors, title)
 
-    payload = {
+    payload = json.dumps({
         "tor": {
             "text": query,
             "srchIn": {
@@ -429,16 +438,25 @@ async def _mam_search(
             "startNumber": "0",
         },
         "perpage": perpage,
-    }
+    })
+
+    def _do_request():
+        import requests
+        return requests.post(
+            MAM_SEARCH_URL,
+            headers=_build_headers(token),
+            data=payload,
+            timeout=20,
+        )
+
     try:
-        async with session.post(
-            MAM_SEARCH_URL, data=json.dumps(payload),
-            timeout=aiohttp.ClientTimeout(total=20)
-        ) as resp:
-            if resp.status in (401, 403):
-                raise _AuthError(f"HTTP {resp.status}")
-            resp.raise_for_status()
-            return await resp.json(content_type=None)
+        resp = await asyncio.to_thread(_do_request)
+        if resp.status_code in (401, 403):
+            raise _AuthError(f"HTTP {resp.status_code}")
+        resp.raise_for_status()
+        if not resp.text or len(resp.text) == 0:
+            return None
+        return resp.json()
     except _AuthError:
         raise
     except Exception as e:
@@ -504,7 +522,7 @@ def _evaluate_results(
 # ---------------------------------------------------------------------------
 
 async def check_book(
-    session: aiohttp.ClientSession,
+    token: str,
     title: str,
     authors: str,
     format_priority: list[str] = None,
@@ -603,7 +621,7 @@ async def check_book(
 
     try:
         # --- Pass 1: author + full title ---
-        r = await _mam_search(session, authors, title)
+        r = await _mam_search(token, authors, title)
         await asyncio.sleep(delay)
         result["passes_tried"].append(1)
         if _try_evaluate(1, r, title):
@@ -612,7 +630,7 @@ async def check_book(
         # --- Pass 2: author + core title (volume prefix stripped) ---
         core = _extract_core_title(title)
         if core:
-            r = await _mam_search(session, authors, core)
+            r = await _mam_search(token, authors, core)
             await asyncio.sleep(delay)
             if _try_evaluate(2, r, core):
                 return result
@@ -620,7 +638,7 @@ async def check_book(
         # --- Pass 3: author + subtitle right (part after colon) ---
         sub_right = _extract_subtitle_part(title)
         if sub_right and sub_right != core:
-            r = await _mam_search(session, authors, sub_right)
+            r = await _mam_search(token, authors, sub_right)
             await asyncio.sleep(delay)
             if _try_evaluate(3, r, sub_right):
                 return result
@@ -628,14 +646,14 @@ async def check_book(
         # --- Pass 4: author + short title (part before colon) ---
         short = _strip_subtitle(title)
         if short and short != title and short != core:
-            r = await _mam_search(session, authors, short)
+            r = await _mam_search(token, authors, short)
             await asyncio.sleep(delay)
             if _try_evaluate(4, r, short):
                 return result
 
         # --- Pass 5: title only (no author), loose cleaning ---
         title_only = core or sub_right or short or title
-        r = await _mam_search(session, None, title_only)
+        r = await _mam_search(token, None, title_only)
         await asyncio.sleep(delay)
         if _try_evaluate(5, r, title_only):
             return result
@@ -706,49 +724,45 @@ async def scan_books_batch(
     logger.info(f"MAM scan: processing {len(rows)} books (limit={limit})")
     stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0, "error": None}
 
-    async with aiohttp.ClientSession(
-        headers=_build_headers(session_id),
-        cookie_jar=aiohttp.DummyCookieJar(),
-    ) as session:
-        for i, row in enumerate(rows):
-            book_id, book_title, author_name = row[0], row[1], row[2]
+    for i, row in enumerate(rows):
+        book_id, book_title, author_name = row[0], row[1], row[2]
 
-            logger.debug(f"MAM [{i+1}/{len(rows)}] {book_title[:65]} — {author_name[:35]}")
+        logger.debug(f"MAM [{i+1}/{len(rows)}] {book_title[:65]} — {author_name[:35]}")
 
-            check = await check_book(session, book_title, author_name, format_priority, delay)
-            stats["scanned"] += 1
+        check = await check_book(session_id, book_title, author_name, format_priority, delay)
+        stats["scanned"] += 1
 
-            # Write result to DB
-            await db.execute("""
-                UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
-                       mam_torrent_id=?, mam_has_multiple=?
-                WHERE id=?
-            """, (
-                check["mam_url"],
-                check["status"],
-                check["mam_formats"],
-                check["mam_torrent_id"],
-                1 if check["mam_has_multiple"] else 0,
-                book_id,
-            ))
+        # Write result to DB
+        await db.execute("""
+            UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
+                   mam_torrent_id=?, mam_has_multiple=?
+            WHERE id=?
+        """, (
+            check["mam_url"],
+            check["status"],
+            check["mam_formats"],
+            check["mam_torrent_id"],
+            1 if check["mam_has_multiple"] else 0,
+            book_id,
+        ))
 
-            if check["status"] == STATUS_FOUND:
-                stats["found"] += 1
-            elif check["status"] == STATUS_POSSIBLE:
-                stats["possible"] += 1
-            elif check["status"] == STATUS_AUTH_ERROR:
-                stats["errors"] += 1
-                stats["error"] = check.get("error", "Auth error")
-                logger.error(f"MAM auth error — stopping scan: {check.get('error')}")
-                await db.commit()
-                return stats
-            elif check["status"] == STATUS_ERROR:
-                stats["errors"] += 1
-            else:
-                stats["not_found"] += 1
+        if check["status"] == STATUS_FOUND:
+            stats["found"] += 1
+        elif check["status"] == STATUS_POSSIBLE:
+            stats["possible"] += 1
+        elif check["status"] == STATUS_AUTH_ERROR:
+            stats["errors"] += 1
+            stats["error"] = check.get("error", "Auth error")
+            logger.error(f"MAM auth error — stopping scan: {check.get('error')}")
+            await db.commit()
+            return stats
+        elif check["status"] == STATUS_ERROR:
+            stats["errors"] += 1
+        else:
+            stats["not_found"] += 1
 
-            if (i + 1) % 10 == 0:
-                await db.commit()
+        if (i + 1) % 10 == 0:
+            await db.commit()
 
     await db.commit()
     logger.info(f"MAM scan complete: {stats}")
@@ -841,39 +855,35 @@ async def run_full_scan_batch(
     logger.info(f"Full scan batch: {len(book_rows)} books (scan_id={scan_id})")
     scanned = 0
 
-    async with aiohttp.ClientSession(
-        headers=_build_headers(session_id),
-        cookie_jar=aiohttp.DummyCookieJar(),
-    ) as session:
-        for i, row in enumerate(book_rows):
-            book_id, book_title, author_name = row
+    for i, row in enumerate(book_rows):
+        book_id, book_title, author_name = row
 
-            check = await check_book(session, book_title, author_name, format_priority, delay)
-            scanned += 1
+        check = await check_book(session_id, book_title, author_name, format_priority, delay)
+        scanned += 1
 
-            await db.execute("""
-                UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
-                       mam_torrent_id=?, mam_has_multiple=?
-                WHERE id=?
-            """, (
-                check["mam_url"], check["status"], check["mam_formats"],
-                check["mam_torrent_id"], 1 if check["mam_has_multiple"] else 0,
-                book_id,
-            ))
+        await db.execute("""
+            UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
+                   mam_torrent_id=?, mam_has_multiple=?
+            WHERE id=?
+        """, (
+            check["mam_url"], check["status"], check["mam_formats"],
+            check["mam_torrent_id"], 1 if check["mam_has_multiple"] else 0,
+            book_id,
+        ))
 
-            if check["status"] == STATUS_AUTH_ERROR:
-                logger.error(f"Full scan auth error — pausing")
-                await db.execute(
-                    "UPDATE mam_scan_log SET last_offset=last_offset+?, status='auth_error' WHERE id=?",
-                    (scanned, scan_id)
-                )
-                await db.commit()
-                return {"status": "error", "scanned": scanned,
-                        "remaining": total_books - last_offset - scanned,
-                        "next_batch_in_seconds": None, "error": check.get("error")}
+        if check["status"] == STATUS_AUTH_ERROR:
+            logger.error(f"Full scan auth error — pausing")
+            await db.execute(
+                "UPDATE mam_scan_log SET last_offset=last_offset+?, status='auth_error' WHERE id=?",
+                (scanned, scan_id)
+            )
+            await db.commit()
+            return {"status": "error", "scanned": scanned,
+                    "remaining": total_books - last_offset - scanned,
+                    "next_batch_in_seconds": None, "error": check.get("error")}
 
-            if (i + 1) % 10 == 0:
-                await db.commit()
+        if (i + 1) % 10 == 0:
+            await db.commit()
 
     # Update progress
     new_offset = last_offset + scanned
