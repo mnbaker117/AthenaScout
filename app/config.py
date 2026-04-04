@@ -7,7 +7,7 @@ CALIBRE_LIBRARY_PATH = os.getenv("CALIBRE_LIBRARY_PATH", "/calibre")
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
 LOOKUP_INTERVAL_MINUTES = int(os.getenv("LOOKUP_INTERVAL_MINUTES", "4320"))
 MAM_SESSION_ID = os.getenv("MAM_SESSION_ID", "")
-MAM_SKIP_IP_UPDATE = os.getenv("MAM_SKIP_IP_UPDATE", "false").lower() == "true"
+# MAM_SKIP_IP_UPDATE removed — always True (IP registration skipped)
 MAM_SCAN_INTERVAL_MINUTES = int(os.getenv("MAM_SCAN_INTERVAL_MINUTES", "360"))
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 APP_DB_PATH = DATA_DIR / "athenascout.db"
@@ -58,9 +58,9 @@ DEFAULT_SETTINGS = {
     "calibre_url": "",
     "mam_session_id": "",
     "mam_enabled": False,
-    "mam_skip_ip_update": False,
+    "mam_skip_ip_update": True,
     "mam_scan_interval_minutes": 360,
-    "mam_format_priority": ["epub", "azw3", "mobi", "kfx", "pdf", "html"],
+    "mam_format_priority": ["epub", "azw", "azw3", "pdf", "djvu", "azw4"],
     "rate_mam": 2,
 }
 
@@ -115,8 +115,8 @@ def _apply_env_overrides(settings: dict):
         settings["verbose_logging"] = True
     if MAM_SESSION_ID and not settings.get("mam_session_id"):
         settings["mam_session_id"] = MAM_SESSION_ID
-    if MAM_SKIP_IP_UPDATE and not settings.get("mam_skip_ip_update"):
-        settings["mam_skip_ip_update"] = True
+    # mam_skip_ip_update is always True — IP registration can
+    # interfere with seedbox sessions regardless of lock type
 
 
 def save_settings(settings: dict):
