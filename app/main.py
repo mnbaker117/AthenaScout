@@ -66,14 +66,40 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(60)
                 continue
             await asyncio.sleep(interval * 60)
+            # Re-read settings (may have changed during sleep)
+            s = load_settings()
+            if not s.get("mam_enabled") or not s.get("mam_session_id"):
+                continue
+            # Daily validation check — run if 24+ hours since last validation
+            last_val = s.get("last_mam_validated_at") or 0
+            if time.time() - last_val > 86400:
+                logger.info("MAM daily validation check...")
+                vr = await mam_validate(s["mam_session_id"], True)
+                s["last_mam_validated_at"] = time.time()
+                s["mam_validation_ok"] = vr["success"]
+                save_settings(s)
+                if not vr["success"]:
+                    logger.error(f"MAM validation failed — skipping scan: {vr['message']}")
+                    continue
+            # Run scheduled scan
             db = await get_db()
             try:
-                await mam_scan_batch(
-                    db, session_id=s["mam_session_id"], limit=100,
+                result = await mam_scan_batch(
+                    db, session_id=s["mam_session_id"],
+                    limit=s.get("mam_books_per_scan", 100),
                     delay=s.get("rate_mam", 2),
-                    skip_ip_update=s.get("mam_skip_ip_update", False),
+                    skip_ip_update=True,
                     format_priority=s.get("mam_format_priority"),
                 )
+                import time as _t
+                await db.execute(
+                    "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
+                    ("mam", _t.time(), _t.time(),
+                     "complete" if not result.get("error") else "error",
+                     result.get("scanned", 0), result.get("found", 0))
+                )
+                await db.commit()
+                logger.info(f"MAM scheduled scan: {result.get('scanned', 0)} books, {result.get('found', 0)} found")
             except Exception as e:
                 logger.error(f"MAM scheduled scan error: {e}")
             finally:
@@ -147,7 +173,7 @@ async def get_stats():
         mam_stats = None
         if s.get("mam_enabled") and s.get("mam_session_id"):
             mam_stats = await get_mam_stats(db)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats}
+        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False)}
     finally: await db.close()
 
 # ─── Authors ─────────────────────────────────────────────────
@@ -864,6 +890,10 @@ async def mam_validate_endpoint():
     if result["success"]:
         s["mam_enabled"] = True
         s["last_mam_validated_at"] = time.time()
+        s["mam_validation_ok"] = True
+        save_settings(s)
+    else:
+        s["mam_validation_ok"] = False
         save_settings(s)
     return result
 
@@ -879,7 +909,9 @@ async def mam_status_endpoint():
     try:
         stats = await get_mam_stats(db)
         scan_status = await mam_get_full_scan_status(db)
-        return {"enabled": True, "stats": stats, "full_scan": scan_status}
+        return {"enabled": True, "stats": stats, "full_scan": scan_status,
+                "validation_ok": s.get("mam_validation_ok", True),
+                "last_validated_at": s.get("last_mam_validated_at")}
     finally:
         await db.close()
 
@@ -898,9 +930,10 @@ async def mam_scan_endpoint():
         db = await get_db()
         try:
             result = await mam_scan_batch(
-                db, session_id=s["mam_session_id"], limit=100,
+                db, session_id=s["mam_session_id"],
+                limit=s.get("mam_books_per_scan", 100),
                 delay=s.get("rate_mam", 2),
-                skip_ip_update=s.get("mam_skip_ip_update", False),
+                skip_ip_update=True,
                 format_priority=s.get("mam_format_priority"),
             )
             import time as _t
@@ -964,7 +997,7 @@ async def mam_full_scan_start():
                 cs = load_settings()
                 result = await mam_run_full_scan_batch(
                     db, session_id=cs["mam_session_id"],
-                    skip_ip_update=cs.get("mam_skip_ip_update", False),
+                    skip_ip_update=True,
                     delay=cs.get("rate_mam", 2),
                     format_priority=cs.get("mam_format_priority"),
                 )
@@ -973,7 +1006,7 @@ async def mam_full_scan_start():
             if result["status"] in ("scan_complete", "error", "no_scan"):
                 break
             elif result["status"] == "batch_complete":
-                wait = result.get("next_batch_in_seconds", 3600)
+                wait = cs.get("mam_full_scan_batch_delay_minutes", 60) * 60
                 logger.info(f"Full MAM scan: batch done, waiting {wait}s")
                 await asyncio.sleep(wait)
 

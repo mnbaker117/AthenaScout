@@ -130,7 +130,7 @@ return<Section title={header} count={countStr} ownedCount={series.owned_count} t
 function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
 
 // ─── Dashboard ──────────────────────────────────────────────
-function Dash({onNav}){const t=T();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[sc,setSc]=useState(false);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);if(!d)return<Load/>;
+function Dash({onNav}){const t=T();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[sc,setSc]=useState(false);const[ms,setMs]=useState(false);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);if(!d)return<Load/>;
 const p=pct(d.owned_books,d.total_books);
 return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 
@@ -164,6 +164,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <Btn variant="accent" onClick={async()=>{setSy(true);try{await api.post("/sync/calibre")}catch{}setSy(false);api.get("/stats").then(setD)}} disabled={sy}>{sy?<Spin/>:Ic.sync} Sync Library</Btn>
 <Btn onClick={async()=>{setSc(true);try{await api.post("/sync/lookup")}catch{}setSc(false);api.get("/stats").then(setD)}} disabled={sc}>{sc?<Spin/>:Ic.search} Scan Sources</Btn>
 <Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;setSc(true);try{await api.post("/sync/full-rescan")}catch{}setSc(false);api.get("/stats").then(setD)}} disabled={sc}>{sc?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
+{d.mam_enabled?<Btn onClick={async()=>{setMs(true);try{await api.post("/mam/scan")}catch{}setMs(false)}} disabled={ms}>{ms?<Spin/>:Ic.search} MAM Scan</Btn>:null}
 </div>
 <div style={{display:"flex",gap:16,marginTop:12,fontSize:12,color:t.tg}}>
 <span>Last sync: {timeAgo(d.last_calibre_sync?.finished_at)}</span>
@@ -519,6 +520,8 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 {/* ── Scan Settings ── */}
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px",marginTop:8}}>Scan Settings</div>
 
+<SF label="MAM scan interval (minutes)" desc="How often automatic MAM scans run. Default 360 (6 hours). Set to 0 to disable."><input {...numP("mam_scan_interval_minutes",360)}/></SF>
+
 <SF label="Books per scheduled scan" desc="How many books to check per automatic scan cycle"><input {...numP("mam_books_per_scan",100,1)}/></SF>
 
 <SF label="Full scan batch delay (minutes)" desc="Wait time between batches during a full library scan"><input {...numP("mam_full_scan_batch_delay_minutes",60,10)}/></SF>
@@ -576,7 +579,9 @@ export default function App(){
   const[pg,setPg]=usePersist("page","dashboard");
   const[pa,setPa]=usePersist("page_arg",null);
   const[tn,setTn]=useState(()=>{try{return localStorage.getItem("cl_theme")||"dark"}catch{return"dark"}});
-  const[showAdd,setShowAdd]=useState(null); // null, "manual", "url", "choose"
+  const[showAdd,setShowAdd]=useState(null);
+const[mamWarn,setMamWarn]=useState(false);
+useEffect(()=>{api.get("/mam/status").then(r=>{if(r.enabled&&r.validation_ok===false)setMamWarn(true)}).catch(()=>{})},[]); // null, "manual", "url", "choose"
   const theme=THEMES[tn]||THEMES.dark;
   const nav=(p,a=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
   useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);
@@ -641,6 +646,9 @@ input,select{font-family:inherit}
 <button onClick={nextT} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:"transparent",color:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title={`Theme: ${theme.name}`}>{tn==="dark"?Ic.moon:tn==="light"?Ic.sun:Ic.cloudsun}</button>
 <button onClick={()=>nav("settings")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="settings"?theme.bg4:"transparent",color:pg==="settings"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Settings">{Ic.gear}</button>
 </div></div></nav>
+
+{/* MAM Validation Warning Banner */}
+{mamWarn?<div style={{maxWidth:1120,margin:"12px auto 0",padding:"10px 16px",background:theme.ylw+"18",border:`1px solid ${theme.ylw}44`,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,fontSize:13}}><span style={{color:theme.ylwt}}>⚠ MAM session may have expired — scans are paused. <button onClick={()=>nav("settings")} style={{background:"none",border:"none",color:theme.accent,cursor:"pointer",fontWeight:600,fontSize:13,padding:0,textDecoration:"underline"}}>Go to Settings</button> to update your token and re-validate.</span><button onClick={()=>setMamWarn(false)} style={{background:"none",border:"none",color:theme.tg,cursor:"pointer",fontSize:16,padding:"0 4px",flexShrink:0}}>✕</button></div>:null}
 
 {/* ── Main Content ── */}
 <main className="main-content" style={{maxWidth:1120,margin:"0 auto",padding:"28px 20px"}}>

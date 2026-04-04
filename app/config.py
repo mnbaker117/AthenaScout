@@ -65,6 +65,7 @@ DEFAULT_SETTINGS = {
     "mam_books_per_scan": 100,
     "mam_full_scan_batch_delay_minutes": 60,
     "last_mam_validated_at": None,
+    "mam_validation_ok": True,
 }
 
 
