@@ -113,6 +113,17 @@ async def update_settings(body: dict = Body(...)):
     apply_logging(cur.get("verbose_logging", False))
     return {"status": "ok"}
 
+@app.post("/api/settings/reset")
+async def reset_settings():
+    """Reset all settings to defaults. Env var overrides still apply."""
+    from app.config import DEFAULT_SETTINGS
+    fresh = dict(DEFAULT_SETTINGS)
+    save_settings(fresh)
+    reload_sources()
+    apply_logging(fresh.get("verbose_logging", False))
+    logger.info("All settings reset to defaults")
+    return {"status": "ok", "message": "Settings reset to defaults"}
+
 # ─── Health & Stats ──────────────────────────────────────────
 @app.get("/api/health")
 async def health(): return {"status": "ok", "time": time.time()}

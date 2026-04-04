@@ -555,9 +555,10 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 
 </div>
 
-<div style={{display:"flex",alignItems:"center",gap:12}}>
+<div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
 <Btn variant="accent" onClick={save} disabled={sv}>{sv?<Spin/>:"Save settings"}</Btn>
-{msg&&<span style={{fontSize:13,color:msg==="Saved!"?t.grnt:t.redt}}>{msg}</span>}
+<Btn onClick={async()=>{if(!confirm("Reset ALL settings to defaults? This will clear your API keys, MAM session, source toggles, and all other customizations. This cannot be undone."))return;setSv(true);try{await api.post("/settings/reset");const fresh=await api.get("/settings");setS(fresh);setMamRes(null);setTestRes(null);setFsStatus(null);setMsg("Settings reset!")}catch{setMsg("Error")}setSv(false)}} style={{color:t.redt}}>Reset all settings</Btn>
+{msg&&<span style={{fontSize:13,color:msg==="Saved!"||msg==="Settings reset!"?t.grnt:t.redt}}>{msg}</span>}
 </div></div>}
 
 // ─── App Shell ──────────────────────────────────────────────
