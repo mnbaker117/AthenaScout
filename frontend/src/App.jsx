@@ -449,8 +449,8 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 {/* Calibre Integration */}
 <div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"4px 20px"}}>
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px"}}>Calibre Integration</div>
-<SF label="Calibre Web URL" desc="Calibre-Web instance — enables deep links to individual books in the sidebar"><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.calibre_web_url||""} onChange={e=>upd("calibre_web_url",e.target.value)} placeholder="http://192.168.1.100:8083" style={{...ist,width:260}}/>{s.calibre_web_url?<a href={s.calibre_web_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
-<SF label="Calibre Library URL" desc="Calibre content server or management UI — quick-access button on dashboard"><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.calibre_url||""} onChange={e=>upd("calibre_url",e.target.value)} placeholder="https://10.0.10.20:8787" style={{...ist,width:260}}/>{s.calibre_url?<a href={s.calibre_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
+<SF label="Calibre Web URL" desc="Full URL to your Calibre-Web instance, including port (e.g. http://192.168.1.100:8083). Enables deep links to individual books in the sidebar."><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.calibre_web_url||""} onChange={e=>upd("calibre_web_url",e.target.value)} placeholder="http://192.168.1.100:8083" style={{...ist,width:260}}/>{s.calibre_web_url?<a href={s.calibre_web_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
+<SF label="Calibre Library URL" desc="Full URL to your Calibre content server or management interface, including port (e.g. https://192.168.1.100:8181). Adds a quick-access button on the dashboard."><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.calibre_url||""} onChange={e=>upd("calibre_url",e.target.value)} placeholder="https://10.0.10.20:8787" style={{...ist,width:260}}/>{s.calibre_url?<a href={s.calibre_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
 </div>
 
 {/* Sources */}
@@ -557,7 +557,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 
 <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
 <Btn variant="accent" onClick={save} disabled={sv}>{sv?<Spin/>:"Save settings"}</Btn>
-<Btn onClick={async()=>{if(!confirm("Reset ALL settings to defaults? This will clear your API keys, MAM session, source toggles, and all other customizations. This cannot be undone."))return;setSv(true);try{await api.post("/settings/reset");const fresh=await api.get("/settings");setS(fresh);setMamRes(null);setTestRes(null);setFsStatus(null);setMsg("Settings reset!")}catch{setMsg("Error")}setSv(false)}} style={{color:t.redt}}>Reset all settings</Btn>
+<Btn onClick={async()=>{if(!confirm("Reset ALL settings to defaults?\n\nThis will clear your API keys, MAM session, Calibre URLs, source toggles, and all other customizations.\n\nYou will need to re-enter any values — Docker environment variables are only used for initial setup and will not be restored.\n\nThis cannot be undone."))return;setSv(true);try{await api.post("/settings/reset");const fresh=await api.get("/settings");setS(fresh);setMamRes(null);setTestRes(null);setFsStatus(null);setMsg("Settings reset!")}catch{setMsg("Error")}setSv(false)}} style={{color:t.redt}}>Reset all settings</Btn>
 {msg&&<span style={{fontSize:13,color:msg==="Saved!"||msg==="Settings reset!"?t.grnt:t.redt}}>{msg}</span>}
 </div></div>}
 

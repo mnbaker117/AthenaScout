@@ -94,8 +94,7 @@ def load_settings() -> dict:
                 merged["rate_hardcover"] = max(1, old_rate - 1)
                 merged["rate_fantasticfiction"] = old_rate
                 merged["rate_kobo"] = old_rate + 1
-            # Env vars always override when set (Docker-idiomatic)
-            _apply_env_overrides(merged)
+            # Env vars only seed on first run — settings.json is source of truth
             return merged
         except Exception:
             pass
@@ -107,7 +106,7 @@ def load_settings() -> dict:
 
 
 def _apply_env_overrides(settings: dict):
-    """Apply env vars only when the setting is empty/unset — never overwrite user customizations."""
+    """Seed settings from Docker env vars on first run only. After settings.json exists, this is never called."""
     if ENV_HARDCOVER_API_KEY and not settings.get("hardcover_api_key"):
         settings["hardcover_api_key"] = ENV_HARDCOVER_API_KEY
     if ENV_CALIBRE_WEB_URL and not settings.get("calibre_web_url"):
