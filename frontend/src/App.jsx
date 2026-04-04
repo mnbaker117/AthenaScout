@@ -436,6 +436,7 @@ const timeAgo=ts=>{if(!ts)return null;const s=Math.floor(Date.now()/1000-ts);if(
 if(!s)return<Load/>;const upd=(k,v)=>setS(o=>({...o,[k]:v}));
 const ist={padding:"8px 12px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13};
 const nist={...ist,width:80};
+const numP=(key,def,min=0)=>({type:"number",min,value:s[key]===""?"":s[key]??def,onChange:e=>upd(key,e.target.value===""?"":parseInt(e.target.value)),onBlur:e=>{const v=parseInt(e.target.value);upd(key,isNaN(v)?def:Math.max(min,v))},style:nist});
 
 return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,paddingBottom:40}}>
 <h1 style={{fontSize:24,fontWeight:700,color:t.text,margin:0}}>Settings</h1>
@@ -465,10 +466,10 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 {/* Rate Limits */}
 <div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"4px 20px"}}>
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px"}}>Rate Limits (seconds between requests)</div>
-<SF label="Goodreads"><input type="number" min={0} value={s.rate_goodreads} onChange={e=>upd("rate_goodreads",parseInt(e.target.value)||0)} style={nist}/></SF>
-<SF label="Hardcover"><input type="number" min={0} value={s.rate_hardcover} onChange={e=>upd("rate_hardcover",parseInt(e.target.value)||0)} style={nist}/></SF>
-<SF label="Fantastic Fiction"><input type="number" min={0} value={s.rate_fantasticfiction} onChange={e=>upd("rate_fantasticfiction",parseInt(e.target.value)||0)} style={nist}/></SF>
-<SF label="Kobo"><input type="number" min={0} value={s.rate_kobo} onChange={e=>upd("rate_kobo",parseInt(e.target.value)||0)} style={nist}/></SF>
+<SF label="Goodreads"><input {...numP("rate_goodreads",2)}/></SF>
+<SF label="Hardcover"><input {...numP("rate_hardcover",1)}/></SF>
+<SF label="Fantastic Fiction"><input {...numP("rate_fantasticfiction",2)}/></SF>
+<SF label="Kobo"><input {...numP("rate_kobo",3)}/></SF>
 </div>
 
 {/* Languages */}
@@ -480,8 +481,8 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 {/* Scheduling */}
 <div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"4px 20px"}}>
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px"}}>Scheduling</div>
-<SF label="Source lookup interval (days)" desc="Set to 0 to disable auto-lookup"><input type="number" min={0} value={s.lookup_interval_days} onChange={e=>upd("lookup_interval_days",parseInt(e.target.value)||0)} style={nist}/></SF>
-<SF label="Calibre sync interval (minutes)" desc="Set to 0 to disable auto-sync"><input type="number" min={0} value={s.calibre_sync_interval_minutes} onChange={e=>upd("calibre_sync_interval_minutes",parseInt(e.target.value)||0)} style={nist}/></SF>
+<SF label="Source lookup interval (days)" desc="Set to 0 to disable auto-lookup"><input {...numP("lookup_interval_days",3)}/></SF>
+<SF label="Calibre sync interval (minutes)" desc="Set to 0 to disable auto-sync"><input {...numP("calibre_sync_interval_minutes",60)}/></SF>
 </div>
 
 {/* Logging */}
@@ -507,7 +508,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 {s.mam_enabled?<>
 
 {/* MAM Rate Limit */}
-<SF label="Request delay (seconds)" desc="Pause between MAM API calls during scans. Minimum 1 second."><input type="number" min={1} value={s.rate_mam||2} onChange={e=>{const v=parseInt(e.target.value);upd("rate_mam",v>=1?v:1)}} style={nist}/></SF>
+<SF label="Request delay (seconds)" desc="Pause between MAM API calls during scans. Minimum 1 second."><input {...numP("rate_mam",2,1)}/></SF>
 
 {/* Format Priority — drag-and-drop reorder */}
 <SF label="Format priority" desc="Drag to reorder. Top format is preferred when multiple are available on MAM."><div style={{display:"flex",flexDirection:"column",gap:4,minWidth:120}}>{(s.mam_format_priority||[]).map((fmt,i)=><div key={fmt} draggable onDragStart={()=>setDragIdx(i)} onDragOver={e=>{e.preventDefault()}} onDrop={()=>{reorderFmt(dragIdx,i);setDragIdx(null)}} onDragEnd={()=>setDragIdx(null)} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",borderRadius:6,background:dragIdx===i?t.accent+"22":t.bg4,border:`1px solid ${dragIdx===i?t.accent:t.border}`,cursor:"grab",fontSize:13,color:t.text2,transition:"background 0.15s"}}><span style={{color:t.tg,fontSize:11,fontWeight:600,width:16}}>{i+1}</span><span style={{fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em"}}>{fmt}</span><span style={{marginLeft:"auto",color:t.tg,fontSize:10}}>⋮⋮</span></div>)}</div></SF>
@@ -518,9 +519,9 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 {/* ── Scan Settings ── */}
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px",marginTop:8}}>Scan Settings</div>
 
-<SF label="Books per scheduled scan" desc="How many books to check per automatic scan cycle"><input type="number" min={1} max={500} value={s.mam_books_per_scan||100} onChange={e=>{const v=parseInt(e.target.value);upd("mam_books_per_scan",v>=1?v:1)}} style={nist}/></SF>
+<SF label="Books per scheduled scan" desc="How many books to check per automatic scan cycle"><input {...numP("mam_books_per_scan",100,1)}/></SF>
 
-<SF label="Full scan batch delay (minutes)" desc="Wait time between batches during a full library scan"><input type="number" min={10} value={s.mam_full_scan_batch_delay_minutes||60} onChange={e=>{const v=parseInt(e.target.value);upd("mam_full_scan_batch_delay_minutes",v>=10?v:10)}} style={nist}/></SF>
+<SF label="Full scan batch delay (minutes)" desc="Wait time between batches during a full library scan"><input {...numP("mam_full_scan_batch_delay_minutes",60,10)}/></SF>
 
 {/* ── Test Scan ── */}
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px",marginTop:8}}>Test Scan</div>
