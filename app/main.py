@@ -852,6 +852,7 @@ async def mam_validate_endpoint():
     result = await mam_validate(session_id, skip_ip)
     if result["success"]:
         s["mam_enabled"] = True
+        s["last_mam_validated_at"] = time.time()
         save_settings(s)
     return result
 
@@ -904,6 +905,27 @@ async def mam_scan_endpoint():
 
     _mam_scan_task = asyncio.create_task(_do_scan())
     return {"status": "started", "message": "MAM scan started (100 books)"}
+
+
+@app.post("/api/mam/test-scan")
+async def mam_test_scan():
+    """Run a quick test scan of 10 books and return results inline."""
+    s = load_settings()
+    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+        return {"error": "MAM not configured or not enabled"}
+    if _mam_scan_task and not _mam_scan_task.done():
+        return {"error": "A MAM scan is already running — wait for it to finish"}
+    db = await get_db()
+    try:
+        result = await mam_scan_batch(
+            db, session_id=s["mam_session_id"], limit=10,
+            delay=s.get("rate_mam", 2),
+            skip_ip_update=s.get("mam_skip_ip_update", True),
+            format_priority=s.get("mam_format_priority"),
+        )
+        return result
+    finally:
+        await db.close()
 
 
 @app.post("/api/mam/full-scan")

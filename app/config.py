@@ -62,6 +62,9 @@ DEFAULT_SETTINGS = {
     "mam_scan_interval_minutes": 360,
     "mam_format_priority": ["epub", "azw", "azw3", "pdf", "djvu", "azw4"],
     "rate_mam": 2,
+    "mam_books_per_scan": 100,
+    "mam_full_scan_batch_delay_minutes": 60,
+    "last_mam_validated_at": None,
 }
 
 

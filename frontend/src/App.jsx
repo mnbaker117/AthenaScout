@@ -423,7 +423,7 @@ function STog({on,onToggle,disabled}){const t=T();return<div onClick={disabled?u
 
 // ─── Settings ───────────────────────────────────────────────
 function SP(){const t=T();const[s,setS]=useState(null);const[sv,setSv]=useState(false);const[msg,setMsg]=useState("");
-const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState(null);const[fsStatus,setFsStatus]=useState(null);const[dragIdx,setDragIdx]=useState(null);useEffect(()=>{api.get("/settings").then(setS).catch(console.error)},[]);
+const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState(null);const[fsStatus,setFsStatus]=useState(null);const[dragIdx,setDragIdx]=useState(null);const[testRun,setTestRun]=useState(false);const[testRes,setTestRes]=useState(null);useEffect(()=>{api.get("/settings").then(setS).catch(console.error)},[]);
 useEffect(()=>{if(!s?.mam_enabled)return;const poll=()=>api.get("/mam/full-scan/status").then(setFsStatus).catch(()=>{});poll();const iv=setInterval(poll,10000);return()=>clearInterval(iv)},[s?.mam_enabled]);
 const save=async()=>{setSv(true);setMsg("");try{const toSave={...s};if(s._editingKey&&s._newKey){toSave.hardcover_api_key=s._newKey}delete toSave._editingKey;delete toSave._newKey;delete toSave._editingMam;delete toSave._newMam;delete toSave.hardcover_api_key_set;delete toSave.language_options;await api.post("/settings",toSave);setMsg("Saved!");upd("_editingKey",false);upd("_newKey","");const fresh=await api.get("/settings");setS(fresh);setTimeout(()=>setMsg(""),2000)}catch(e){setMsg("Error")}setSv(false)};
 const doValidate=async()=>{setMamVld(true);setMamRes(null);try{const r=await api.post("/mam/validate");setMamRes(r);if(r.success){const fresh=await api.get("/settings");setS(fresh)}}catch(e){setMamRes({success:false,message:"Network error"})}setMamVld(false)};
@@ -431,6 +431,8 @@ const startFullScan=async()=>{try{const r=await api.post("/mam/full-scan");if(r.
 const cancelFullScan=async()=>{try{await api.post("/mam/full-scan/cancel");const st=await api.get("/mam/full-scan/status");setFsStatus(st)}catch{}};
 const resetMam=async()=>{if(!confirm("Reset all MAM scan data? This clears mam_url and mam_status on every book. You will need to re-scan."))return;try{await api.post("/mam/reset");setFsStatus(null);setMsg("MAM data cleared!");setTimeout(()=>setMsg(""),2000)}catch{}};
 const reorderFmt=(from,to)=>{if(from===to)return;const arr=[...(s.mam_format_priority||[])];const[item]=arr.splice(from,1);arr.splice(to,0,item);upd("mam_format_priority",arr)};
+const doTestScan=async()=>{setTestRun(true);setTestRes(null);try{const r=await api.post("/mam/test-scan");setTestRes(r)}catch(e){setTestRes({error:"Network error"})}setTestRun(false)};
+const timeAgo=ts=>{if(!ts)return null;const s=Math.floor(Date.now()/1000-ts);if(s<60)return"just now";if(s<3600)return`${Math.floor(s/60)}m ago`;if(s<86400)return`${Math.floor(s/3600)}h ago`;return`${Math.floor(s/86400)}d ago`};
 if(!s)return<Load/>;const upd=(k,v)=>setS(o=>({...o,[k]:v}));
 const ist={padding:"8px 12px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13};
 const nist={...ist,width:80};
@@ -493,16 +495,19 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px"}}>MyAnonamouse (MAM)</div>
 
 {/* Session ID — masked display with Change flow */}
-<SF label="MAM Session ID" desc="Get from MAM → Preferences → Security → Generate Session. Works with both IP-locked and ASN-locked tokens.">{s.mam_session_id&&!s._editingMam?<div style={{display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:14,color:t.tm,letterSpacing:"3px"}}>••••••••</span><Btn size="sm" onClick={()=>{upd("_editingMam",true);upd("_newMam","")}}>Change</Btn></div>:<div style={{display:"flex",flexDirection:"column",gap:6}}><input value={s._editingMam?s._newMam||"":s.mam_session_id||""} onChange={e=>s._editingMam?upd("_newMam",e.target.value):upd("mam_session_id",e.target.value)} placeholder="Paste session token..." style={{...ist,width:260}}/>{s._editingMam?<div style={{display:"flex",gap:6,marginTop:2}}><Btn size="sm" variant="accent" onClick={async()=>{const nk=s._newMam||"";if(!nk)return;setSv(true);try{await api.post("/settings",{mam_session_id:nk});upd("_editingMam",false);upd("_newMam","");const fresh=await api.get("/settings");setS(fresh);setMamRes(null);setMsg("Token saved!")}catch{setMsg("Error")}setSv(false)}}>Save token</Btn><Btn size="sm" onClick={()=>{upd("_editingMam",false);upd("_newMam","")}}>Cancel</Btn></div>:null}</div>}</SF>
+<SF label="MAM Session ID" desc={'Get from MAM → Preferences → Security → Generate Session. Set "Allow Session to set Dynamic Seedbox" to No. Works with both IP-locked and ASN-locked tokens.'}>{s.mam_session_id&&!s._editingMam?<div style={{display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:14,color:t.tm,letterSpacing:"3px"}}>••••••••</span><Btn size="sm" onClick={()=>{upd("_editingMam",true);upd("_newMam","")}}>Change</Btn></div>:<div style={{display:"flex",flexDirection:"column",gap:6}}><input value={s._editingMam?s._newMam||"":s.mam_session_id||""} onChange={e=>s._editingMam?upd("_newMam",e.target.value):upd("mam_session_id",e.target.value)} placeholder="Paste session token..." style={{...ist,width:260}}/>{s._editingMam?<div style={{display:"flex",gap:6,marginTop:2}}><Btn size="sm" variant="accent" onClick={async()=>{const nk=s._newMam||"";if(!nk)return;setSv(true);try{await api.post("/settings",{mam_session_id:nk});upd("_editingMam",false);upd("_newMam","");const fresh=await api.get("/settings");setS(fresh);setMamRes(null);setMsg("Token saved!")}catch{setMsg("Error")}setSv(false)}}>Save token</Btn><Btn size="sm" onClick={()=>{upd("_editingMam",false);upd("_newMam","")}}>Cancel</Btn></div>:null}</div>}</SF>
 
-{/* Validate button */}
-<SF label="Validate connection" desc="Tests search auth against MAM servers"><div style={{display:"flex",alignItems:"center",gap:10}}><Btn size="sm" variant="accent" onClick={doValidate} disabled={mamVld||!s.mam_session_id}>{mamVld?<><Spin/> Testing...</>:"Validate"}</Btn>{mamRes?<span style={{fontSize:12,fontWeight:600,color:mamRes.success?t.grnt:t.redt}}>{mamRes.success?"✓ Connected":mamRes.message||"Failed"}</span>:null}</div></SF>
+{/* Validate button + persistent timestamp */}
+<SF label="Validate connection" desc="Tests search auth against MAM servers"><div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}><Btn size="sm" variant="accent" onClick={doValidate} disabled={mamVld||!s.mam_session_id}>{mamVld?<><Spin/> Testing...</>:"Validate"}</Btn>{mamRes?<span style={{fontSize:12,fontWeight:600,color:mamRes.success?t.grnt:t.redt}}>{mamRes.success?"✓ Connected":mamRes.message||"Failed"}</span>:s.last_mam_validated_at?<span style={{fontSize:11,color:t.tg}}>Last validated: {timeAgo(s.last_mam_validated_at)}</span>:null}</div></SF>
 
 {/* Enable MAM Features toggle */}
 <SF label="Enable MAM features" desc={s.mam_enabled?"MAM integration active across the app":"Validate session first, then enable"}><STog on={!!s.mam_enabled} onToggle={async()=>{try{const r=await api.post("/mam/toggle");upd("mam_enabled",r.enabled)}catch{}}} disabled={!s.mam_session_id}/></SF>
 
+{/* ── Below only visible when MAM is enabled ── */}
+{s.mam_enabled?<>
+
 {/* MAM Rate Limit */}
-<SF label="Request delay (seconds)" desc="Pause between MAM API calls during scans"><input type="number" min={1} value={s.rate_mam||2} onChange={e=>upd("rate_mam",parseInt(e.target.value)||2)} style={nist}/></SF>
+<SF label="Request delay (seconds)" desc="Pause between MAM API calls during scans. Minimum 1 second."><input type="number" min={1} value={s.rate_mam||2} onChange={e=>{const v=parseInt(e.target.value);upd("rate_mam",v>=1?v:1)}} style={nist}/></SF>
 
 {/* Format Priority — drag-and-drop reorder */}
 <SF label="Format priority" desc="Drag to reorder. Top format is preferred when multiple are available on MAM."><div style={{display:"flex",flexDirection:"column",gap:4,minWidth:120}}>{(s.mam_format_priority||[]).map((fmt,i)=><div key={fmt} draggable onDragStart={()=>setDragIdx(i)} onDragOver={e=>{e.preventDefault()}} onDrop={()=>{reorderFmt(dragIdx,i);setDragIdx(null)}} onDragEnd={()=>setDragIdx(null)} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",borderRadius:6,background:dragIdx===i?t.accent+"22":t.bg4,border:`1px solid ${dragIdx===i?t.accent:t.border}`,cursor:"grab",fontSize:13,color:t.text2,transition:"background 0.15s"}}><span style={{color:t.tg,fontSize:11,fontWeight:600,width:16}}>{i+1}</span><span style={{fontWeight:500,textTransform:"uppercase",letterSpacing:"0.05em"}}>{fmt}</span><span style={{marginLeft:"auto",color:t.tg,fontSize:10}}>⋮⋮</span></div>)}</div></SF>
@@ -510,25 +515,42 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 {/* Session expiry note */}
 <div style={{padding:"10px 0",fontSize:12,color:t.tg,fontStyle:"italic",borderBottom:`1px solid ${t.borderL}`}}>Note: MAM session tokens expire periodically. If scans start failing, generate a new token and re-validate.</div>
 
-{/* Full Scan section — only when MAM is enabled */}
-{s.mam_enabled?<>
+{/* ── Scan Settings ── */}
+<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px",marginTop:8}}>Scan Settings</div>
+
+<SF label="Books per scheduled scan" desc="How many books to check per automatic scan cycle"><input type="number" min={1} max={500} value={s.mam_books_per_scan||100} onChange={e=>{const v=parseInt(e.target.value);upd("mam_books_per_scan",v>=1?v:1)}} style={nist}/></SF>
+
+<SF label="Full scan batch delay (minutes)" desc="Wait time between batches during a full library scan"><input type="number" min={10} value={s.mam_full_scan_batch_delay_minutes||60} onChange={e=>{const v=parseInt(e.target.value);upd("mam_full_scan_batch_delay_minutes",v>=10?v:10)}} style={nist}/></SF>
+
+{/* ── Test Scan ── */}
+<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px",marginTop:8}}>Test Scan</div>
+
+<div style={{padding:"8px 0 12px"}}>
+<div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+<Btn size="sm" variant="accent" onClick={doTestScan} disabled={testRun}>{testRun?<><Spin/> Scanning 10 books...</>:"Run test scan (10 books)"}</Btn>
+</div>
+{testRes?<div style={{background:t.bg4,borderRadius:8,padding:"10px 14px",fontSize:13}}>{testRes.error?<span style={{color:t.redt}}>{testRes.error}</span>:<div style={{display:"flex",gap:16,flexWrap:"wrap",color:t.text2}}><span>Scanned: <b>{testRes.scanned||0}</b></span><span style={{color:t.grnt}}>Found: <b>{testRes.found||0}</b></span><span style={{color:t.ylwt}}>Possible: <b>{testRes.possible||0}</b></span><span style={{color:t.redt}}>Not found: <b>{testRes.not_found||0}</b></span>{testRes.errors>0?<span style={{color:t.red}}>Errors: <b>{testRes.errors}</b></span>:null}</div>}</div>:null}
+</div>
+
+{/* ── Full Library Scan ── */}
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px",marginTop:8}}>Full Library Scan</div>
 
-{/* Full scan progress bar (when active) */}
+{/* Progress bar (when active) */}
 {fsStatus?.active?<div style={{padding:"12px 0"}}>
 <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}><span>Scanning... {fsStatus.scanned} of {fsStatus.total_books} books ({fsStatus.progress_pct}%)</span><span>Batch size: {fsStatus.batch_size}</span></div>
 <div style={{height:8,borderRadius:4,background:t.bg4,overflow:"hidden"}}><div style={{width:`${fsStatus.progress_pct||0}%`,height:"100%",borderRadius:4,background:t.accent,transition:"width 0.5s"}}/></div>
 <div style={{display:"flex",gap:8,marginTop:10}}><Btn size="sm" onClick={cancelFullScan} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Cancel scan</Btn></div>
 </div>:null}
 
-{/* Full scan status (when not active) */}
+{/* Status (when not active) */}
 {fsStatus&&!fsStatus.active&&fsStatus.status?<div style={{padding:"8px 0",fontSize:12,color:fsStatus.status==="complete"?t.grnt:fsStatus.status==="cancelled"?t.ylwt:t.redt}}>Last scan: {fsStatus.status}{fsStatus.status==="complete"?` — ${fsStatus.scanned} books scanned`:""}</div>:null}
 
-{/* Full scan + reset buttons (when not actively scanning) */}
+{/* Buttons (when not scanning) */}
 {!fsStatus?.active?<div style={{display:"flex",gap:8,padding:"8px 0"}}>
 <Btn size="sm" variant="accent" onClick={startFullScan}>Start full scan</Btn>
 <Btn size="sm" onClick={resetMam} style={{color:t.redt}}>Reset scan data</Btn>
 </div>:null}
+
 </>:null}
 
 </div>
