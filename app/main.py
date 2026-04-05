@@ -1050,8 +1050,9 @@ async def mam_status_endpoint():
 
 
 @app.post("/api/mam/scan")
-async def mam_scan_endpoint():
-    """Scan all books missing MAM data. Batches of 100 with 5-min pauses."""
+async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
+    """Scan books missing MAM data. Batches of 100 with 5-min pauses.
+    If limit is provided, scan at most that many books total."""
     global _mam_scan_task, _mam_scan_progress
     s = load_settings()
     if not s.get("mam_enabled") or not s.get("mam_session_id"):
@@ -1075,7 +1076,8 @@ async def mam_scan_endpoint():
     if total == 0:
         return {"status": "complete", "message": "No books need scanning — all already have MAM data"}
 
-    _mam_scan_progress = {"running": True, "scanned": 0, "total": total,
+    scan_total = min(total, limit) if limit else total
+    _mam_scan_progress = {"running": True, "scanned": 0, "total": scan_total,
                           "found": 0, "possible": 0, "not_found": 0, "errors": 0,
                           "status": "scanning", "type": "manual"}
 
@@ -1110,8 +1112,14 @@ async def mam_scan_endpoint():
                 base_possible = _mam_scan_progress["possible"]
                 base_not_found = _mam_scan_progress["not_found"]
                 base_errors = _mam_scan_progress["errors"]
+                batch_limit = min(100, scan_total - _mam_scan_progress["scanned"])
+                if batch_limit <= 0:
+                    _mam_scan_progress.update({"status": "complete", "running": False})
+                    logger.info(f"MAM scan reached limit ({scan_total}): {_mam_scan_progress['scanned']} scanned, {_mam_scan_progress['found']} found")
+                    await db.close()
+                    return
                 result = await mam_scan_batch(
-                    db, session_id=cs["mam_session_id"], limit=100,
+                    db, session_id=cs["mam_session_id"], limit=batch_limit,
                     delay=cs.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=cs.get("mam_format_priority"),
                     on_progress=_progress,
@@ -1138,7 +1146,7 @@ async def mam_scan_endpoint():
                 return
             finally:
                 await db.close()
-            if left == 0 or result.get("scanned", 0) == 0:
+            if left == 0 or result.get("scanned", 0) == 0 or _mam_scan_progress["scanned"] >= scan_total:
                 _mam_scan_progress.update({"status": "complete", "running": False})
                 logger.info(f"MAM scan complete: {_mam_scan_progress['scanned']} scanned, {_mam_scan_progress['found']} found")
                 return
