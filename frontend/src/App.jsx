@@ -228,13 +228,15 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 
 // ─── Books Page (Library/Missing/Upcoming) ──────────────────
 function BP({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}){const t=T();const[bks,setBks]=useState([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist(`bp_${title}_q`,"");const[vm,setVm]=usePersist(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist(`bp_${title}_sort`,"title");const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
+const[mamFilter,setMamFilter]=usePersist(`bp_${title}_mam`,"");const[mamOn,setMamOn]=useState(false);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const isGrouped=grp!=="all";
 const perPage=isGrouped?5000:60;
 const sortParam=grp==="author"?"author":grp==="series"?"series":sort;
-const load=useCallback((page=1)=>{setLd(true);const p=new URLSearchParams({search:q,sort:sortParam,per_page:perPage,page,...extraParams});api.get(`${apiPath}?${p}`).then(d=>{setBks(d.books);setTotal(d.total);setPg(page);setLd(false)}).catch(()=>setLd(false))},[q,sortParam,apiPath,grp]);
+const load=useCallback((page=1)=>{setLd(true);const p=new URLSearchParams({search:q,sort:sortParam,per_page:perPage,page,...extraParams});if(mamFilter)p.set("mam_status",mamFilter);api.get(`${apiPath}?${p}`).then(d=>{setBks(d.books);setTotal(d.total);setPg(page);setLd(false)}).catch(()=>setLd(false))},[q,sortParam,apiPath,grp,mamFilter]);
 useEffect(()=>{load(1)},[load]);
+useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 const totalPages=Math.max(1,Math.ceil(total/perPage));
 const onAction=async(act,id)=>{if(act==="hide")await api.post(`/books/${id}/hide`);if(act==="dismiss")await api.post(`/books/${id}/dismiss`);if(act==="delete")await api.del(`/books/${id}`);load(pg)};
 const dismissable=bks.filter(b=>!!b.is_new).length;
@@ -253,6 +255,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 <div className="bp-right" style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
 <SearchBar value={q} onChange={v=>{setQ(v);setPg(1)}}/>
 {!isGrouped&&<select value={sort} onChange={e=>{setSort(e.target.value);setPg(1)}} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="title">Sort: Title</option><option value="author">Sort: Author</option><option value="date">Sort: Date</option><option value="added">Sort: Added</option></select>}
+{mamOn?<select value={mamFilter} onChange={e=>{setMamFilter(e.target.value);setPg(1)}} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:mamFilter?t.accent+"22":t.inp,color:mamFilter?t.accent:t.text2,fontSize:12}}><option value="">MAM: All</option><option value="found">MAM: Found</option><option value="possible">MAM: Possible</option><option value="not_found">MAM: Not Found</option><option value="unscanned">MAM: Unscanned</option></select>:null}
 <select value={grp} onChange={e=>{setGrp(e.target.value);setPg(1)}} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="all">All</option><option value="author">Group: Author</option><option value="series">Group: Series</option></select>
 {isGrouped&&<Btn size="sm" variant="ghost" onClick={()=>setAllCollapsed(!allCollapsed)}>{allCollapsed?Ic.expand:Ic.collapse} {allCollapsed?"Expand":"Collapse"} All</Btn>}
 <VT mode={vm} setMode={setVm}/>
@@ -266,13 +269,24 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 
 // ─── Authors Page ───────────────────────────────────────────
 function AP({onNav}){const t=T();const[aus,setAus]=useState([]);const[ld,setLd]=useState(true);const[q,setQ]=usePersist("ap_q","");const[sort,setSort]=usePersist("ap_sort","name");const[vm,setVm]=usePersist("ap_vm","list");
+const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState(new Set());const[clearing,setClearing]=useState(false);
+const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
+const clearData=async(type)=>{const labels={source:"source scan",mam:"MAM scan",both:"all scan"};if(!confirm(`Clear ${labels[type]} data for ${sel.size} author(s)? ${type==="source"||type==="both"?"This will DELETE all discovered (non-Calibre) books for these authors.":"MAM status will be reset and books will need re-scanning."}`))return;setClearing(true);try{await api.post("/authors/clear-scan-data",{author_ids:[...sel],clear_source:type==="source"||type==="both",clear_mam:type==="mam"||type==="both"});setSel(new Set());setSelMode(false);setLd(true);api.get(`/authors?search=${q}&sort=${sort}`).then(d=>{setAus(d.authors||[]);setLd(false)})}catch{alert("Error clearing data")}setClearing(false)};
 useEffect(()=>{setLd(true);api.get(`/authors?search=${q}&sort=${sort}`).then(d=>{setAus(d.authors||[]);setLd(false)}).catch(()=>setLd(false))},[q,sort]);
-const AuthorCard=({a})=><div onClick={()=>onNav("author",a.id)} style={{minWidth:150,maxWidth:180,flex:"1 1 150px",background:t.bg2,border:`1px solid ${t.borderL}`,borderRadius:10,padding:16,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:8,textAlign:"center"}}>{a.image_url?<img src={a.image_url} alt="" style={{width:64,height:64,borderRadius:"50%",objectFit:"cover"}}/>:<div style={{width:64,height:64,borderRadius:"50%",background:t.bg4,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,fontWeight:700,color:t.tg}}>{a.name?.charAt(0)}</div>}<div style={{fontSize:13,fontWeight:600,color:t.text2}}>{a.name}</div><div style={{display:"flex",gap:8,fontSize:11}}><span style={{color:t.grnt}}>{a.owned_count||0}</span><span style={{color:t.tg}}>/</span><span style={{color:t.ylwt}}>{a.missing_count||0}</span></div><div style={{width:"100%"}}><PB owned={a.owned_count||0} total={a.total_books||0}/></div></div>;
-const AuthorRow=({a})=><div onClick={()=>onNav("author",a.id)} style={{display:"flex",alignItems:"center",gap:14,padding:"10px 14px",borderRadius:8,cursor:"pointer",background:t.bg2,border:`1px solid ${t.borderL}`}}>{a.image_url?<img src={a.image_url} alt="" style={{width:40,height:40,borderRadius:"50%",objectFit:"cover"}}/>:<div style={{width:40,height:40,borderRadius:"50%",background:t.bg4,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:700,color:t.tg}}>{a.name?.charAt(0)}</div>}<div style={{flex:1,minWidth:0}}><div style={{fontSize:14,fontWeight:600,color:t.text2}}>{a.name}</div><div style={{display:"flex",gap:12,fontSize:12,marginTop:2}}><span style={{color:t.grnt}}>{a.owned_count||0} owned</span><span style={{color:t.ylwt}}>{a.missing_count||0} missing</span><span style={{color:t.purt}}>{a.series_count||0} series</span></div></div><div style={{width:80}}><PB owned={a.owned_count||0} total={a.total_books||0}/></div></div>;
+const AuthorCard=({a})=><div onClick={()=>selMode?toggleSel(a.id):onNav("author",a.id)} style={{minWidth:150,maxWidth:180,flex:"1 1 150px",background:selMode&&sel.has(a.id)?t.accent+"15":t.bg2,border:`1px solid ${selMode&&sel.has(a.id)?t.accent:t.borderL}`,borderRadius:10,padding:16,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:8,textAlign:"center",transition:"background 0.15s, border-color 0.15s"}}>{a.image_url?<img src={a.image_url} alt="" style={{width:64,height:64,borderRadius:"50%",objectFit:"cover"}}/>:<div style={{width:64,height:64,borderRadius:"50%",background:t.bg4,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,fontWeight:700,color:t.tg}}>{a.name?.charAt(0)}</div>}<div style={{fontSize:13,fontWeight:600,color:t.text2}}>{a.name}</div><div style={{display:"flex",gap:8,fontSize:11}}><span style={{color:t.grnt}}>{a.owned_count||0}</span><span style={{color:t.tg}}>/</span><span style={{color:t.ylwt}}>{a.missing_count||0}</span></div><div style={{width:"100%"}}><PB owned={a.owned_count||0} total={a.total_books||0}/></div></div>;
+const AuthorRow=({a})=><div onClick={()=>selMode?toggleSel(a.id):onNav("author",a.id)} style={{display:"flex",alignItems:"center",gap:14,padding:"10px 14px",borderRadius:8,cursor:"pointer",background:selMode&&sel.has(a.id)?t.accent+"15":t.bg2,border:`1px solid ${selMode&&sel.has(a.id)?t.accent:t.borderL}`,transition:"background 0.15s, border-color 0.15s"}}>{a.image_url?<img src={a.image_url} alt="" style={{width:40,height:40,borderRadius:"50%",objectFit:"cover"}}/>:<div style={{width:40,height:40,borderRadius:"50%",background:t.bg4,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:700,color:t.tg}}>{a.name?.charAt(0)}</div>}<div style={{flex:1,minWidth:0}}><div style={{fontSize:14,fontWeight:600,color:t.text2}}>{a.name}</div><div style={{display:"flex",gap:12,fontSize:12,marginTop:2}}><span style={{color:t.grnt}}>{a.owned_count||0} owned</span><span style={{color:t.ylwt}}>{a.missing_count||0} missing</span><span style={{color:t.purt}}>{a.series_count||0} series</span></div></div><div style={{width:80}}><PB owned={a.owned_count||0} total={a.total_books||0}/></div></div>;
 return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 <div className="bp-controls" style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,position:"sticky",top:56,zIndex:20,background:t.bg+"ee",backdropFilter:"blur(8px)",padding:"12px 0",marginTop:-12}}>
 <h1 style={{fontSize:22,fontWeight:700,color:t.text,margin:0}}>Authors <span style={{fontSize:14,fontWeight:400,color:t.tg}}>({aus.length})</span></h1>
-<div className="bp-right" style={{display:"flex",gap:8,alignItems:"center"}}><SearchBar value={q} onChange={setQ}/><select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="name">Name</option><option value="books">Books</option><option value="missing">Missing</option></select><VT mode={vm} setMode={setVm}/></div></div>
+<div className="bp-right" style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}><SearchBar value={q} onChange={setQ}/><select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="name">Name</option><option value="books">Books</option><option value="missing">Missing</option></select><VT mode={vm} setMode={setVm}/><Btn size="sm" variant={selMode?"accent":"ghost"} onClick={()=>{setSelMode(!selMode);if(selMode)setSel(new Set())}}>{selMode?"Cancel Select":`Select`}</Btn></div></div>
+
+{selMode&&sel.size>0?<div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:t.bg2,border:`1px solid ${t.border}`,borderRadius:8,flexWrap:"wrap"}}>
+<span style={{fontSize:13,fontWeight:600,color:t.text2}}>{sel.size} author{sel.size>1?"s":""} selected</span>
+<Btn size="sm" onClick={()=>clearData("source")} disabled={clearing} style={{background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}44`}}>Clear Source Data</Btn>
+<Btn size="sm" onClick={()=>clearData("mam")} disabled={clearing} style={{background:t.cyan+"22",color:t.cyant,border:`1px solid ${t.cyan}44`}}>Clear MAM Data</Btn>
+<Btn size="sm" onClick={()=>clearData("both")} disabled={clearing} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Clear Both</Btn>
+<Btn size="sm" variant="ghost" onClick={()=>setSel(new Set())}>Deselect All</Btn>
+</div>:null}
 {ld?<Load/>:vm==="grid"?<div style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"start"}}>{aus.map(a=><AuthorCard key={a.id} a={a}/>)}</div>:<div style={{display:"flex",flexDirection:"column",gap:2}}>{aus.map(a=><AuthorRow key={a.id} a={a}/>)}</div>}
 </div>}
 
@@ -468,7 +482,7 @@ function STog({on,onToggle,disabled}){const t=T();return<div onClick={disabled?u
 function SP(){const t=T();const[s,setS]=useState(null);const[sv,setSv]=useState(false);const[msg,setMsg]=useState("");
 const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState(null);const[fsStatus,setFsStatus]=useState(null);const[dragIdx,setDragIdx]=useState(null);const[testRun,setTestRun]=useState(false);const[testRes,setTestRes]=useState(null);useEffect(()=>{api.get("/settings").then(setS).catch(console.error)},[]);
 useEffect(()=>{if(!s?.mam_enabled)return;const poll=()=>api.get("/mam/full-scan/status").then(setFsStatus).catch(()=>{});poll();const iv=setInterval(poll,10000);return()=>clearInterval(iv)},[s?.mam_enabled]);
-const save=async()=>{setSv(true);setMsg("");try{const toSave={...s};if(s._editingKey&&s._newKey){toSave.hardcover_api_key=s._newKey}delete toSave._editingKey;delete toSave._newKey;delete toSave._editingMam;delete toSave._newMam;delete toSave.hardcover_api_key_set;delete toSave.language_options;await api.post("/settings",toSave);setMsg("Saved!");upd("_editingKey",false);upd("_newKey","");const fresh=await api.get("/settings");setS(fresh);setTimeout(()=>setMsg(""),2000)}catch(e){setMsg("Error")}setSv(false)};
+const save=async()=>{setSv(true);setMsg("");try{const toSave={...s};if(s._editingKey&&s._newKey){toSave.hardcover_api_key=s._newKey}delete toSave._editingKey;delete toSave._newKey;delete toSave._editingMam;delete toSave._newMam;delete toSave._scanClearQ;delete toSave._scanClearResults;delete toSave._scanClearSel;delete toSave.hardcover_api_key_set;delete toSave.language_options;await api.post("/settings",toSave);setMsg("Saved!");upd("_editingKey",false);upd("_newKey","");const fresh=await api.get("/settings");setS(fresh);setTimeout(()=>setMsg(""),2000)}catch(e){setMsg("Error")}setSv(false)};
 const doValidate=async()=>{setMamVld(true);setMamRes(null);try{const r=await api.post("/mam/validate");setMamRes(r);if(r.success){const fresh=await api.get("/settings");setS(fresh)}}catch(e){setMamRes({success:false,message:"Network error"})}setMamVld(false)};
 const startFullScan=async()=>{try{const r=await api.post("/mam/full-scan");if(r.error){setMsg(r.error);setTimeout(()=>setMsg(""),3000)}else{const st=await api.get("/mam/full-scan/status");setFsStatus(st)}}catch{}};
 const cancelFullScan=async()=>{try{await api.post("/mam/full-scan/cancel");const st=await api.get("/mam/full-scan/status");setFsStatus(st)}catch{}};
@@ -604,6 +618,32 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 <Btn size="sm" variant="accent" onClick={startFullScan}>Start full scan</Btn>
 <Btn size="sm" onClick={resetMam} style={{color:t.redt}}>Reset scan data</Btn>
 </div>:null}
+
+{/* ── Manage Scan Data ── */}
+<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px",marginTop:8}}>Manage Scan Data</div>
+
+<SF label="Clear scan data by author" desc="Search for authors, then clear their source or MAM scan data">
+<div style={{display:"flex",flexDirection:"column",gap:8,minWidth:260}}>
+{/* Author search + results */}
+<div style={{position:"relative"}}>
+<input value={s._scanClearQ||""} onChange={e=>{upd("_scanClearQ",e.target.value);if(e.target.value.length>=2)api.get(`/authors?search=${e.target.value}`).then(r=>upd("_scanClearResults",r.authors||[])).catch(()=>{});else upd("_scanClearResults",[])}} placeholder="Search authors..." style={{width:"100%",padding:"6px 8px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13}}/>
+{(s._scanClearResults||[]).length>0?<div style={{position:"absolute",top:"100%",left:0,right:0,maxHeight:160,overflowY:"auto",background:t.bg2,border:`1px solid ${t.border}`,borderRadius:"0 0 6px 6px",zIndex:10}}>
+{(s._scanClearResults||[]).map(a=><div key={a.id} onClick={()=>{const cur=s._scanClearSel||[];if(!cur.find(x=>x.id===a.id))upd("_scanClearSel",[...cur,{id:a.id,name:a.name}]);upd("_scanClearQ","");upd("_scanClearResults",[])}} style={{padding:"6px 10px",cursor:"pointer",fontSize:12,color:t.text2,borderBottom:`1px solid ${t.borderL}`}}>{a.name} <span style={{color:t.tg}}>({a.total_books||0} books)</span></div>)}
+</div>:null}
+</div>
+{/* Selected authors tags */}
+{(s._scanClearSel||[]).length>0?<div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+{(s._scanClearSel||[]).map(a=><span key={a.id} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:4,fontSize:11,background:t.purb,color:t.purt,border:`1px solid ${t.pur}33`}}>{a.name}<button onClick={()=>upd("_scanClearSel",(s._scanClearSel||[]).filter(x=>x.id!==a.id))} style={{background:"none",border:"none",cursor:"pointer",color:t.purt,padding:0,fontSize:13}}>×</button></span>)}
+<button onClick={()=>upd("_scanClearSel",[])} style={{background:"none",border:"none",cursor:"pointer",color:t.tg,fontSize:11,padding:"2px 4px"}}>clear all</button>
+</div>:null}
+{/* Action buttons */}
+{(s._scanClearSel||[]).length>0?<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+<Btn size="sm" onClick={async()=>{if(!confirm(`Clear SOURCE scan data for ${(s._scanClearSel||[]).length} author(s)? This will DELETE all discovered books.`))return;setSv(true);try{await api.post("/authors/clear-scan-data",{author_ids:(s._scanClearSel||[]).map(a=>a.id),clear_source:true,clear_mam:false});upd("_scanClearSel",[]);setMsg("Source data cleared!")}catch{setMsg("Error")}setSv(false)}} style={{background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}44`}}>Clear Source</Btn>
+<Btn size="sm" onClick={async()=>{if(!confirm(`Clear MAM scan data for ${(s._scanClearSel||[]).length} author(s)?`))return;setSv(true);try{await api.post("/authors/clear-scan-data",{author_ids:(s._scanClearSel||[]).map(a=>a.id),clear_source:false,clear_mam:true});upd("_scanClearSel",[]);setMsg("MAM data cleared!")}catch{setMsg("Error")}setSv(false)}} style={{background:t.cyan+"22",color:t.cyant,border:`1px solid ${t.cyan}44`}}>Clear MAM</Btn>
+<Btn size="sm" onClick={async()=>{if(!confirm(`Clear ALL scan data for ${(s._scanClearSel||[]).length} author(s)? This will DELETE all discovered books AND reset MAM status.`))return;setSv(true);try{await api.post("/authors/clear-scan-data",{author_ids:(s._scanClearSel||[]).map(a=>a.id),clear_source:true,clear_mam:true});upd("_scanClearSel",[]);setMsg("All data cleared!")}catch{setMsg("Error")}setSv(false)}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Clear Both</Btn>
+</div>:null}
+</div>
+</SF>
 
 </>:null}
 

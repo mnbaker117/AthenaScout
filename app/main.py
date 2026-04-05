@@ -313,7 +313,7 @@ async def list_series(search: str = Query(None), sort: str = Query("name"), sort
 
 # ─── Books ───────────────────────────────────────────────────
 @app.get("/api/books")
-async def get_books(search: str = Query(None), author_id: int = Query(None), series_id: int = Query(None), owned: bool = Query(None), book_type: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), group_by: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), include_hidden: bool = Query(False)):
+async def get_books(search: str = Query(None), author_id: int = Query(None), series_id: int = Query(None), owned: bool = Query(None), book_type: str = Query(None), mam_status: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), group_by: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), include_hidden: bool = Query(False)):
     db = await get_db()
     try:
         c = []; p = []
@@ -325,6 +325,10 @@ async def get_books(search: str = Query(None), author_id: int = Query(None), ser
         elif owned is False: c.append("b.owned=0")
         if book_type == "series": c.append("b.series_id IS NOT NULL")
         elif book_type == "standalone": c.append("b.series_id IS NULL")
+        if mam_status == "found": c.append("b.mam_status='found'")
+        elif mam_status == "possible": c.append("b.mam_status='possible'")
+        elif mam_status == "not_found": c.append("b.mam_status='not_found'")
+        elif mam_status == "unscanned": c.append("b.mam_status IS NULL")
         w = " AND ".join(c) if c else "1=1"
         cnt = (await (await db.execute(f"SELECT COUNT(*) c FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w}", p)).fetchone())["c"]
         d = "DESC" if sort_dir == "desc" else "ASC"
@@ -338,11 +342,15 @@ async def get_books(search: str = Query(None), author_id: int = Query(None), ser
 async def get_missing(**kw): return await get_books(owned=False, **kw)
 
 @app.get("/api/upcoming")
-async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sort_dir: str = Query("asc"), group_by: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000)):
+async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sort_dir: str = Query("asc"), group_by: str = Query(None), mam_status: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000)):
     db = await get_db()
     try:
         c = [HF, "b.owned=0", "b.is_unreleased=1"]; p = []
         if search: c.append("(b.title LIKE ? OR a.name LIKE ? OR COALESCE(s.name,'') LIKE ?)"); p.extend([f"%{search}%"]*3)
+        if mam_status == "found": c.append("b.mam_status='found'")
+        elif mam_status == "possible": c.append("b.mam_status='possible'")
+        elif mam_status == "not_found": c.append("b.mam_status='not_found'")
+        elif mam_status == "unscanned": c.append("b.mam_status IS NULL")
         w = " AND ".join(c)
         cnt = (await (await db.execute(f"SELECT COUNT(*) c FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w}", p)).fetchone())["c"]
         d = "DESC" if sort_dir == "desc" else "ASC"
@@ -1010,6 +1018,45 @@ async def trigger_author_full_rescan(aid: int):
         if not r: raise HTTPException(404)
     finally: await db.close()
     return {"status": "ok", "new_books": await lookup_author(aid, dict(r)["name"], full_scan=True)}
+
+@app.post("/api/authors/clear-scan-data")
+async def clear_author_scan_data(data: dict = Body(...)):
+    """Clear source and/or MAM scan data for specified authors."""
+    author_ids = data.get("author_ids", [])
+    clear_source = data.get("clear_source", False)
+    clear_mam = data.get("clear_mam", False)
+    if not author_ids:
+        return {"error": "No authors specified"}
+    if not clear_source and not clear_mam:
+        return {"error": "Nothing to clear — specify clear_source and/or clear_mam"}
+    db = await get_db()
+    try:
+        placeholders = ",".join(["?" for _ in author_ids])
+        affected = 0
+        if clear_source:
+            cur = await db.execute(
+                f"DELETE FROM books WHERE author_id IN ({placeholders}) AND owned=0 AND calibre_id IS NULL",
+                author_ids
+            )
+            affected += cur.rowcount
+            await db.execute(
+                f"UPDATE books SET source_url=NULL, source=NULL WHERE author_id IN ({placeholders}) AND owned=1",
+                author_ids
+            )
+            await db.execute(
+                f"UPDATE authors SET last_lookup_at=NULL WHERE id IN ({placeholders})",
+                author_ids
+            )
+        if clear_mam:
+            await db.execute(
+                f"UPDATE books SET mam_url=NULL, mam_status=NULL, mam_formats=NULL, mam_torrent_id=NULL, mam_has_multiple=0 WHERE author_id IN ({placeholders})",
+                author_ids
+            )
+        await db.commit()
+        logger.info(f"Cleared scan data for {len(author_ids)} authors (source={clear_source}, mam={clear_mam}), {affected} books deleted")
+        return {"status": "ok", "authors_cleared": len(author_ids), "books_deleted": affected}
+    finally:
+        await db.close()
 
 # ─── MAM Integration ─────────────────────────────────────────
 
