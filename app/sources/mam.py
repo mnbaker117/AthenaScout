@@ -690,6 +690,7 @@ async def scan_books_batch(
     delay: float = DEFAULT_DELAY,
     skip_ip_update: bool = False,
     format_priority: list[str] = None,
+    on_progress: callable = None,
 ) -> dict:
     """
     Scan a batch of books that don't yet have MAM data.
@@ -761,6 +762,9 @@ async def scan_books_batch(
             stats["errors"] += 1
         else:
             stats["not_found"] += 1
+
+        if on_progress:
+            on_progress(dict(stats))
 
         if (i + 1) % 10 == 0:
             await db.commit()

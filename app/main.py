@@ -87,24 +87,43 @@ async def lifespan(app: FastAPI):
                     logger.error(f"MAM validation failed — skipping scan: {vr['message']}")
                     last_scan_at = time.time()
                     continue
-            logger.info("MAM scheduled scan starting (100 books)")
-            _mam_scan_progress = {"running": True, "scanned": 0, "total": 100,
+            # Query total remaining for context
+            db = await get_db()
+            try:
+                rem_row = await db.execute_fetchall(
+                    "SELECT COUNT(*) FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0"
+                )
+                total_remaining = rem_row[0][0] if rem_row else 0
+            finally:
+                await db.close()
+            if total_remaining == 0:
+                logger.info("MAM scheduled scan: no books need scanning")
+                last_scan_at = time.time()
+                continue
+            scan_limit = min(100, total_remaining)
+            logger.info(f"MAM scheduled scan starting ({scan_limit} books, {total_remaining} total remaining)")
+            _mam_scan_progress = {"running": True, "scanned": 0, "total": scan_limit,
                                   "found": 0, "possible": 0, "not_found": 0,
-                                  "errors": 0, "status": "scanning", "type": "scheduled"}
+                                  "errors": 0, "status": "scanning", "type": "scheduled",
+                                  "remaining": total_remaining}
+            def _sched_progress(stats):
+                _mam_scan_progress.update({
+                    "scanned": stats["scanned"],
+                    "found": stats["found"],
+                    "possible": stats["possible"],
+                    "not_found": stats["not_found"],
+                    "errors": stats["errors"],
+                })
             db = await get_db()
             try:
                 result = await mam_scan_batch(
                     db, session_id=s["mam_session_id"], limit=100,
                     delay=s.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=s.get("mam_format_priority"),
+                    on_progress=_sched_progress,
                 )
                 _mam_scan_progress.update({
                     "running": False,
-                    "scanned": result.get("scanned", 0),
-                    "found": result.get("found", 0),
-                    "possible": result.get("possible", 0),
-                    "not_found": result.get("not_found", 0),
-                    "errors": result.get("errors", 0),
                     "status": "complete" if not result.get("error") else f"error: {result.get('error')}",
                 })
                 await db.execute(
@@ -968,16 +987,26 @@ async def mam_scan_endpoint():
                 return
             db = await get_db()
             try:
+                def _progress(stats):
+                    _mam_scan_progress.update({
+                        "scanned": base_scanned + stats["scanned"],
+                        "found": base_found + stats["found"],
+                        "possible": base_possible + stats["possible"],
+                        "not_found": base_not_found + stats["not_found"],
+                        "errors": base_errors + stats["errors"],
+                    })
+                base_scanned = _mam_scan_progress["scanned"]
+                base_found = _mam_scan_progress["found"]
+                base_possible = _mam_scan_progress["possible"]
+                base_not_found = _mam_scan_progress["not_found"]
+                base_errors = _mam_scan_progress["errors"]
                 result = await mam_scan_batch(
                     db, session_id=cs["mam_session_id"], limit=100,
                     delay=cs.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=cs.get("mam_format_priority"),
+                    on_progress=_progress,
                 )
-                _mam_scan_progress["scanned"] += result.get("scanned", 0)
-                _mam_scan_progress["found"] += result.get("found", 0)
-                _mam_scan_progress["possible"] += result.get("possible", 0)
-                _mam_scan_progress["not_found"] += result.get("not_found", 0)
-                _mam_scan_progress["errors"] += result.get("errors", 0)
+                # Progress already updated per-book via on_progress callback
                 if result.get("error"):
                     _mam_scan_progress.update({"status": f"error: {result['error']}", "running": False})
                     return
