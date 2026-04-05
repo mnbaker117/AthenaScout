@@ -168,12 +168,16 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
   {label:"Authors",value:d.authors,color:t.purt,icon:"✍",nav:()=>onNav("authors")},
   {label:"Series",value:d.total_series,color:t.cyant,icon:"📖"},
   {label:"Upcoming",value:d.upcoming_books||0,color:t.cyant,icon:"📅",nav:()=>onNav("upcoming")},
-  ...(d.mam_enabled&&d.mam?[
-    {label:"Upload Candidates",value:d.mam.upload_candidates||0,color:t.grnt,icon:"↑",nav:()=>onNav("mam")},
-    {label:"On MAM",value:d.mam.available_to_download||0,color:t.cyant,icon:"↓",nav:()=>onNav("mam")},
-  ]:[]),
 ].map(c=><div key={c.label} onClick={c.nav} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"16px 18px",cursor:c.nav?"pointer":"default",transition:"border-color 0.2s"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:20}}>{c.icon}</span><span style={{fontSize:24,fontWeight:700,color:c.color}}>{c.value}</span></div><div style={{fontSize:12,color:t.td,marginTop:6}}>{c.label}</div></div>)}
 </div>
+
+{d.mam_enabled&&d.mam?<div onClick={()=>onNav("mam")} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"14px 20px",cursor:"pointer",display:"flex",alignItems:"center",gap:20,flexWrap:"wrap",transition:"border-color 0.2s"}}>
+<span style={{fontSize:13,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.04em"}}>MAM</span>
+<div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16,color:t.grnt}}>↑</span><span style={{fontSize:20,fontWeight:700,color:t.grnt}}>{d.mam.upload_candidates||0}</span><span style={{fontSize:12,color:t.td}}>Upload Candidates</span></div>
+<div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16,color:t.cyant}}>↓</span><span style={{fontSize:20,fontWeight:700,color:t.cyant}}>{d.mam.available_to_download||0}</span><span style={{fontSize:12,color:t.td}}>Available on MAM</span></div>
+<div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16,color:t.tg}}>∅</span><span style={{fontSize:20,fontWeight:700,color:t.tg}}>{d.mam.missing_everywhere||0}</span><span style={{fontSize:12,color:t.td}}>Missing Everywhere</span></div>
+{d.mam.total_unscanned>0?<div style={{marginLeft:"auto",fontSize:12,color:t.ylwt,fontStyle:"italic"}}>{d.mam.total_unscanned} unscanned</div>:null}
+</div>:null}
 
 {/* Actions */}
 <div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:20,display:"flex",gap:20,flexWrap:"wrap"}}>
