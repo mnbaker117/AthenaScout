@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(60)
             s = load_settings()
             interval = s.get("mam_scan_interval_minutes", 360)
-            if interval <= 0 or not s.get("mam_enabled") or not s.get("mam_session_id"):
+            if interval <= 0 or not s.get("mam_enabled") or not s.get("mam_session_id") or not s.get("mam_scanning_enabled", True):
                 continue
             elapsed_min = (time.time() - last_scan_at) / 60
             if elapsed_min < interval:
@@ -232,7 +232,7 @@ async def get_stats():
         mam_stats = None
         if s.get("mam_enabled") and s.get("mam_session_id"):
             mam_stats = await get_mam_stats(db)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "author_scanning_enabled": s.get("author_scanning_enabled", True)}
+        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True)}
     finally: await db.close()
 
 # ─── Authors ─────────────────────────────────────────────────
@@ -1029,6 +1029,8 @@ async def mam_scan_endpoint():
     s = load_settings()
     if not s.get("mam_enabled") or not s.get("mam_session_id"):
         return {"error": "MAM not configured or not enabled"}
+    if not s.get("mam_scanning_enabled", True):
+        return {"error": "MAM scanning is disabled — enable it in Settings"}
     if _mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
     if _lookup_progress.get("running"):
@@ -1054,6 +1056,14 @@ async def mam_scan_endpoint():
         global _mam_scan_progress
         batch_num = 0
         while True:
+            # Wait for any author scan before starting next batch
+            if _lookup_progress.get("running"):
+                _mam_scan_progress["status"] = "waiting (author scan running)"
+                logger.info("MAM scan waiting for author scan to finish...")
+                while _lookup_progress.get("running"):
+                    await asyncio.sleep(30)
+                logger.info("Author scan finished — MAM scan resuming")
+                _mam_scan_progress["status"] = "scanning"
             cs = load_settings()
             if not cs.get("mam_enabled") or not cs.get("mam_session_id"):
                 _mam_scan_progress.update({"status": "stopped (MAM disabled)", "running": False})
@@ -1108,6 +1118,13 @@ async def mam_scan_endpoint():
             _mam_scan_progress["status"] = "paused"
             logger.info(f"MAM scan batch {batch_num} done ({_mam_scan_progress['scanned']}/{_mam_scan_progress['total']}), pausing 5 min")
             await asyncio.sleep(300)
+            # Wait for any author scan to finish before resuming
+            if _lookup_progress.get("running"):
+                _mam_scan_progress["status"] = "waiting (author scan running)"
+                logger.info("MAM scan waiting for author scan to finish...")
+                while _lookup_progress.get("running"):
+                    await asyncio.sleep(30)
+                logger.info("Author scan finished — MAM scan resuming")
             _mam_scan_progress["status"] = "scanning"
 
     _mam_scan_task = asyncio.create_task(_do_scan())
@@ -1141,6 +1158,8 @@ async def mam_test_scan():
     s = load_settings()
     if not s.get("mam_enabled") or not s.get("mam_session_id"):
         return {"error": "MAM not configured or not enabled"}
+    if not s.get("mam_scanning_enabled", True):
+        return {"error": "MAM scanning is disabled — enable it in Settings"}
     if _mam_scan_task and not _mam_scan_task.done():
         return {"error": "A MAM scan is already running — wait for it to finish"}
     db = await get_db()
@@ -1163,6 +1182,8 @@ async def mam_full_scan_start():
     s = load_settings()
     if not s.get("mam_enabled") or not s.get("mam_session_id"):
         return {"error": "MAM not configured or not enabled"}
+    if not s.get("mam_scanning_enabled", True):
+        return {"error": "MAM scanning is disabled — enable it in Settings"}
     if _mam_full_scan_task and not _mam_full_scan_task.done():
         return {"error": "A full MAM scan is already running"}
     if _mam_scan_progress.get("running"):
@@ -1210,6 +1231,13 @@ async def mam_full_scan_start():
                 _mam_scan_progress["status"] = "paused"
                 logger.info(f"Full MAM scan: batch done, waiting {wait//60} min")
                 await asyncio.sleep(wait)
+                # Wait for any author scan to finish before resuming
+                if _lookup_progress.get("running"):
+                    _mam_scan_progress["status"] = "waiting (author scan running)"
+                    logger.info("Full MAM scan waiting for author scan to finish...")
+                    while _lookup_progress.get("running"):
+                        await asyncio.sleep(30)
+                    logger.info("Author scan finished — full MAM scan resuming")
                 _mam_scan_progress["status"] = "scanning"
 
     _mam_full_scan_task = asyncio.create_task(_full_scan_loop())
@@ -1256,22 +1284,33 @@ async def toggle_author_scanning():
     return {"enabled": new_val}
 
 
-@app.post("/api/mam/toggle")
-async def mam_toggle():
-    """Toggle MAM features on/off. Cancels running scans when disabled."""
+@app.post("/api/scanning/mam/toggle")
+async def toggle_mam_scanning():
+    """Toggle MAM scanning on/off without affecting MAM feature visibility."""
     global _mam_scan_task, _mam_full_scan_task, _mam_scan_progress
     s = load_settings()
-    if not s.get("mam_session_id"):
-        return {"error": "No MAM session ID configured"}
-    s["mam_enabled"] = not s.get("mam_enabled", False)
+    new_val = not s.get("mam_scanning_enabled", True)
+    s["mam_scanning_enabled"] = new_val
     save_settings(s)
-    if not s["mam_enabled"]:
+    if not new_val:
         if _mam_scan_task and not _mam_scan_task.done():
             _mam_scan_task.cancel()
             _mam_scan_progress.update({"running": False, "status": "cancelled"})
         if _mam_full_scan_task and not _mam_full_scan_task.done():
             _mam_full_scan_task.cancel()
-        logger.info("MAM disabled — cancelled running scans")
+            _mam_scan_progress.update({"running": False, "status": "cancelled"})
+        logger.info("MAM scanning disabled — cancelled running scans")
+    return {"enabled": new_val}
+
+
+@app.post("/api/mam/toggle")
+async def mam_toggle():
+    """Toggle MAM features on/off (only works if session ID exists)."""
+    s = load_settings()
+    if not s.get("mam_session_id"):
+        return {"error": "No MAM session ID configured"}
+    s["mam_enabled"] = not s.get("mam_enabled", False)
+    save_settings(s)
     return {"enabled": s["mam_enabled"]}
 
 

@@ -59,6 +59,7 @@ DEFAULT_SETTINGS = {
     "calibre_url": "",
     "mam_session_id": "",
     "mam_enabled": False,
+    "mam_scanning_enabled": True,
     "mam_skip_ip_update": True,
     "mam_scan_interval_minutes": 360,
     "mam_format_priority": ["epub", "azw", "azw3", "pdf", "djvu", "azw4"],
