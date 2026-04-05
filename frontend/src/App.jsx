@@ -168,6 +168,10 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
   {label:"Authors",value:d.authors,color:t.purt,icon:"✍",nav:()=>onNav("authors")},
   {label:"Series",value:d.total_series,color:t.cyant,icon:"📖"},
   {label:"Upcoming",value:d.upcoming_books||0,color:t.cyant,icon:"📅",nav:()=>onNav("upcoming")},
+  ...(d.mam_enabled&&d.mam?[
+    {label:"Upload Candidates",value:d.mam.upload_candidates||0,color:t.grnt,icon:"↑",nav:()=>onNav("mam")},
+    {label:"On MAM",value:d.mam.available_to_download||0,color:t.cyant,icon:"↓",nav:()=>onNav("mam")},
+  ]:[]),
 ].map(c=><div key={c.label} onClick={c.nav} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"16px 18px",cursor:c.nav?"pointer":"default",transition:"border-color 0.2s"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:20}}>{c.icon}</span><span style={{fontSize:24,fontWeight:700,color:c.color}}>{c.value}</span></div><div style={{fontSize:12,color:t.td,marginTop:6}}>{c.label}</div></div>)}
 </div>
 

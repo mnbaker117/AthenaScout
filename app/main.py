@@ -477,7 +477,7 @@ async def export_books(filter: str = Query("missing"), format: str = Query("csv"
         elif filter == "missing": c.append("b.owned=0")
         w = " AND ".join(c)
         rows = await (await db.execute(
-            f"SELECT b.title, a.name as author_name, b.pub_date, b.expected_date, b.source, b.source_url, b.is_unreleased, b.mam_url, b.mam_formats "
+            f"SELECT b.title, a.name as author_name, b.pub_date, b.expected_date, b.source, b.source_url, b.is_unreleased, b.mam_status, b.mam_url, b.mam_formats "
             f"FROM books b JOIN authors a ON b.author_id=a.id WHERE {w} ORDER BY a.sort_name, b.title", p
         )).fetchall()
         
@@ -525,18 +525,21 @@ async def export_books(filter: str = Query("missing"), format: str = Query("csv"
             import csv, io
             buf = io.StringIO()
             writer = csv.writer(buf)
-            writer.writerow(["Title", "Author", "Release Date", "Source", "Source URL", "MAM URL", "MAM Formats"])
+            writer.writerow(["Title", "Author", "Release Date", "Source", "Source URL", "MAM Status", "MAM URL", "MAM Formats"])
             for r in rows:
                 src_name, src_url = _best_url(r["source_url"])
                 date = r["pub_date"] or r["expected_date"] or ""
                 if r["is_unreleased"] and r["expected_date"]:
                     date = f"{r['expected_date']} (upcoming)"
-                writer.writerow([r["title"], r["author_name"], date, src_name or r["source"] or "", src_url, r["mam_url"] or "", r["mam_formats"] or ""])
+                mam_status = r["mam_status"] or ""
+                mam_url = r["mam_url"] or ""
+                mam_formats = r["mam_formats"] or ""
+                writer.writerow([r["title"], r["author_name"], date, src_name or r["source"] or "", src_url, mam_status, mam_url, mam_formats])
             content = buf.getvalue()
             return Response(content=content, media_type="text/csv",
                           headers={"Content-Disposition": f"attachment; filename=books_{filter}.csv"})
         else:
-            lines = ["Title, Author, Release Date, Source, Source URL"]
+            lines = ["Title, Author, Release Date, Source, Source URL, MAM Status, MAM URL, MAM Formats"]
             for r in rows:
                 src_name, src_url = _best_url(r["source_url"])
                 date = r["pub_date"] or r["expected_date"] or ""
@@ -545,12 +548,10 @@ async def export_books(filter: str = Query("missing"), format: str = Query("csv"
                 # Escape commas in titles/authors
                 title = r["title"].replace(",", ";")
                 author = r["author_name"].replace(",", ";")
-                line = f"{title}, {author}, {date}, {src_name or r['source'] or ''}, {src_url}"
-                if r["mam_url"] and r["mam_formats"]:
-                    line += f" | MAM ({r['mam_formats']}): {r['mam_url']}"
-                elif r["mam_url"]:
-                    line += f" | MAM: {r['mam_url']}"
-                lines.append(line)
+                mam_status = r["mam_status"] or ""
+                mam_url = r["mam_url"] or ""
+                mam_formats = (r["mam_formats"] or "").replace(",", "/")
+                lines.append(f"{title}, {author}, {date}, {src_name or r['source'] or ''}, {src_url}, {mam_status}, {mam_url}, {mam_formats}")
             content = "\n".join(lines)
             return Response(content=content, media_type="text/plain",
                           headers={"Content-Disposition": f"attachment; filename=books_{filter}.txt"})
