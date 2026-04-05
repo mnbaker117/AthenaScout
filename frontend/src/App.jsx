@@ -83,6 +83,13 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
   if(entries.length===0)return null;
   return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:4}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Metadata</span><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{entries.map(e=>{const c=badgeColors[e.name]||badgeColors.manual;return<a key={e.name} href={e.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:c.bg,color:c.fg,border:`1px solid ${c.br}`}}>{e.name}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>})}</div></div>
 })()}
+{book.mam_status?<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:4}}>
+<span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM</span>
+<div style={{display:"flex",alignItems:"center",gap:6}}>
+{book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",color:book.mam_status==="found"?t.grnt:t.ylwt,border:`1px solid ${book.mam_status==="found"?"#2a882a":"#88882a"}`}}>{book.mam_status==="found"?"Found":"Possible"}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>:book.mam_status==="not_found"?<span style={{fontSize:12,color:t.tg,fontStyle:"italic"}}>{book.owned?"Not on MAM (upload candidate)":"Not on MAM"}</span>:null}
+{book.mam_formats?<span style={{fontSize:11,color:t.td,textTransform:"uppercase"}}>{book.mam_formats}</span>:null}
+{book.mam_has_multiple?<span style={{fontSize:10,color:t.tg,fontStyle:"italic"}}>multiple uploads</span>:null}
+</div></div>:null}
 {book.rating?<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Rating</span><span style={{fontSize:13,color:t.ylwt}}>{"★".repeat(Math.round(book.rating))}{"☆".repeat(5-Math.round(book.rating))} <span style={{fontSize:11,color:t.td}}>({book.rating})</span></span></div>:null}
 {book.isbn?<SBRow label="ISBN" value={book.isbn}/>:null}
 {book.page_count?<SBRow label="Pages" value={book.page_count}/>:null}
