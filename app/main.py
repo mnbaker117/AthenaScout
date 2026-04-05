@@ -1392,23 +1392,13 @@ async def mam_books_endpoint(section: str = "upload", search: str = "",
         total = count_row[0][0] if count_row else 0
 
         offset = (page - 1) * per_page
-        data_sql = f"""SELECT b.id, b.title, a.name, a.id, s.name, b.series_index,
-            b.pub_date, b.cover_url, b.cover_path, b.owned, b.mam_url, b.mam_status,
-            b.mam_formats, b.mam_torrent_id, b.mam_has_multiple,
-            b.source_url, b.calibre_id
+        data_sql = f"""SELECT b.*, a.name as author_name, s.name as series_name,
+            (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total
             FROM books b JOIN authors a ON b.author_id=a.id
             LEFT JOIN series s ON b.series_id=s.id
             WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?"""
         rows = await db.execute_fetchall(data_sql, params + [per_page, offset])
-
-        import json as _json
-        books = [{"id": r[0], "title": r[1], "author_name": r[2], "author_id": r[3],
-                  "series_name": r[4], "series_index": r[5], "pub_date": r[6],
-                  "cover_url": r[7], "cover_path": r[8], "owned": bool(r[9]),
-                  "mam_url": r[10], "mam_status": r[11], "mam_formats": r[12],
-                  "mam_torrent_id": r[13], "mam_has_multiple": bool(r[14]),
-                  "source_url": _json.loads(r[15]) if r[15] else {},
-                  "calibre_id": r[16]} for r in rows]
+        books = [dict(r) for r in rows]
 
         return {"books": books, "total": total, "page": page, "per_page": per_page,
                 "total_pages": (total + per_page - 1) // per_page}
