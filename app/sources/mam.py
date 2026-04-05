@@ -691,6 +691,7 @@ async def scan_books_batch(
     skip_ip_update: bool = False,
     format_priority: list[str] = None,
     on_progress: callable = None,
+    cancel_check: callable = None,
 ) -> dict:
     """
     Scan a batch of books that don't yet have MAM data.
@@ -765,6 +766,11 @@ async def scan_books_batch(
 
         if on_progress:
             on_progress(dict(stats))
+
+        if cancel_check and cancel_check():
+            logger.info(f"MAM scan: pause requested after {stats['scanned']} books")
+            await db.commit()
+            return stats
 
         if (i + 1) % 10 == 0:
             await db.commit()

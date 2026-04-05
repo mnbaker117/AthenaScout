@@ -373,6 +373,7 @@ async def run_full_lookup(on_progress=None):
     start = time.time()
     settings = load_settings()
     cache_sec = settings.get("lookup_interval_days", 3) * 86400
+    sid = None
     db = await get_db()
     try:
         cur = await db.execute("INSERT INTO sync_log (sync_type, started_at) VALUES (?, ?)", ("lookup", start))
@@ -392,7 +393,13 @@ async def run_full_lookup(on_progress=None):
         logger.info(f"Lookup done: {checked} authors, {total} new books")
         return {"authors_checked": checked, "new_books": total}
     except Exception as e:
-        await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid)); await db.commit(); raise
+        if sid:
+            try:
+                await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid))
+                await db.commit()
+            except Exception:
+                pass
+        raise
     finally:
         await db.close()
 
@@ -402,6 +409,7 @@ async def run_full_rescan(on_progress=None):
     logger.info("Starting FULL RE-SCAN of all authors...")
     reload_sources()
     start = time.time()
+    sid = None
     db = await get_db()
     try:
         cur = await db.execute("INSERT INTO sync_log (sync_type, started_at) VALUES (?, ?)", ("full_rescan", start))
@@ -421,6 +429,12 @@ async def run_full_rescan(on_progress=None):
         logger.info(f"Full re-scan done: {checked} authors, {total} new books")
         return {"authors_checked": checked, "new_books": total}
     except Exception as e:
-        await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid)); await db.commit(); raise
+        if sid:
+            try:
+                await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid))
+                await db.commit()
+            except Exception:
+                pass
+        raise
     finally:
         await db.close()

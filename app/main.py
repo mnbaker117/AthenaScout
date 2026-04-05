@@ -144,6 +144,7 @@ async def lifespan(app: FastAPI):
                     delay=s.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=s.get("mam_format_priority"),
                     on_progress=_sched_progress,
+                    cancel_check=lambda: _lookup_progress.get("running", False),
                 )
                 _mam_scan_progress.update({
                     "running": False,
@@ -1088,6 +1089,7 @@ async def mam_scan_endpoint():
                     delay=cs.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=cs.get("mam_format_priority"),
                     on_progress=_progress,
+                    cancel_check=lambda: _lookup_progress.get("running", False),
                 )
                 # Progress already updated per-book via on_progress callback
                 if result.get("error"):
@@ -1169,6 +1171,7 @@ async def mam_test_scan():
             delay=s.get("rate_mam", 2),
             skip_ip_update=True,
             format_priority=s.get("mam_format_priority"),
+            cancel_check=lambda: _lookup_progress.get("running", False),
         )
         return result
     finally:
