@@ -48,7 +48,7 @@ function SearchBar({value,onChange,placeholder="Search..."}){const t=T();return<
 function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}){const t=T();const[editing,setEditing]=useState(false);const[ef,setEf]=useState({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");
 useEffect(()=>{api.get("/settings").then(s=>setCwUrl(s.calibre_web_url||"")).catch(()=>{})},[]);
 if(!book)return null;
-const startEdit=()=>{setEf({title:book.title||"",description:book.description||"",pub_date:book.pub_date||"",expected_date:book.expected_date||"",isbn:book.isbn||"",series_index:book.series_index||"",is_unreleased:!!book.is_unreleased,source_url:book.source_url||""});setEditing(true)};
+const startEdit=()=>{setEf({title:book.title||"",description:book.description||"",pub_date:book.pub_date||"",expected_date:book.expected_date||"",isbn:book.isbn||"",series_index:book.series_index||"",is_unreleased:!!book.is_unreleased,source_url:book.source_url||"",mam_url:book.mam_url||""});setEditing(true)};
 const saveEdit=async()=>{setSaving(true);try{await api.put(`/books/${book.id}`,ef);setEditing(false);onEdit&&onEdit()}catch{}setSaving(false)};
 const upE=(k,v)=>setEf(p=>({...p,[k]:v}));
 const ist={padding:"6px 8px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13,width:"100%"};
@@ -68,6 +68,7 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
 <div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Series #</span><input type="number" value={ef.series_index} onChange={e=>upE("series_index",e.target.value)} style={ist}/></div>
 <div style={{display:"flex",alignItems:"center",gap:6}}><input type="checkbox" checked={ef.is_unreleased} onChange={e=>upE("is_unreleased",e.target.checked)}/><span style={{fontSize:12,color:t.text2}}>Unreleased</span></div>
 <div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Source URL</span><input value={ef.source_url} onChange={e=>upE("source_url",e.target.value)} placeholder="https://www.goodreads.com/book/show/..." style={ist}/></div>
+<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM URL</span><input value={ef.mam_url} onChange={e=>upE("mam_url",e.target.value)} placeholder="https://www.myanonamouse.net/t/123456" style={ist}/><span style={{fontSize:10,color:t.tg,marginTop:2,display:"block"}}>Paste a MAM torrent URL to set status to Found. Clear to reset.</span></div>
 <div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Description</span><textarea value={ef.description} onChange={e=>upE("description",e.target.value)} rows={4} style={{...ist,resize:"vertical"}}/></div>
 <div style={{display:"flex",gap:6}}><Btn size="sm" variant="accent" onClick={saveEdit} disabled={saving}>{saving?<Spin/>:"Save"}</Btn><Btn size="sm" variant="ghost" onClick={()=>setEditing(false)}>Cancel</Btn></div>
 </div>:<>
@@ -83,13 +84,16 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
   if(entries.length===0)return null;
   return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:4}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Metadata</span><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{entries.map(e=>{const c=badgeColors[e.name]||badgeColors.manual;return<a key={e.name} href={e.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:c.bg,color:c.fg,border:`1px solid ${c.br}`}}>{e.name}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>})}</div></div>
 })()}
-{book.mam_status?<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:4}}>
+{book.mam_status?<div>
+<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:4}}>
 <span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM</span>
-<div style={{display:"flex",alignItems:"center",gap:6}}>
 {book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",color:book.mam_status==="found"?t.grnt:t.ylwt,border:`1px solid ${book.mam_status==="found"?"#2a882a":"#88882a"}`}}>{book.mam_status==="found"?"Found":"Possible"}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>:book.mam_status==="not_found"?<span style={{fontSize:12,color:t.tg,fontStyle:"italic"}}>{book.owned?"Not on MAM (upload candidate)":"Not on MAM"}</span>:null}
-{book.mam_formats?<span style={{fontSize:11,color:t.td,textTransform:"uppercase"}}>{book.mam_formats}</span>:null}
-{book.mam_has_multiple?<span style={{fontSize:10,color:t.tg,fontStyle:"italic"}}>multiple uploads</span>:null}
-</div></div>:null}
+</div>
+{book.mam_url&&(book.mam_formats||book.mam_has_multiple)?<div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"flex-end",marginTop:3}}>
+{book.mam_formats?<span style={{fontSize:11,color:t.td,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.03em"}}>{book.mam_formats.split(",").join(" · ")}</span>:null}
+{book.mam_has_multiple?<span style={{fontSize:11,padding:"1px 6px",borderRadius:4,background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}33`}}>Multiple uploads</span>:null}
+</div>:null}
+</div>:null}
 {book.rating?<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Rating</span><span style={{fontSize:13,color:t.ylwt}}>{"★".repeat(Math.round(book.rating))}{"☆".repeat(5-Math.round(book.rating))} <span style={{fontSize:11,color:t.td}}>({book.rating})</span></span></div>:null}
 {book.isbn?<SBRow label="ISBN" value={book.isbn}/>:null}
 {book.page_count?<SBRow label="Pages" value={book.page_count}/>:null}
@@ -188,7 +192,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <span>{lookupScan.type==="full_rescan"?"Full Re-Scan":"Scanning sources..."} {lookupScan.current_author?`— ${lookupScan.current_author}`:""}</span>
 <span style={{fontSize:11,color:t.tg}}>{lookupScan.checked} of {lookupScan.total} authors</span></div>
 <div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${lookupScan.total>0?Math.round(lookupScan.checked/lookupScan.total*100):0}%`,height:"100%",borderRadius:3,background:t.accent,transition:"width 0.5s"}}/></div>
-<div style={{fontSize:11,color:t.tg}}>New books found: <b style={{color:t.grnt}}>{lookupScan.new_books}</b></div>
+<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,color:t.tg}}>New books found: <b style={{color:t.grnt}}>{lookupScan.new_books}</b></span><Btn size="sm" onClick={async()=>{try{await api.post("/lookup/cancel");const r=await api.get("/lookup/status");setLookupScan(r)}catch{}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
 </div>:<div style={{fontSize:13,color:lookupScan.status==="complete"?t.grnt:t.redt}}>{lookupScan.status==="complete"?`${lookupScan.type==="full_rescan"?"Full Re-Scan":"Source Scan"} Complete — ${lookupScan.checked} authors checked, ${lookupScan.new_books} new books found`:`Source Scan: ${lookupScan.status}`}</div>}</div>:null}
 
 {mamScan&&mamScan.status!=="idle"?<div style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{mamScan.running?<div>
@@ -196,7 +200,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <span>{mamScan.status==="paused"?"Paused — resuming in 5 min":mamScan.type==="scheduled"?"Scheduled scan running...":"Scanning MAM..."}{" "}{mamScan.scanned} of {mamScan.total} books{mamScan.remaining&&mamScan.remaining>mamScan.total?` (${mamScan.remaining} total remaining)`:""}</span>
 <span style={{fontSize:11,textTransform:"capitalize",color:t.tg}}>{mamScan.type||"scan"}</span></div>
 <div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${mamScan.total>0?Math.round(mamScan.scanned/mamScan.total*100):0}%`,height:"100%",borderRadius:3,background:mamScan.status==="paused"?t.ylw:t.accent,transition:"width 0.5s"}}/></div>
-<div style={{display:"flex",gap:12,fontSize:11,color:t.tg}}><span style={{color:t.grnt}}>Found: {mamScan.found}</span><span style={{color:t.ylwt}}>Possible: {mamScan.possible}</span><span style={{color:t.redt}}>Not found: {mamScan.not_found}</span>{mamScan.errors>0?<span style={{color:t.red}}>Errors: {mamScan.errors}</span>:null}</div>
+<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",gap:12,fontSize:11,color:t.tg}}><span style={{color:t.grnt}}>Found: {mamScan.found}</span><span style={{color:t.ylwt}}>Possible: {mamScan.possible}</span><span style={{color:t.redt}}>Not found: {mamScan.not_found}</span>{mamScan.errors>0?<span style={{color:t.red}}>Errors: {mamScan.errors}</span>:null}</div><Btn size="sm" onClick={async()=>{try{await api.post("/mam/scan/cancel");const r=await api.get("/mam/scan/status");setMamScan(r)}catch{}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
 </div>:<div style={{fontSize:13}}><span style={{color:mamScan.status==="complete"?t.grnt:t.redt}}>{mamScan.status==="complete"?`MAM Scan Complete — ${mamScan.scanned} scanned: ${mamScan.found} found, ${mamScan.possible} possible, ${mamScan.not_found} not found${mamScan.errors>0?`, ${mamScan.errors} errors`:""}`:`MAM Scan: ${mamScan.status}`}</span></div>}</div>:null}
 
 {d.mam_enabled?<div style={{fontSize:11,color:t.tg,marginTop:6,fontStyle:"italic"}}>MAM Scan checks all books missing MAM data (100 per batch, 5-min pauses between batches).</div>:null}

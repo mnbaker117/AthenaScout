@@ -387,6 +387,20 @@ async def update_book(bid: int, data: dict = Body(...)):
         for k in ["title", "description", "pub_date", "expected_date", "isbn", "cover_url", "series_index", "source_url"]:
             if k in data:
                 fields.append(f"{k}=?"); vals.append(data[k])
+        # Handle MAM URL — validate format and update status
+        if "mam_url" in data:
+            mam_url = (data["mam_url"] or "").strip()
+            if mam_url:
+                import re
+                mam_match = re.match(r'https?://(?:www\.)?myanonamouse\.net/t/(\d+)', mam_url)
+                if not mam_match:
+                    raise HTTPException(400, "Invalid MAM URL. Expected format: https://www.myanonamouse.net/t/123456")
+                torrent_id = int(mam_match.group(1))
+                fields.extend(["mam_url=?", "mam_status=?", "mam_torrent_id=?"])
+                vals.extend([mam_url, "found", torrent_id])
+            else:
+                fields.extend(["mam_url=?", "mam_status=?", "mam_torrent_id=?"])
+                vals.extend([None, None, None])
         if "is_unreleased" in data:
             fields.append("is_unreleased=?"); vals.append(1 if data["is_unreleased"] else 0)
         if not fields:
@@ -930,6 +944,18 @@ async def trigger_lookup():
 async def trigger_lookup_alias():
     return await trigger_lookup()
 
+@app.post("/api/lookup/cancel")
+async def lookup_cancel():
+    """Cancel the currently running author scan."""
+    global _lookup_task, _lookup_progress
+    if _lookup_task and not _lookup_task.done():
+        _lookup_task.cancel()
+        _lookup_progress.update({"running": False, "status": "cancelled"})
+        logger.info("Author scan cancelled by user")
+        return {"status": "ok", "message": "Author scan cancelled"}
+    return {"status": "ok", "message": "No author scan running"}
+
+
 @app.get("/api/lookup/status")
 async def lookup_status():
     """Get progress of the current/most recent author scan."""
@@ -1131,6 +1157,18 @@ async def mam_scan_endpoint():
 
     _mam_scan_task = asyncio.create_task(_do_scan())
     return {"status": "started", "total": total}
+
+
+@app.post("/api/mam/scan/cancel")
+async def mam_scan_cancel():
+    """Cancel the currently running MAM scan."""
+    global _mam_scan_task, _mam_scan_progress
+    if _mam_scan_task and not _mam_scan_task.done():
+        _mam_scan_task.cancel()
+        _mam_scan_progress.update({"running": False, "status": "cancelled"})
+        logger.info("MAM scan cancelled by user")
+        return {"status": "ok", "message": "MAM scan cancelled"}
+    return {"status": "ok", "message": "No MAM scan running"}
 
 
 @app.get("/api/mam/scan/status")
