@@ -1034,11 +1034,17 @@ async def clear_author_scan_data(data: dict = Body(...)):
         placeholders = ",".join(["?" for _ in author_ids])
         affected = 0
         if clear_source:
-            cur = await db.execute(
+            # Count books that will be deleted
+            count_row = await db.execute_fetchall(
+                f"SELECT COUNT(*) FROM books WHERE author_id IN ({placeholders}) AND owned=0 AND calibre_id IS NULL",
+                author_ids
+            )
+            affected = count_row[0][0] if count_row else 0
+            # Delete non-owned books (discovered by source scans) for these authors
+            await db.execute(
                 f"DELETE FROM books WHERE author_id IN ({placeholders}) AND owned=0 AND calibre_id IS NULL",
                 author_ids
             )
-            affected += cur.rowcount
             await db.execute(
                 f"UPDATE books SET source_url=NULL, source=NULL WHERE author_id IN ({placeholders}) AND owned=1",
                 author_ids
