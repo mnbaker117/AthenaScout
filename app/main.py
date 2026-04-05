@@ -40,6 +40,8 @@ HF = "b.hidden = 0"
 _mam_scan_task: asyncio.Task | None = None
 _mam_full_scan_task: asyncio.Task | None = None
 _mam_scan_progress: dict = {"running": False, "scanned": 0, "total": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0, "status": "idle", "type": "none"}
+_lookup_task: asyncio.Task | None = None
+_lookup_progress: dict = {"running": False, "checked": 0, "total": 0, "current_author": "", "new_books": 0, "status": "idle", "type": "none"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -55,8 +57,27 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(sync_calibre, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
     else:
         logger.info("Calibre auto-sync disabled (interval = 0)")
+    async def _scheduled_lookup():
+        global _lookup_progress
+        s = load_settings()
+        if not s.get("author_scanning_enabled", True):
+            return
+        if _lookup_progress.get("running"):
+            return
+        _lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+                            "new_books": 0, "status": "scanning", "type": "scheduled_lookup"}
+        def _progress(data):
+            _lookup_progress.update({"checked": data["checked"], "total": data["total"],
+                                     "current_author": data["current_author"], "new_books": data["new_books"]})
+        try:
+            await run_full_lookup(on_progress=_progress)
+            _lookup_progress.update({"running": False, "status": "complete"})
+        except Exception as e:
+            logger.error(f"Scheduled lookup error: {e}")
+            _lookup_progress.update({"running": False, "status": f"error: {e}"})
+
     if lookup_days and lookup_days > 0:
-        scheduler.add_job(run_full_lookup, "interval", minutes=lookup_days*1440, id="author_lookup", replace_existing=True)
+        scheduler.add_job(_scheduled_lookup, "interval", minutes=lookup_days*1440, id="author_lookup", replace_existing=True)
     else:
         logger.info("Auto-lookup disabled (interval = 0)")
     async def _mam_scheduler():
@@ -73,6 +94,8 @@ async def lifespan(app: FastAPI):
                 continue
             if _mam_scan_progress.get("running"):
                 continue
+            if _lookup_progress.get("running"):
+                continue  # Author scan has priority
             last_val = s.get("last_mam_validated_at") or 0
             if time.time() - last_val > 86400:
                 logger.info("MAM daily validation check...")
@@ -209,7 +232,7 @@ async def get_stats():
         mam_stats = None
         if s.get("mam_enabled") and s.get("mam_session_id"):
             mam_stats = await get_mam_stats(db)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False)}
+        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "author_scanning_enabled": s.get("author_scanning_enabled", True)}
     finally: await db.close()
 
 # ─── Authors ─────────────────────────────────────────────────
@@ -880,21 +903,66 @@ async def trigger_sync_alias():
 
 @app.post("/api/sync/lookup")
 async def trigger_lookup():
-    try: return {"status": "ok", **(await run_full_lookup())}
-    except Exception as e: raise HTTPException(500, str(e))
+    global _lookup_task, _lookup_progress
+    s = load_settings()
+    if not s.get("author_scanning_enabled", True):
+        return {"error": "Author scanning is disabled — enable it in Settings"}
+    if _lookup_task and not _lookup_task.done():
+        return {"error": "An author scan is already running"}
+    _lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+                        "new_books": 0, "status": "scanning", "type": "lookup"}
+    def _progress(data):
+        _lookup_progress.update({"checked": data["checked"], "total": data["total"],
+                                 "current_author": data["current_author"], "new_books": data["new_books"]})
+    async def _do():
+        global _lookup_progress
+        try:
+            await run_full_lookup(on_progress=_progress)
+            _lookup_progress.update({"running": False, "status": "complete"})
+        except Exception as e:
+            logger.error(f"Author scan error: {e}")
+            _lookup_progress.update({"running": False, "status": f"error: {e}"})
+    _lookup_task = asyncio.create_task(_do())
+    return {"status": "started"}
 
 @app.post("/api/lookup")
 async def trigger_lookup_alias():
     return await trigger_lookup()
 
+@app.get("/api/lookup/status")
+async def lookup_status():
+    """Get progress of the current/most recent author scan."""
+    return dict(_lookup_progress)
+
 @app.post("/api/sync/full-rescan")
 async def trigger_full_rescan():
-    """Full re-scan: visits every book page to refresh all metadata."""
-    try: return {"status": "ok", **(await run_full_rescan())}
-    except Exception as e: raise HTTPException(500, str(e))
+    global _lookup_task, _lookup_progress
+    s = load_settings()
+    if not s.get("author_scanning_enabled", True):
+        return {"error": "Author scanning is disabled — enable it in Settings"}
+    if _lookup_task and not _lookup_task.done():
+        return {"error": "An author scan is already running"}
+    _lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+                        "new_books": 0, "status": "scanning", "type": "full_rescan"}
+    def _progress(data):
+        _lookup_progress.update({"checked": data["checked"], "total": data["total"],
+                                 "current_author": data["current_author"], "new_books": data["new_books"]})
+    async def _do():
+        global _lookup_progress
+        try:
+            await run_full_rescan(on_progress=_progress)
+            _lookup_progress.update({"running": False, "status": "complete"})
+        except Exception as e:
+            logger.error(f"Full re-scan error: {e}")
+            _lookup_progress.update({"running": False, "status": f"error: {e}"})
+    _lookup_task = asyncio.create_task(_do())
+    return {"status": "started"}
 
 @app.post("/api/authors/{aid}/lookup")
 async def trigger_author_lookup(aid: int):
+    s = load_settings()
+    if not s.get("author_scanning_enabled", True):
+        return {"error": "Author scanning is disabled — enable it in Settings"}
     db = await get_db()
     try:
         r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
@@ -905,6 +973,9 @@ async def trigger_author_lookup(aid: int):
 @app.post("/api/authors/{aid}/full-rescan")
 async def trigger_author_full_rescan(aid: int):
     """Full re-scan for a single author."""
+    s = load_settings()
+    if not s.get("author_scanning_enabled", True):
+        return {"error": "Author scanning is disabled �� enable it in Settings"}
     db = await get_db()
     try:
         r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
@@ -960,6 +1031,8 @@ async def mam_scan_endpoint():
         return {"error": "MAM not configured or not enabled"}
     if _mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
+    if _lookup_progress.get("running"):
+        return {"error": "An author scan is running — MAM scan will wait until it finishes"}
 
     db = await get_db()
     try:
@@ -1094,6 +1167,8 @@ async def mam_full_scan_start():
         return {"error": "A full MAM scan is already running"}
     if _mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running — wait for it to finish"}
+    if _lookup_progress.get("running"):
+        return {"error": "An author scan is running — MAM scan will wait until it finishes"}
 
     db = await get_db()
     try:
@@ -1166,14 +1241,37 @@ async def mam_full_scan_cancel():
     return result
 
 
+@app.post("/api/scanning/author/toggle")
+async def toggle_author_scanning():
+    """Toggle author scanning on/off. Cancels running scan when disabled."""
+    global _lookup_task, _lookup_progress
+    s = load_settings()
+    new_val = not s.get("author_scanning_enabled", True)
+    s["author_scanning_enabled"] = new_val
+    save_settings(s)
+    if not new_val and _lookup_task and not _lookup_task.done():
+        _lookup_task.cancel()
+        _lookup_progress.update({"running": False, "status": "cancelled"})
+        logger.info("Author scanning disabled — cancelled running scan")
+    return {"enabled": new_val}
+
+
 @app.post("/api/mam/toggle")
 async def mam_toggle():
-    """Toggle MAM features on/off (only works if session ID exists)."""
+    """Toggle MAM features on/off. Cancels running scans when disabled."""
+    global _mam_scan_task, _mam_full_scan_task, _mam_scan_progress
     s = load_settings()
     if not s.get("mam_session_id"):
         return {"error": "No MAM session ID configured"}
     s["mam_enabled"] = not s.get("mam_enabled", False)
     save_settings(s)
+    if not s["mam_enabled"]:
+        if _mam_scan_task and not _mam_scan_task.done():
+            _mam_scan_task.cancel()
+            _mam_scan_progress.update({"running": False, "status": "cancelled"})
+        if _mam_full_scan_task and not _mam_full_scan_task.done():
+            _mam_full_scan_task.cancel()
+        logger.info("MAM disabled — cancelled running scans")
     return {"enabled": s["mam_enabled"]}
 
 

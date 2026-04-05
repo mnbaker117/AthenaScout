@@ -54,6 +54,7 @@ DEFAULT_SETTINGS = {
     "rate_fantasticfiction": 2,
     "rate_kobo": 3,
     "verbose_logging": False,
+    "author_scanning_enabled": True,
     "calibre_web_url": "",
     "calibre_url": "",
     "mam_session_id": "",

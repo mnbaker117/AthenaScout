@@ -130,8 +130,9 @@ return<Section title={header} count={countStr} ownedCount={series.owned_count} t
 function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
 
 // ─── Dashboard ──────────────────────────────────────────────
-function Dash({onNav}){const t=T();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[sc,setSc]=useState(false);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
-useEffect(()=>{api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{})},[]);
+function Dash({onNav}){const t=T();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
+useEffect(()=>{api.get("/lookup/status").then(r=>{if(r.running)setLookupScan(r)}).catch(()=>{});api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{})},[]);
+useEffect(()=>{if(!lookupScan?.running)return;const iv=setInterval(()=>{api.get("/lookup/status").then(r=>{setLookupScan(r);if(!r.running){clearInterval(iv);api.get("/stats").then(setD)}}).catch(()=>{})},3000);return()=>clearInterval(iv)},[lookupScan?.running]);
 useEffect(()=>{if(!mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running)clearInterval(iv)}).catch(()=>{})},5000);return()=>clearInterval(iv)},[mamScan?.running]);
 if(!d)return<Load/>;
 const p=pct(d.owned_books,d.total_books);
@@ -165,8 +166,8 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>Actions</div>
 <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
 <Btn variant="accent" onClick={async()=>{setSy(true);try{await api.post("/sync/calibre")}catch{}setSy(false);api.get("/stats").then(setD)}} disabled={sy}>{sy?<Spin/>:Ic.sync} Sync Library</Btn>
-<Btn onClick={async()=>{setSc(true);try{await api.post("/sync/lookup")}catch{}setSc(false);api.get("/stats").then(setD)}} disabled={sc}>{sc?<Spin/>:Ic.search} Scan Sources</Btn>
-<Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;setSc(true);try{await api.post("/sync/full-rescan")}catch{}setSc(false);api.get("/stats").then(setD)}} disabled={sc}>{sc?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
+<Btn onClick={async()=>{try{const r=await api.post("/sync/lookup");if(r.error){alert(r.error)}else{setLookupScan({running:true,checked:0,total:0,current_author:"",new_books:0,status:"scanning",type:"lookup"})}}catch{}}} disabled={lookupScan?.running}>{lookupScan?.running&&lookupScan?.type==="lookup"?<Spin/>:Ic.search} Scan Sources</Btn>
+<Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;try{const r=await api.post("/sync/full-rescan");if(r.error){alert(r.error)}else{setLookupScan({running:true,checked:0,total:0,current_author:"",new_books:0,status:"scanning",type:"full_rescan"})}}catch{}}} disabled={lookupScan?.running}>{lookupScan?.running&&lookupScan?.type==="full_rescan"?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
 {d.mam_enabled?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error){alert(r.error)}else{setMamScan({running:true,scanned:0,total:r.total||0,found:0,possible:0,not_found:0,errors:0,status:"scanning",type:"manual"})}}catch{}}} disabled={mamScan?.running}>{mamScan?.running?<Spin/>:Ic.search} MAM Scan</Btn>:null}
 </div>
 <div style={{display:"flex",gap:16,marginTop:12,fontSize:12,color:t.tg}}>
@@ -174,14 +175,22 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <span>Last lookup: {timeAgo(d.last_lookup?.finished_at)}</span>
 </div>
 
-{/* MAM Scan Progress — shows for manual, scheduled, or full scans */}
+{/* ── Scan Progress ── */}
+{lookupScan&&lookupScan.status!=="idle"?<div style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{lookupScan.running?<div>
+<div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}>
+<span>{lookupScan.type==="full_rescan"?"Full Re-Scan":"Scanning sources..."} {lookupScan.current_author?`— ${lookupScan.current_author}`:""}</span>
+<span style={{fontSize:11,color:t.tg}}>{lookupScan.checked} of {lookupScan.total} authors</span></div>
+<div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${lookupScan.total>0?Math.round(lookupScan.checked/lookupScan.total*100):0}%`,height:"100%",borderRadius:3,background:t.accent,transition:"width 0.5s"}}/></div>
+<div style={{fontSize:11,color:t.tg}}>New books found: <b style={{color:t.grnt}}>{lookupScan.new_books}</b></div>
+</div>:<div style={{fontSize:13,color:lookupScan.status==="complete"?t.grnt:t.redt}}>{lookupScan.status==="complete"?`${lookupScan.type==="full_rescan"?"Full Re-Scan":"Source Scan"} Complete — ${lookupScan.checked} authors checked, ${lookupScan.new_books} new books found`:`Source Scan: ${lookupScan.status}`}</div>}</div>:null}
+
 {mamScan&&mamScan.status!=="idle"?<div style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{mamScan.running?<div>
 <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}>
 <span>{mamScan.status==="paused"?"Paused — resuming in 5 min":mamScan.type==="scheduled"?"Scheduled scan running...":"Scanning MAM..."}{" "}{mamScan.scanned} of {mamScan.total} books{mamScan.remaining&&mamScan.remaining>mamScan.total?` (${mamScan.remaining} total remaining)`:""}</span>
 <span style={{fontSize:11,textTransform:"capitalize",color:t.tg}}>{mamScan.type||"scan"}</span></div>
 <div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${mamScan.total>0?Math.round(mamScan.scanned/mamScan.total*100):0}%`,height:"100%",borderRadius:3,background:mamScan.status==="paused"?t.ylw:t.accent,transition:"width 0.5s"}}/></div>
 <div style={{display:"flex",gap:12,fontSize:11,color:t.tg}}><span style={{color:t.grnt}}>Found: {mamScan.found}</span><span style={{color:t.ylwt}}>Possible: {mamScan.possible}</span><span style={{color:t.redt}}>Not found: {mamScan.not_found}</span>{mamScan.errors>0?<span style={{color:t.red}}>Errors: {mamScan.errors}</span>:null}</div>
-</div>:<div style={{fontSize:13}}><span style={{color:mamScan.status==="complete"?t.grnt:t.redt}}>{mamScan.status==="complete"?`MAM Scan Complete — ${mamScan.scanned} scanned: ${mamScan.found} found, ${mamScan.possible} possible, ${mamScan.not_found} not found`+`${mamScan.errors>0?`, ${mamScan.errors} errors`:""}`:`MAM Scan: ${mamScan.status}`}</span></div>}</div>:null}
+</div>:<div style={{fontSize:13}}><span style={{color:mamScan.status==="complete"?t.grnt:t.redt}}>{mamScan.status==="complete"?`MAM Scan Complete — ${mamScan.scanned} scanned: ${mamScan.found} found, ${mamScan.possible} possible, ${mamScan.not_found} not found${mamScan.errors>0?`, ${mamScan.errors} errors`:""}`:`MAM Scan: ${mamScan.status}`}</span></div>}</div>:null}
 
 {d.mam_enabled?<div style={{fontSize:11,color:t.tg,marginTop:6,fontStyle:"italic"}}>MAM Scan checks all books missing MAM data (100 per batch, 5-min pauses between batches).</div>:null}
 </div>
@@ -504,6 +513,14 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 <div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"4px 20px"}}>
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px"}}>Logging</div>
 <SF label="Verbose logging" desc="Show detailed debug output in Docker logs. Logs individual book decisions, page visit details, and merge operations."><STog on={!!s.verbose_logging} onToggle={()=>upd("verbose_logging",!s.verbose_logging)}/></SF>
+</div>
+
+{/* Scanning Controls */}
+<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"4px 20px"}}>
+<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"14px 0 6px"}}>Scanning Controls</div>
+<SF label="Author scanning" desc="Enable source scanning for authors (Goodreads, Hardcover, etc). Disabling cancels any running scan."><STog on={s.author_scanning_enabled!==false} onToggle={async()=>{try{const r=await api.post("/scanning/author/toggle");upd("author_scanning_enabled",r.enabled)}catch{}}}/></SF>
+<SF label="MAM scanning" desc={s.mam_enabled?"MAM integration active — disable to cancel running MAM scans and prevent future scans":"MAM integration disabled"}>{s.mam_session_id?<STog on={!!s.mam_enabled} onToggle={async()=>{try{const r=await api.post("/mam/toggle");upd("mam_enabled",r.enabled)}catch{}}} disabled={!s.mam_session_id}/>:<span style={{fontSize:12,color:t.tg}}>No session ID</span>}</SF>
+<div style={{padding:"8px 0",fontSize:12,color:t.tg,fontStyle:"italic"}}>Disabling a scan type cancels any running scan of that type and prevents scheduled scans from starting. Interval settings of 0 disable only the scheduled scans.</div>
 </div>
 
 {/* MyAnonamouse */}
