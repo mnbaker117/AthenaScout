@@ -39,6 +39,7 @@ scheduler = AsyncIOScheduler()
 HF = "b.hidden = 0"
 _mam_scan_task: asyncio.Task | None = None
 _mam_full_scan_task: asyncio.Task | None = None
+_mam_scan_progress: dict = {"running": False, "scanned": 0, "total": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0, "status": "idle", "type": "none"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -59,51 +60,67 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Auto-lookup disabled (interval = 0)")
     async def _mam_scheduler():
+        global _mam_scan_progress
+        last_scan_at = 0.0
         while True:
+            await asyncio.sleep(60)
             s = load_settings()
             interval = s.get("mam_scan_interval_minutes", 360)
             if interval <= 0 or not s.get("mam_enabled") or not s.get("mam_session_id"):
-                await asyncio.sleep(60)
                 continue
-            await asyncio.sleep(interval * 60)
-            # Re-read settings (may have changed during sleep)
-            s = load_settings()
-            if not s.get("mam_enabled") or not s.get("mam_session_id"):
+            elapsed_min = (time.time() - last_scan_at) / 60
+            if elapsed_min < interval:
                 continue
-            # Daily validation check — run if 24+ hours since last validation
+            if _mam_scan_progress.get("running"):
+                continue
             last_val = s.get("last_mam_validated_at") or 0
             if time.time() - last_val > 86400:
                 logger.info("MAM daily validation check...")
                 vr = await mam_validate(s["mam_session_id"], True)
-                s["last_mam_validated_at"] = time.time()
-                s["mam_validation_ok"] = vr["success"]
+                if vr["success"]:
+                    s["last_mam_validated_at"] = time.time()
+                    s["mam_validation_ok"] = True
+                else:
+                    s["mam_validation_ok"] = False
                 save_settings(s)
                 if not vr["success"]:
                     logger.error(f"MAM validation failed — skipping scan: {vr['message']}")
+                    last_scan_at = time.time()
                     continue
-            # Run scheduled scan
+            logger.info("MAM scheduled scan starting (100 books)")
+            _mam_scan_progress = {"running": True, "scanned": 0, "total": 100,
+                                  "found": 0, "possible": 0, "not_found": 0,
+                                  "errors": 0, "status": "scanning", "type": "scheduled"}
             db = await get_db()
             try:
                 result = await mam_scan_batch(
-                    db, session_id=s["mam_session_id"],
-                    limit=s.get("mam_books_per_scan", 100),
-                    delay=s.get("rate_mam", 2),
-                    skip_ip_update=True,
+                    db, session_id=s["mam_session_id"], limit=100,
+                    delay=s.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=s.get("mam_format_priority"),
                 )
-                import time as _t
+                _mam_scan_progress.update({
+                    "running": False,
+                    "scanned": result.get("scanned", 0),
+                    "found": result.get("found", 0),
+                    "possible": result.get("possible", 0),
+                    "not_found": result.get("not_found", 0),
+                    "errors": result.get("errors", 0),
+                    "status": "complete" if not result.get("error") else f"error: {result.get('error')}",
+                })
                 await db.execute(
                     "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
-                    ("mam", _t.time(), _t.time(),
+                    ("mam", time.time(), time.time(),
                      "complete" if not result.get("error") else "error",
                      result.get("scanned", 0), result.get("found", 0))
                 )
                 await db.commit()
-                logger.info(f"MAM scheduled scan: {result.get('scanned', 0)} books, {result.get('found', 0)} found")
+                logger.info(f"MAM scheduled scan done: {result.get('scanned', 0)} scanned, {result.get('found', 0)} found")
             except Exception as e:
                 logger.error(f"MAM scheduled scan error: {e}")
+                _mam_scan_progress.update({"running": False, "status": f"error: {e}"})
             finally:
                 await db.close()
+            last_scan_at = time.time()
 
     asyncio.create_task(_mam_scheduler())
     scheduler.start(); yield; scheduler.shutdown()
@@ -891,10 +908,9 @@ async def mam_validate_endpoint():
         s["mam_enabled"] = True
         s["last_mam_validated_at"] = time.time()
         s["mam_validation_ok"] = True
-        save_settings(s)
     else:
         s["mam_validation_ok"] = False
-        save_settings(s)
+    save_settings(s)
     return result
 
 
@@ -918,37 +934,103 @@ async def mam_status_endpoint():
 
 @app.post("/api/mam/scan")
 async def mam_scan_endpoint():
-    """Trigger an incremental MAM scan (100 books)."""
-    global _mam_scan_task
+    """Scan all books missing MAM data. Batches of 100 with 5-min pauses."""
+    global _mam_scan_task, _mam_scan_progress
     s = load_settings()
     if not s.get("mam_enabled") or not s.get("mam_session_id"):
         return {"error": "MAM not configured or not enabled"}
-    if _mam_scan_task and not _mam_scan_task.done():
+    if _mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
 
+    db = await get_db()
+    try:
+        row = await db.execute_fetchall(
+            "SELECT COUNT(*) FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0"
+        )
+        total = row[0][0] if row else 0
+    finally:
+        await db.close()
+
+    if total == 0:
+        return {"status": "complete", "message": "No books need scanning — all already have MAM data"}
+
+    _mam_scan_progress = {"running": True, "scanned": 0, "total": total,
+                          "found": 0, "possible": 0, "not_found": 0, "errors": 0,
+                          "status": "scanning", "type": "manual"}
+
     async def _do_scan():
-        db = await get_db()
-        try:
-            result = await mam_scan_batch(
-                db, session_id=s["mam_session_id"],
-                limit=s.get("mam_books_per_scan", 100),
-                delay=s.get("rate_mam", 2),
-                skip_ip_update=True,
-                format_priority=s.get("mam_format_priority"),
-            )
-            import time as _t
-            await db.execute(
-                "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
-                ("mam", _t.time(), _t.time(),
-                 "complete" if not result.get("error") else "error",
-                 result.get("scanned", 0), result.get("found", 0))
-            )
-            await db.commit()
-        finally:
-            await db.close()
+        global _mam_scan_progress
+        batch_num = 0
+        while True:
+            cs = load_settings()
+            if not cs.get("mam_enabled") or not cs.get("mam_session_id"):
+                _mam_scan_progress.update({"status": "stopped (MAM disabled)", "running": False})
+                return
+            db = await get_db()
+            try:
+                result = await mam_scan_batch(
+                    db, session_id=cs["mam_session_id"], limit=100,
+                    delay=cs.get("rate_mam", 2), skip_ip_update=True,
+                    format_priority=cs.get("mam_format_priority"),
+                )
+                _mam_scan_progress["scanned"] += result.get("scanned", 0)
+                _mam_scan_progress["found"] += result.get("found", 0)
+                _mam_scan_progress["possible"] += result.get("possible", 0)
+                _mam_scan_progress["not_found"] += result.get("not_found", 0)
+                _mam_scan_progress["errors"] += result.get("errors", 0)
+                if result.get("error"):
+                    _mam_scan_progress.update({"status": f"error: {result['error']}", "running": False})
+                    return
+                remaining = await db.execute_fetchall(
+                    "SELECT COUNT(*) FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0"
+                )
+                left = remaining[0][0] if remaining else 0
+                _mam_scan_progress["total"] = _mam_scan_progress["scanned"] + left
+                await db.execute(
+                    "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
+                    ("mam", time.time(), time.time(), "complete",
+                     result.get("scanned", 0), result.get("found", 0))
+                )
+                await db.commit()
+            except Exception as e:
+                logger.error(f"MAM scan batch error: {e}")
+                _mam_scan_progress.update({"status": f"error: {e}", "running": False})
+                return
+            finally:
+                await db.close()
+            if left == 0 or result.get("scanned", 0) == 0:
+                _mam_scan_progress.update({"status": "complete", "running": False})
+                logger.info(f"MAM scan complete: {_mam_scan_progress['scanned']} scanned, {_mam_scan_progress['found']} found")
+                return
+            batch_num += 1
+            _mam_scan_progress["status"] = "paused"
+            logger.info(f"MAM scan batch {batch_num} done ({_mam_scan_progress['scanned']}/{_mam_scan_progress['total']}), pausing 5 min")
+            await asyncio.sleep(300)
+            _mam_scan_progress["status"] = "scanning"
 
     _mam_scan_task = asyncio.create_task(_do_scan())
-    return {"status": "started", "message": "MAM scan started (100 books)"}
+    return {"status": "started", "total": total}
+
+
+@app.get("/api/mam/scan/status")
+async def mam_scan_status_endpoint():
+    """Get progress of any active MAM scan (manual, scheduled, or full)."""
+    global _mam_scan_progress
+    if _mam_scan_progress.get("running"):
+        return dict(_mam_scan_progress)
+    if _mam_full_scan_task and not _mam_full_scan_task.done():
+        db = await get_db()
+        try:
+            fs = await mam_get_full_scan_status(db)
+            if fs.get("active"):
+                return {"running": True, "scanned": fs.get("scanned", 0),
+                        "total": fs.get("total_books", 0), "found": 0,
+                        "possible": 0, "not_found": 0, "errors": 0,
+                        "status": "scanning", "type": "full_scan",
+                        "progress_pct": fs.get("progress_pct", 0)}
+        finally:
+            await db.close()
+    return dict(_mam_scan_progress)
 
 
 @app.post("/api/mam/test-scan")
@@ -964,7 +1046,7 @@ async def mam_test_scan():
         result = await mam_scan_batch(
             db, session_id=s["mam_session_id"], limit=10,
             delay=s.get("rate_mam", 2),
-            skip_ip_update=s.get("mam_skip_ip_update", True),
+            skip_ip_update=True,
             format_priority=s.get("mam_format_priority"),
         )
         return result
@@ -981,6 +1063,8 @@ async def mam_full_scan_start():
         return {"error": "MAM not configured or not enabled"}
     if _mam_full_scan_task and not _mam_full_scan_task.done():
         return {"error": "A full MAM scan is already running"}
+    if _mam_scan_progress.get("running"):
+        return {"error": "A MAM scan is already running — wait for it to finish"}
 
     db = await get_db()
     try:
@@ -991,6 +1075,11 @@ async def mam_full_scan_start():
         await db.close()
 
     async def _full_scan_loop():
+        global _mam_scan_progress
+        _mam_scan_progress = {"running": True, "scanned": 0,
+                              "total": start_result.get("total_books", 0),
+                              "found": 0, "possible": 0, "not_found": 0,
+                              "errors": 0, "status": "scanning", "type": "full_scan"}
         while True:
             db = await get_db()
             try:
@@ -1001,14 +1090,23 @@ async def mam_full_scan_start():
                     delay=cs.get("rate_mam", 2),
                     format_priority=cs.get("mam_format_priority"),
                 )
+                fs = await mam_get_full_scan_status(db)
+                _mam_scan_progress.update({
+                    "scanned": fs.get("scanned", 0),
+                    "total": fs.get("total_books", _mam_scan_progress["total"]),
+                    "status": "scanning" if result["status"] == "batch_complete" else result["status"],
+                })
             finally:
                 await db.close()
             if result["status"] in ("scan_complete", "error", "no_scan"):
+                _mam_scan_progress.update({"running": False, "status": result["status"]})
                 break
             elif result["status"] == "batch_complete":
                 wait = cs.get("mam_full_scan_batch_delay_minutes", 60) * 60
-                logger.info(f"Full MAM scan: batch done, waiting {wait}s")
+                _mam_scan_progress["status"] = "paused"
+                logger.info(f"Full MAM scan: batch done, waiting {wait//60} min")
                 await asyncio.sleep(wait)
+                _mam_scan_progress["status"] = "scanning"
 
     _mam_full_scan_task = asyncio.create_task(_full_scan_loop())
     return {"status": "started", "scan_id": start_result["id"],

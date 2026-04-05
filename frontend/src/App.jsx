@@ -130,7 +130,10 @@ return<Section title={header} count={countStr} ownedCount={series.owned_count} t
 function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
 
 // ─── Dashboard ──────────────────────────────────────────────
-function Dash({onNav}){const t=T();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[sc,setSc]=useState(false);const[ms,setMs]=useState(false);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);if(!d)return<Load/>;
+function Dash({onNav}){const t=T();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[sc,setSc]=useState(false);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
+useEffect(()=>{api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{})},[]);
+useEffect(()=>{if(!mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running)clearInterval(iv)}).catch(()=>{})},5000);return()=>clearInterval(iv)},[mamScan?.running]);
+if(!d)return<Load/>;
 const p=pct(d.owned_books,d.total_books);
 return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 
@@ -164,12 +167,17 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <Btn variant="accent" onClick={async()=>{setSy(true);try{await api.post("/sync/calibre")}catch{}setSy(false);api.get("/stats").then(setD)}} disabled={sy}>{sy?<Spin/>:Ic.sync} Sync Library</Btn>
 <Btn onClick={async()=>{setSc(true);try{await api.post("/sync/lookup")}catch{}setSc(false);api.get("/stats").then(setD)}} disabled={sc}>{sc?<Spin/>:Ic.search} Scan Sources</Btn>
 <Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;setSc(true);try{await api.post("/sync/full-rescan")}catch{}setSc(false);api.get("/stats").then(setD)}} disabled={sc}>{sc?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
-{d.mam_enabled?<Btn onClick={async()=>{setMs(true);try{await api.post("/mam/scan")}catch{}setMs(false)}} disabled={ms}>{ms?<Spin/>:Ic.search} MAM Scan</Btn>:null}
+{d.mam_enabled?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error){alert(r.error)}else{setMamScan({running:true,scanned:0,total:r.total||0,found:0,possible:0,not_found:0,errors:0,status:"scanning",type:"manual"})}}catch{}}} disabled={mamScan?.running}>{mamScan?.running?<Spin/>:Ic.search} MAM Scan</Btn>:null}
 </div>
 <div style={{display:"flex",gap:16,marginTop:12,fontSize:12,color:t.tg}}>
 <span>Last sync: {timeAgo(d.last_calibre_sync?.finished_at)}</span>
 <span>Last lookup: {timeAgo(d.last_lookup?.finished_at)}</span>
 </div>
+
+{/* MAM Scan Progress — shows for manual, scheduled, or full scans */}
+{mamScan?<div style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{mamScan.running?<div><div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}><span>{mamScan.status==="paused"?"Paused (5 min between batches)":mamScan.type==="scheduled"?"Scheduled scan running...":"Scanning MAM..."} {mamScan.scanned} of {mamScan.total} books</span><span style={{fontSize:11,textTransform:"capitalize"}}>{mamScan.type||"scan"}</span></div><div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden"}}><div style={{width:`${mamScan.total>0?Math.round(mamScan.scanned/mamScan.total*100):0}%`,height:"100%",borderRadius:3,background:t.accent,transition:"width 0.5s"}}/></div><div style={{display:"flex",gap:12,marginTop:6,fontSize:11,color:t.tg}}><span style={{color:t.grnt}}>Found: {mamScan.found}</span><span style={{color:t.ylwt}}>Possible: {mamScan.possible}</span><span style={{color:t.redt}}>Not found: {mamScan.not_found}</span></div></div>:<div style={{fontSize:13,color:mamScan.status==="complete"?t.grnt:mamScan.status==="idle"?t.tg:t.redt}}>{mamScan.status==="complete"?`MAM Scan Complete — ${mamScan.scanned} scanned, ${mamScan.found} found`:mamScan.status==="idle"?null:`MAM Scan: ${mamScan.status}`}</div>}</div>:null}
+
+{d.mam_enabled?<div style={{fontSize:11,color:t.tg,marginTop:6,fontStyle:"italic"}}>MAM Scan checks all books missing MAM data (100 per batch, 5-min pauses between batches).</div>:null}
 </div>
 <div style={{flex:"0 0 auto",display:"flex",flexDirection:"column",gap:6,borderLeft:`1px solid ${t.borderL}`,paddingLeft:20,justifyContent:"center"}}>
 {d.calibre_web_url?<button onClick={()=>window.open(d.calibre_web_url,"_blank")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.accent+"18",border:`1px solid ${t.accent}33`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.accent,whiteSpace:"nowrap"}}>📖 Calibre Web <span style={{fontSize:10,opacity:0.6}}>↗</span></button>:null}
@@ -499,8 +507,8 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 {/* Session ID — masked display with Change flow */}
 <SF label="MAM Session ID" desc={'Get from MAM → Preferences → Security → Generate Session. Set "Allow Session to set Dynamic Seedbox" to No. Works with both IP-locked and ASN-locked tokens.'}>{s.mam_session_id&&!s._editingMam?<div style={{display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:14,color:t.tm,letterSpacing:"3px"}}>••••••••</span><Btn size="sm" onClick={()=>{upd("_editingMam",true);upd("_newMam","")}}>Change</Btn></div>:<div style={{display:"flex",flexDirection:"column",gap:6}}><input value={s._editingMam?s._newMam||"":s.mam_session_id||""} onChange={e=>s._editingMam?upd("_newMam",e.target.value):upd("mam_session_id",e.target.value)} placeholder="Paste session token..." style={{...ist,width:260}}/>{s._editingMam?<div style={{display:"flex",gap:6,marginTop:2}}><Btn size="sm" variant="accent" onClick={async()=>{const nk=s._newMam||"";if(!nk)return;setSv(true);try{await api.post("/settings",{mam_session_id:nk});upd("_editingMam",false);upd("_newMam","");const fresh=await api.get("/settings");setS(fresh);setMamRes(null);setMsg("Token saved!")}catch{setMsg("Error")}setSv(false)}}>Save token</Btn><Btn size="sm" onClick={()=>{upd("_editingMam",false);upd("_newMam","")}}>Cancel</Btn></div>:null}</div>}</SF>
 
-{/* Validate button + persistent timestamp */}
-<SF label="Validate connection" desc="Tests search auth against MAM servers"><div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}><Btn size="sm" variant="accent" onClick={doValidate} disabled={mamVld||!s.mam_session_id}>{mamVld?<><Spin/> Testing...</>:"Validate"}</Btn>{mamRes?<span style={{fontSize:12,fontWeight:600,color:mamRes.success?t.grnt:t.redt}}>{mamRes.success?"✓ Connected":mamRes.message||"Failed"}</span>:s.last_mam_validated_at?<span style={{fontSize:11,color:t.tg}}>Last validated: {timeAgo(s.last_mam_validated_at)}</span>:null}</div></SF>
+{/* Validate button + persistent state */}
+<SF label="Validate connection" desc="Tests search auth against MAM servers"><div style={{display:"flex",flexDirection:"column",gap:6,alignItems:"flex-end"}}><div style={{display:"flex",alignItems:"center",gap:10}}><Btn size="sm" variant="accent" onClick={doValidate} disabled={mamVld||!s.mam_session_id}>{mamVld?<><Spin/> Testing...</>:"Validate"}</Btn>{mamRes&&mamRes.success?<span style={{fontSize:12,fontWeight:600,color:t.grnt}}>✓ Connected</span>:!mamRes&&s.mam_validation_ok!==false&&s.last_mam_validated_at?<span style={{fontSize:11,color:t.tg}}>Last validated: {timeAgo(s.last_mam_validated_at)}</span>:null}</div>{mamRes&&!mamRes.success?<div style={{fontSize:12,color:t.redt,maxWidth:300,textAlign:"right"}}>{mamRes.message||"Validation failed"}</div>:!mamRes&&s.mam_validation_ok===false?<div style={{fontSize:12,color:t.redt}}>⚠ Last validation failed — update token and re-validate</div>:null}</div></SF>
 
 {/* Enable MAM Features toggle */}
 <SF label="Enable MAM features" desc={s.mam_enabled?"MAM integration active across the app":"Validate session first, then enable"}><STog on={!!s.mam_enabled} onToggle={async()=>{try{const r=await api.post("/mam/toggle");upd("mam_enabled",r.enabled)}catch{}}} disabled={!s.mam_session_id}/></SF>
@@ -522,7 +530,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:20,maxWidth:640,pad
 
 <SF label="MAM scan interval (minutes)" desc="How often automatic MAM scans run. Default 360 (6 hours). Set to 0 to disable."><input {...numP("mam_scan_interval_minutes",360)}/></SF>
 
-<SF label="Books per scheduled scan" desc="How many books to check per automatic scan cycle"><input {...numP("mam_books_per_scan",100,1)}/></SF>
+<div style={{padding:"8px 0",fontSize:12,color:t.tg,fontStyle:"italic",borderBottom:`1px solid ${t.borderL}`}}>Scheduled scans check 100 books per cycle. Use the MAM Scan button on the Dashboard to scan all remaining books.</div>
 
 <SF label="Full scan batch delay (minutes)" desc="Wait time between batches during a full library scan"><input {...numP("mam_full_scan_batch_delay_minutes",60,10)}/></SF>
 
@@ -581,7 +589,7 @@ export default function App(){
   const[tn,setTn]=useState(()=>{try{return localStorage.getItem("cl_theme")||"dark"}catch{return"dark"}});
   const[showAdd,setShowAdd]=useState(null);
 const[mamWarn,setMamWarn]=useState(false);
-useEffect(()=>{api.get("/mam/status").then(r=>{if(r.enabled&&r.validation_ok===false)setMamWarn(true)}).catch(()=>{})},[]); // null, "manual", "url", "choose"
+useEffect(()=>{api.get("/mam/status").then(r=>{if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{})},[pg]); // null, "manual", "url", "choose"
   const theme=THEMES[tn]||THEMES.dark;
   const nav=(p,a=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
   useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);
