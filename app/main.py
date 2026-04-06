@@ -38,6 +38,7 @@ logger = logging.getLogger("athenascout")
 scheduler = AsyncIOScheduler()
 HF = "b.hidden = 0"
 _discovered_libraries = []
+_last_calibre_check = {"at": None, "synced": False}
 _mam_scan_task: asyncio.Task | None = None
 _mam_full_scan_task: asyncio.Task | None = None
 _mam_scan_progress: dict = {"running": False, "scanned": 0, "total": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0, "status": "idle", "type": "none"}
@@ -121,20 +122,26 @@ async def lifespan(app: FastAPI):
         current_active = get_active_library()
         st = load_settings()
         mtimes = st.get("calibre_mtimes", {})
+        any_synced = False
         for lib in _discovered_libraries:
             try:
                 set_active_library(lib["slug"])
                 current_mtime = _os2.path.getmtime(lib["calibre_db_path"])
                 last_mtime = mtimes.get(lib["slug"])
                 if last_mtime is not None and current_mtime == last_mtime:
+                    logger.debug(f"Scheduled sync: '{lib['name']}' metadata.db unchanged, skipping")
                     continue
+                logger.info(f"Scheduled sync: '{lib['name']}' metadata.db changed, syncing...")
                 await sync_calibre(lib["calibre_db_path"], lib["calibre_library_path"])
                 mtimes[lib["slug"]] = current_mtime
                 st["calibre_mtimes"] = mtimes
                 save_settings(st)
+                any_synced = True
             except Exception as e:
                 logger.warning(f"Scheduled sync failed for '{lib['name']}': {e}")
         set_active_library(current_active)
+        _last_calibre_check["at"] = time.time()
+        _last_calibre_check["synced"] = any_synced
 
     if sync_min and sync_min > 0:
         if _discovered_libraries:
@@ -478,7 +485,7 @@ async def get_stats():
             mam_stats = await get_mam_stats(db)
         active_lib = get_active_library()
         lib_info = next((l for l in _discovered_libraries if l["slug"] == active_lib), None)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(_discovered_libraries)}
+        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(_discovered_libraries), "last_calibre_check": _last_calibre_check}
     finally: await db.close()
 
 # ─── Authors ─────────────────────────────────────────────────

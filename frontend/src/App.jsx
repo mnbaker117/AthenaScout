@@ -192,7 +192,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 {d.mam_enabled&&d.mam_scanning_enabled!==false?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error){alert(r.error)}else{setMamScan({running:true,scanned:0,total:r.total||0,found:0,possible:0,not_found:0,errors:0,status:"scanning",type:"manual"})}}catch{}}} disabled={mamScan?.running}>{mamScan?.running?<Spin/>:Ic.search} MAM Scan</Btn>:null}
 </div>
 <div style={{display:"flex",gap:16,marginTop:12,fontSize:12,color:t.tg}}>
-<span>Last sync: {timeAgo(d.last_calibre_sync?.finished_at)}</span>
+<span>{d.last_calibre_check?.at?`Last checked: ${timeAgo(d.last_calibre_check.at)}${d.last_calibre_check.synced?" (synced)":" (no changes)"}`:`Last sync: ${timeAgo(d.last_calibre_sync?.finished_at)}`}</span>
 <span>Last lookup: {timeAgo(d.last_lookup?.finished_at)}</span>
 </div>
 
