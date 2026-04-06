@@ -200,17 +200,18 @@ def discover_libraries(settings=None):
         return libraries
 
     # Priority 3: Legacy CALIBRE_DB_PATH (single direct path)
-    legacy_mdb = Path(CALIBRE_DB_PATH)
-    if legacy_mdb.exists():
-        _add_library({
-            "name": legacy_mdb.parent.name,
-            "slug": slugify(legacy_mdb.parent.name),
-            "app_type": "calibre",
-            "content_type": "ebook",
-            "display_name": "Calibre",
-            "source_db_path": str(legacy_mdb),
-            "library_path": str(legacy_mdb.parent),
-        })
+    if CALIBRE_DB_PATH:
+        legacy_mdb = Path(CALIBRE_DB_PATH)
+        if legacy_mdb.exists():
+            _add_library({
+                "name": legacy_mdb.parent.name,
+                "slug": slugify(legacy_mdb.parent.name),
+                "app_type": "calibre",
+                "content_type": "ebook",
+                "display_name": "Calibre",
+                "source_db_path": str(legacy_mdb),
+                "library_path": str(legacy_mdb.parent),
+            })
 
     return libraries
 

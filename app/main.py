@@ -166,7 +166,7 @@ async def lifespan(app: FastAPI):
         if _discovered_libraries:
             scheduler.add_job(_sync_all_libraries, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
         else:
-            scheduler.add_job(sync_calibre, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
+            logger.info("Calibre auto-sync skipped - no libraries configured")
     else:
         logger.info("Calibre auto-sync disabled (interval = 0)")
     async def _scheduled_lookup():
