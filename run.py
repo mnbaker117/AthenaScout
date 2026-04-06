@@ -17,6 +17,7 @@ import sys
 import webbrowser
 import threading
 import argparse
+from app.main import app as fastapi_app
 
 # Ensure standalone mode is set before any app imports
 os.environ.setdefault("ATHENASCOUT_MODE", "standalone")
@@ -75,7 +76,7 @@ def main():
     print()
 
     uvicorn.run(
-        "app.main:app",
+        fastapi_app,
         host=args.host,
         port=args.port,
         log_level="warning",
