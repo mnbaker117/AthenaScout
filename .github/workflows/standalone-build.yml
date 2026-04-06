@@ -186,25 +186,32 @@ jobs:
           RPMBUILD=$HOME/rpmbuild
           mkdir -p "$RPMBUILD"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
+          # RPM's Version: field doesn't allow hyphens (they're reserved as the
+          # Version-Release separator). Convert to dots for RPM compatibility.
+          # For real tag versions like "2.0.0" this is a no-op. Only affects
+          # dev builds where VERSION is something like "0.0.0-dev".
+          RPM_VERSION="${VERSION//-/.}"
+          echo "RPM-safe version: $RPM_VERSION"
+
           # Stage source files (PyInstaller output + desktop file + icon)
-          STAGING=build/rpm-staging/athenascout-${VERSION}
+          STAGING=build/rpm-staging/athenascout-${RPM_VERSION}
           mkdir -p "$STAGING"
           cp -r dist/athenascout/* "$STAGING/"
           cp build_assets/athenascout.desktop "$STAGING/"
           cp build/icons/athenascout.png "$STAGING/"
 
-          # Create source tarball
-          (cd build/rpm-staging && tar -czf "$RPMBUILD/SOURCES/athenascout-${VERSION}.tar.gz" "athenascout-${VERSION}")
+          # Create source tarball (filename must match Source0 in spec)
+          (cd build/rpm-staging && tar -czf "$RPMBUILD/SOURCES/athenascout-${RPM_VERSION}.tar.gz" "athenascout-${RPM_VERSION}")
 
-          # Generate RPM spec from template
-          sed "s/{VERSION}/$VERSION/g" build_assets/athenascout.rpm.spec.template > "$RPMBUILD/SPECS/athenascout.spec"
+          # Generate RPM spec from template (use RPM-safe version)
+          sed "s/{VERSION}/$RPM_VERSION/g" build_assets/athenascout.rpm.spec.template > "$RPMBUILD/SPECS/athenascout.spec"
           cat "$RPMBUILD/SPECS/athenascout.spec"
 
           # Build the RPM
           rpmbuild -bb "$RPMBUILD/SPECS/athenascout.spec"
 
           # Move output to packages directory
-          cp "$RPMBUILD/RPMS/x86_64/"athenascout-${VERSION}-1*.rpm packages/
+          cp "$RPMBUILD/RPMS/x86_64/"athenascout-${RPM_VERSION}-1*.rpm packages/
           ls -lh packages/
 
       - name: Linux — Upload native packages
