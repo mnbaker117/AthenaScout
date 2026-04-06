@@ -564,8 +564,8 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 
 {/* Data table */}
 {ld?<Load/>:rows.length===0?<div style={{padding:40,textAlign:"center",color:t.tg,fontSize:14}}>{q?"No rows match your search":"This table is empty"}</div>:
-<div style={{overflowX:"auto",border:`1px solid ${t.border}`,borderRadius:10,background:t.bg2}}>
-<table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:schema&&schema.columns.length>6?schema.columns.length*130:undefined}}>
+<div style={{position:"relative"}}><div className="db-table-scroll" style={{overflowX:"auto",border:`1px solid ${t.border}`,borderRadius:10,background:t.bg2}}>
+<table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:schema&&schema.columns.length>6?schema.columns.length*(showNames&&tab==="books"?180:150):undefined}}>
 <thead>
 <tr>
 {(schema?.columns||[]).map((c,ci)=><th key={c.name} onClick={()=>toggleSort(c.name)} style={{padding:"10px 12px",paddingRight:ci===(schema?.columns||[]).length-1?24:12,textAlign:"left",borderBottom:`2px solid ${t.border}`,background:t.bg4,cursor:"pointer",whiteSpace:"nowrap",userSelect:"none",position:"sticky",top:0,zIndex:1}}>
@@ -586,7 +586,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 </tr>)}
 </tbody>
 </table>
-</div>}
+</div>{schema&&schema.columns.length>6?<div style={{position:"absolute",right:0,top:0,bottom:0,width:32,background:`linear-gradient(to right, transparent, ${t.bg}cc)`,pointerEvents:"none",borderRadius:"0 10px 10px 0"}}/>:null}</div>}
 
 {/* Pagination */}
 {totalPages>1?<div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:8,padding:8}}>
