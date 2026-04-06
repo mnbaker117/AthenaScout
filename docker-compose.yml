@@ -18,11 +18,19 @@ services:
       - /mnt/user/appdata/calibre:/calibre:ro
       # Persistent data for the app's database and settings (survives restarts/updates)
       - ./data:/app/data
+      # Extra library locations (uncomment and update to match CALIBRE_EXTRA_PATHS):
+      # - /mnt/user/downloads:/downloads:ro
+      # - /mnt/user/other-libs:/extra-libs:ro
     environment:
       # ── Calibre Library ──────────────────────────────────────
       # Root path to scan for Calibre libraries (finds all metadata.db files)
       # Each subdirectory with a metadata.db becomes a separate library
       - CALIBRE_PATH=/calibre
+      # Additional mount points (comma-delimited, NOT auto-scanned at startup)
+      # These make extra filesystem locations visible to the container.
+      # Use the Settings UI to manually add library sources from these paths.
+      # Each path needs a matching volume mount below.
+      - CALIBRE_EXTRA_PATHS=
       # Legacy single-library mode (uncomment to use instead of CALIBRE_PATH):
       # - CALIBRE_DB_PATH=/calibre/metadata.db
       # - CALIBRE_LIBRARY_PATH=/calibre

@@ -6,7 +6,7 @@ from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from app.config import (SYNC_INTERVAL_MINUTES, LOOKUP_INTERVAL_MINUTES, load_settings, save_settings, CALIBRE_LIBRARY_PATH, LANGUAGE_OPTIONS, apply_logging, ENV_WEBUI_PORT, discover_libraries)
+from app.config import (SYNC_INTERVAL_MINUTES, LOOKUP_INTERVAL_MINUTES, load_settings, save_settings, CALIBRE_LIBRARY_PATH, LANGUAGE_OPTIONS, apply_logging, ENV_WEBUI_PORT, discover_libraries, get_extra_mount_paths)
 from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library, get_db_path
 
 
@@ -267,6 +267,7 @@ async def get_settings():
         sid = d["mam_session_id"]
         d["mam_session_id"] = sid[:8] + "..." + sid[-4:] if len(sid) > 12 else "***"
     d["language_options"] = LANGUAGE_OPTIONS
+    d["_extra_mount_paths"] = get_extra_mount_paths()
     d["_discovered_libraries"] = [
         {"name": l["name"], "slug": l["slug"],
          "calibre_db_path": l["calibre_db_path"],

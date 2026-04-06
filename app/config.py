@@ -7,6 +7,7 @@ from pathlib import Path
 _cfg_logger = logging.getLogger("athenascout.config")
 
 CALIBRE_PATH = os.getenv("CALIBRE_PATH", "")
+CALIBRE_EXTRA_PATHS = os.getenv("CALIBRE_EXTRA_PATHS", "")
 CALIBRE_DB_PATH = os.getenv("CALIBRE_DB_PATH", "/calibre/metadata.db")
 CALIBRE_LIBRARY_PATH = os.getenv("CALIBRE_LIBRARY_PATH", "/calibre")
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
@@ -97,6 +98,28 @@ def slugify(name):
     s = _re.sub(r'[^a-z0-9]+', '-', s)
     s = s.strip('-')
     return s or 'default'
+
+
+def get_extra_mount_paths():
+    """Parse CALIBRE_EXTRA_PATHS env var into a list of paths.
+
+    These are filesystem locations mounted into the container that are NOT
+    auto-scanned at startup. Users can manually add library sources from
+    these paths via the Settings UI.
+
+    Env var format: comma-delimited paths
+    Example: CALIBRE_EXTRA_PATHS=/downloads,/extra-libs,/mnt/other
+    """
+    if not CALIBRE_EXTRA_PATHS:
+        return []
+    paths = [p.strip() for p in CALIBRE_EXTRA_PATHS.split(",") if p.strip()]
+    valid = []
+    for p in paths:
+        if Path(p).exists():
+            valid.append(p)
+        else:
+            _cfg_logger.warning(f"Extra mount path does not exist (skipped): {p}")
+    return valid
 
 
 def discover_libraries(settings=None):
