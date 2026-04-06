@@ -1045,8 +1045,9 @@ async def clear_author_scan_data(data: dict = Body(...)):
                 f"DELETE FROM books WHERE author_id IN ({placeholders}) AND owned=0 AND calibre_id IS NULL",
                 author_ids
             )
+            # Reset source URLs on owned books (keep source='calibre' intact)
             await db.execute(
-                f"UPDATE books SET source_url=NULL, source=NULL WHERE author_id IN ({placeholders}) AND owned=1",
+                f"UPDATE books SET source_url=NULL WHERE author_id IN ({placeholders}) AND owned=1",
                 author_ids
             )
             await db.execute(
