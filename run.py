@@ -49,7 +49,28 @@ def main():
             import time
             time.sleep(1.5)
             url = f"http://localhost:{args.port}"
-            webbrowser.open(url)
+
+            # PyInstaller bundles its own libssl/libcrypto and sets LD_LIBRARY_PATH
+            # so they're found at runtime. Unfortunately that env var is inherited
+            # by child processes — when webbrowser.open() spawns xdg-open/kde-open,
+            # those system tools end up loading our bundled libs instead of the
+            # system ones, causing version mismatch errors with libcurl. Restore
+            # the original library paths just for this child process spawn.
+            saved = {}
+            for key in ('LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH'):
+                if key in os.environ:
+                    saved[key] = os.environ[key]
+                    orig = os.environ.get(f'{key}_ORIG')
+                    if orig:
+                        os.environ[key] = orig
+                    else:
+                        del os.environ[key]
+            try:
+                webbrowser.open(url)
+            finally:
+                # Restore in case anything else in the process needs the bundled libs
+                for key, val in saved.items():
+                    os.environ[key] = val
 
         threading.Thread(target=_open_browser, daemon=True).start()
 
