@@ -38,7 +38,7 @@ settings.json
 
 # PyInstaller
 build/
-*.spec
+/dist/
 
 # Standalone data (user-specific)
 athenascout_data/
