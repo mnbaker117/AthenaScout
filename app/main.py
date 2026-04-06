@@ -6,8 +6,8 @@ from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from app.config import (SYNC_INTERVAL_MINUTES, LOOKUP_INTERVAL_MINUTES, load_settings, save_settings, CALIBRE_LIBRARY_PATH, LANGUAGE_OPTIONS, apply_logging, ENV_WEBUI_PORT, discover_libraries, get_extra_mount_paths)
-from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library, get_db_path
+from app.config import (SYNC_INTERVAL_MINUTES, load_settings, save_settings, LANGUAGE_OPTIONS, apply_logging, discover_libraries, get_extra_mount_paths)
+from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library
 
 
 # Filter out noisy health check and cover/series access logs
@@ -30,7 +30,6 @@ from app.sources.mam import (
     cancel_full_scan as mam_cancel_full_scan,
     get_full_scan_status as mam_get_full_scan_status,
     get_mam_stats,
-    build_search_link as mam_build_search_link,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -110,6 +109,8 @@ async def lifespan(app: FastAPI):
 
         # Restore active library after syncing all
         set_active_library(active)
+        _last_calibre_check["at"] = time.time()
+        _last_calibre_check["synced"] = True
 
     # ─── Scheduled Calibre Sync (all libraries) ───────────
     s = load_settings()
@@ -565,7 +566,7 @@ async def list_series(search: str = Query(None), sort: str = Query("name"), sort
 
 # ─── Books ───────────────────────────────────────────────────
 @app.get("/api/books")
-async def get_books(search: str = Query(None), author_id: int = Query(None), series_id: int = Query(None), owned: bool = Query(None), book_type: str = Query(None), mam_status: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), group_by: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), include_hidden: bool = Query(False)):
+async def get_books(search: str = Query(None), author_id: int = Query(None), series_id: int = Query(None), owned: bool = Query(None), book_type: str = Query(None), mam_status: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), include_hidden: bool = Query(False)):
     db = await get_db()
     try:
         c = []; p = []
@@ -594,7 +595,7 @@ async def get_books(search: str = Query(None), author_id: int = Query(None), ser
 async def get_missing(**kw): return await get_books(owned=False, **kw)
 
 @app.get("/api/upcoming")
-async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sort_dir: str = Query("asc"), group_by: str = Query(None), mam_status: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000)):
+async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sort_dir: str = Query("asc"), mam_status: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000)):
     db = await get_db()
     try:
         c = [HF, "b.owned=0", "b.is_unreleased=1"]; p = []
@@ -1040,8 +1041,7 @@ async def import_preview(data: dict = Body(...)):
     results = []
     db = await get_db()
     try:
-        # Pre-load all authors and books for fuzzy matching
-        all_authors = await (await db.execute("SELECT id, name FROM authors")).fetchall()
+        # Pre-load all books for fuzzy matching
         all_books = await (await db.execute(
             f"SELECT b.id, b.title, b.owned, b.source_url, b.author_id, a.name as author_name "
             f"FROM books b JOIN authors a ON b.author_id=a.id WHERE {HF}"
@@ -1184,6 +1184,8 @@ async def trigger_sync():
             save_settings(s)
         else:
             result = await sync_calibre()
+        _last_calibre_check["at"] = time.time()
+        _last_calibre_check["synced"] = True
         return {"status": "ok", **result}
     except Exception as e:
         raise HTTPException(500, str(e))
