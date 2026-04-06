@@ -86,6 +86,134 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      # ─── Linux Native Packaging (AppImage, .deb, .rpm) ──────────────
+      - name: Linux — Determine version
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Building Linux packages for version: $VERSION"
+
+      - name: Linux — Install packaging tools
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm librsvg2-bin file
+          # AppImage tool from upstream
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+
+      - name: Linux — Generate icon PNG from SVG
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p build/icons
+          rsvg-convert -w 256 -h 256 frontend/public/icon.svg -o build/icons/athenascout.png
+          file build/icons/athenascout.png
+
+      - name: Linux — Build AppImage
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p packages
+          APPDIR=build/AthenaScout.AppDir
+
+          # Build the AppDir structure
+          mkdir -p "$APPDIR/usr/bin"
+          mkdir -p "$APPDIR/usr/share/applications"
+          mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+
+          # Copy PyInstaller output (preserves the athenascout/ folder name)
+          cp -r dist/athenascout "$APPDIR/usr/bin/"
+
+          # Desktop file at top-level (required by AppImage spec) AND canonical location
+          cp build_assets/athenascout.desktop "$APPDIR/"
+          cp build_assets/athenascout.desktop "$APPDIR/usr/share/applications/"
+
+          # Icon at top-level (required by AppImage spec) AND canonical location
+          cp build/icons/athenascout.png "$APPDIR/athenascout.png"
+          cp build/icons/athenascout.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
+
+          # AppRun entry script
+          cp build_assets/AppRun "$APPDIR/AppRun"
+          chmod +x "$APPDIR/AppRun"
+
+          # Build the AppImage
+          ARCH=x86_64 /tmp/appimagetool "$APPDIR" "packages/AthenaScout-${VERSION}-x86_64.AppImage"
+          ls -lh packages/
+
+      - name: Linux — Build .deb package
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          PKGROOT=build/deb-package
+          mkdir -p "$PKGROOT/DEBIAN"
+          mkdir -p "$PKGROOT/opt/athenascout"
+          mkdir -p "$PKGROOT/usr/bin"
+          mkdir -p "$PKGROOT/usr/share/applications"
+          mkdir -p "$PKGROOT/usr/share/icons/hicolor/256x256/apps"
+
+          # Copy app files into /opt/athenascout
+          cp -r dist/athenascout/* "$PKGROOT/opt/athenascout/"
+
+          # Wrapper script in /usr/bin
+          cat > "$PKGROOT/usr/bin/athenascout" << 'EOF'
+          #!/bin/bash
+          exec /opt/athenascout/athenascout "$@"
+          EOF
+          chmod +x "$PKGROOT/usr/bin/athenascout"
+
+          # Desktop file + icon
+          cp build_assets/athenascout.desktop "$PKGROOT/usr/share/applications/"
+          cp build/icons/athenascout.png "$PKGROOT/usr/share/icons/hicolor/256x256/apps/"
+
+          # Generate control file from template with version substituted
+          sed "s/{VERSION}/$VERSION/g" build_assets/control.template > "$PKGROOT/DEBIAN/control"
+          cat "$PKGROOT/DEBIAN/control"
+
+          # Build the .deb
+          dpkg-deb --build "$PKGROOT" "packages/athenascout_${VERSION}_amd64.deb"
+          ls -lh packages/
+
+      - name: Linux — Build .rpm package
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # Set up rpmbuild directory tree
+          RPMBUILD=$HOME/rpmbuild
+          mkdir -p "$RPMBUILD"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          # Stage source files (PyInstaller output + desktop file + icon)
+          STAGING=build/rpm-staging/athenascout-${VERSION}
+          mkdir -p "$STAGING"
+          cp -r dist/athenascout/* "$STAGING/"
+          cp build_assets/athenascout.desktop "$STAGING/"
+          cp build/icons/athenascout.png "$STAGING/"
+
+          # Create source tarball
+          (cd build/rpm-staging && tar -czf "$RPMBUILD/SOURCES/athenascout-${VERSION}.tar.gz" "athenascout-${VERSION}")
+
+          # Generate RPM spec from template
+          sed "s/{VERSION}/$VERSION/g" build_assets/athenascout.rpm.spec.template > "$RPMBUILD/SPECS/athenascout.spec"
+          cat "$RPMBUILD/SPECS/athenascout.spec"
+
+          # Build the RPM
+          rpmbuild -bb "$RPMBUILD/SPECS/athenascout.spec"
+
+          # Move output to packages directory
+          cp "$RPMBUILD/RPMS/x86_64/"athenascout-${VERSION}-1*.rpm packages/
+          ls -lh packages/
+
+      - name: Linux — Upload native packages
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: athenascout-linux-packages
+          path: packages/
+          retention-days: 30
+          if-no-files-found: error
+
   release:
     name: Create Release
     needs: build
@@ -99,22 +227,29 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create release archives
+      - name: Prepare release files
         run: |
+          mkdir -p release
           cd artifacts
           for dir in */; do
             name="${dir%/}"
-            echo "Archiving $name..."
-            # Make executable bit is preserved on Linux/macOS via tar
-            tar -czf "../${name}.tar.gz" -C "$dir" .
+            echo "Processing $name..."
+            if [[ "$name" == "athenascout-linux-packages" ]]; then
+              # Native packages — copy directly without re-archiving
+              find "$dir" -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} ../release/ \;
+            else
+              # Source bundles — tar.gz the directory contents
+              tar -czf "../release/${name}.tar.gz" -C "$dir" .
+            fi
           done
           cd ..
-          ls -lh *.tar.gz
+          echo "Release files:"
+          ls -lh release/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: '*.tar.gz'
+          files: 'release/*'
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-') }}
