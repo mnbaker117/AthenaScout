@@ -490,12 +490,23 @@ const[q,setQ]=useState("");
 const[sort,setSort]=usePersist("db_sort","id");
 const[sortDir,setSortDir]=usePersist("db_dir","asc");
 const perPage=50;
+const[showNames,setShowNames]=useState(false);
+const[fkLookup,setFkLookup]=useState({authors:{},series:{}});
+const[fkLoading,setFkLoading]=useState(false);
 
 // Load table list on mount
 useEffect(()=>{api.get("/db/tables").then(r=>setTables(r.tables||[])).catch(()=>{})},[]);
 
 // Load schema when tab changes
 useEffect(()=>{setSchema(null);api.get(`/db/table/${tab}/schema`).then(setSchema).catch(()=>{})},[tab]);
+// Paginated FK lookup: fetches all rows from a table in 500-row batches
+useEffect(()=>{if(!showNames||tab!=="books")return;
+let cancelled=false;
+const fetchAll=async(table,keyCol,valCol)=>{const map={};let page=1;while(true){const r=await api.get(`/db/table/${table}?per_page=500&sort=id&page=${page}`);const rws=r.rows||[];rws.forEach(row=>{map[row[keyCol]]=row[valCol]});if(rws.length<500||cancelled)break;page++}return map};
+setFkLoading(true);
+Promise.all([fetchAll("authors","id","name"),fetchAll("series","id","name")]).then(([am,sm])=>{if(!cancelled)setFkLookup({authors:am,series:sm})}).catch(()=>{}).finally(()=>{if(!cancelled)setFkLoading(false)});
+return()=>{cancelled=true};
+},[showNames,tab]);
 
 // Load rows when tab/page/sort/search changes
 const load=useCallback(()=>{setLd(true);const p=new URLSearchParams({page:String(pg),per_page:String(perPage),sort,sort_dir:sortDir});if(q)p.set("search",q);api.get(`/db/table/${tab}?${p}`).then(d=>{setRows(d.rows||[]);setTotal(d.total||0);setLd(false)}).catch(()=>setLd(false))},[tab,pg,sort,sortDir,q]);
@@ -508,6 +519,11 @@ const toggleSort=col=>{if(sort===col){setSortDir(d=>d==="asc"?"desc":"asc")}else
 // Format cell value for display
 const fmtCell=(val,colName,colType)=>{
 if(val===null||val===undefined)return<span style={{color:t.tg,fontStyle:"italic",opacity:0.5}}>null</span>;
+// FK resolution: show name alongside ID when toggle is on
+if(showNames&&tab==="books"&&val!==null){
+if(colName==="author_id"&&fkLookup.authors[val])return<span><span style={{color:t.tg,fontSize:11}}>{val}</span> <span style={{color:t.purt,fontWeight:500}}>{fkLookup.authors[val]}</span></span>;
+if(colName==="series_id"&&fkLookup.series[val])return<span><span style={{color:t.tg,fontSize:11}}>{val}</span> <span style={{color:t.cyant,fontWeight:500}}>{fkLookup.series[val]}</span></span>;
+}
 // Timestamp formatting for REAL columns ending in _at
 if(colType==="REAL"&&(colName.endsWith("_at")||colName==="started_at"||colName==="finished_at")){
 const ts=Number(val);if(ts>1e9&&ts<2e10){try{return new Date(ts*1000).toLocaleString()}catch{}}
@@ -540,6 +556,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}>
 <input value={q} onChange={e=>{setQ(e.target.value);setPg(1)}} placeholder={`Search ${tab}...`} style={{padding:"8px 12px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:13,width:260}}/>
 <div style={{display:"flex",alignItems:"center",gap:12,fontSize:12,color:t.tg}}>
+{tab==="books"?<button onClick={()=>setShowNames(!showNames)} style={{padding:"4px 10px",borderRadius:6,border:`1px solid ${showNames?t.accent+"44":t.border}`,background:showNames?t.accent+"18":"transparent",color:showNames?t.accent:t.tf,cursor:"pointer",fontSize:11,fontWeight:500}}>{fkLoading?"Loading names...":showNames?"IDs → Names ON":"IDs → Names OFF"}</button>:null}
 <span>{total.toLocaleString()} row{total!==1?"s":""}</span>
 {schema?<span>{schema.columns.length} columns</span>:null}
 </div>
@@ -548,10 +565,10 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 {/* Data table */}
 {ld?<Load/>:rows.length===0?<div style={{padding:40,textAlign:"center",color:t.tg,fontSize:14}}>{q?"No rows match your search":"This table is empty"}</div>:
 <div style={{overflowX:"auto",border:`1px solid ${t.border}`,borderRadius:10,background:t.bg2}}>
-<table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:schema&&schema.columns.length>6?schema.columns.length*120:undefined}}>
+<table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:schema&&schema.columns.length>6?schema.columns.length*130:undefined}}>
 <thead>
 <tr>
-{(schema?.columns||[]).map(c=><th key={c.name} onClick={()=>toggleSort(c.name)} style={{padding:"10px 12px",textAlign:"left",borderBottom:`2px solid ${t.border}`,background:t.bg4,cursor:"pointer",whiteSpace:"nowrap",userSelect:"none",position:"sticky",top:0,zIndex:1}}>
+{(schema?.columns||[]).map((c,ci)=><th key={c.name} onClick={()=>toggleSort(c.name)} style={{padding:"10px 12px",paddingRight:ci===(schema?.columns||[]).length-1?24:12,textAlign:"left",borderBottom:`2px solid ${t.border}`,background:t.bg4,cursor:"pointer",whiteSpace:"nowrap",userSelect:"none",position:"sticky",top:0,zIndex:1}}>
 <div style={{display:"flex",alignItems:"center",gap:4}}>
 <span style={{fontWeight:600,color:sort===c.name?t.accent:t.text2}}>{c.name}</span>
 {sort===c.name?<span style={{fontSize:10,color:t.accent}}>{sortDir==="asc"?"▲":"▼"}</span>:null}
@@ -563,7 +580,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 </thead>
 <tbody>
 {rows.map((row,ri)=><tr key={ri} style={{borderBottom:`1px solid ${t.borderL}`}}>
-{(schema?.columns||[]).map(c=><td key={c.name} style={{padding:"8px 12px",maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:t.text2}}>
+{(schema?.columns||[]).map((c,ci)=><td key={c.name} style={{padding:"8px 12px",paddingRight:ci===(schema?.columns||[]).length-1?24:12,maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:t.text2}}>
 {fmtCell(row[c.name],c.name,(c.type||"").toUpperCase())}
 </td>)}
 </tr>)}
@@ -890,7 +907,6 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 
 // ─── App Shell ──────────────────────────────────────────────
 const NAV=[
-  {id:"dashboard",label:"Dashboard",icon:"◈"},
   {id:"library",label:"Library",icon:"📖"},
   {id:"authors",label:"Authors",icon:"◉"},
   {id:"missing",label:"Missing",icon:"◌"},
@@ -957,9 +973,10 @@ input,select{font-family:inherit}
 {/* ── Sticky Nav ── */}
 <nav className="nav-bar" style={{position:"sticky",top:0,zIndex:50,background:theme.bg+"ee",backdropFilter:"blur(12px)",borderBottom:`1px solid ${theme.borderL}`}}>
 <div style={{maxWidth:1120,margin:"0 auto",padding:"0 20px",display:"flex",alignItems:"center",justifyContent:"space-between",height:56,gap:8}}>
-<button onClick={()=>nav("dashboard")} style={{background:"none",border:"none",cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",gap:8}}>
+<button onClick={()=>nav("dashboard")} style={{background:"none",border:"none",cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",gap:8,position:"relative",paddingBottom:4}}>
 <svg viewBox="0 0 512 512" style={{width:28,height:28}}><defs><linearGradient id="ig" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:"#f0c060"}}/><stop offset="100%" style={{stopColor:"#d4a040"}}/></linearGradient></defs><circle cx="256" cy="256" r="240" fill="#2a1f4e" stroke="#d4a040" strokeWidth="12"/><circle cx="220" cy="200" r="22" fill="none" stroke="url(#ig)" strokeWidth="6"/><circle cx="292" cy="200" r="22" fill="none" stroke="url(#ig)" strokeWidth="6"/><circle cx="220" cy="200" r="8" fill="url(#ig)"/><circle cx="292" cy="200" r="8" fill="url(#ig)"/><path d="M248 220 L256 235 L264 220" fill="none" stroke="url(#ig)" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round"/><path d="M195 155 L212 178 L180 173" fill="url(#ig)" opacity="0.8"/><path d="M317 155 L300 178 L332 173" fill="url(#ig)" opacity="0.8"/><path d="M140 320 L256 290 L372 320 L372 365 C372 365 314 348 256 358 C198 348 140 365 140 365 Z" fill="url(#ig)" opacity="0.85"/></svg>
 <span style={{fontSize:18,fontWeight:700,color:theme.accent}}>AthenaScout</span>
+{pg==="dashboard"?<div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:theme.accent,borderRadius:1}}/>:null}
 </button>
 <div className="nav-items" style={{display:"flex",alignItems:"center",gap:2,overflowX:"auto",flex:1,minWidth:0}}>
 {NAV.filter(n=>n.id!=="mam"||mamOn).map(n=><button key={n.id} onClick={()=>nav(n.id)} style={{padding:"8px 14px",borderRadius:8,fontSize:14,fontWeight:500,border:"none",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,height:36,whiteSpace:"nowrap",flexShrink:0,background:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.bg4:"transparent",color:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.accent:theme.tf}}>
