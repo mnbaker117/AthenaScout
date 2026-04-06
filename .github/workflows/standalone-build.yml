@@ -223,6 +223,74 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      # ─── Windows Native Packaging (.exe + Inno Setup installer) ─────
+      - name: Windows — Determine version
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Building Windows packages for version: $VERSION"
+
+      - name: Windows — Build single-file executable
+        if: matrix.os == 'windows-latest'
+        run: pyinstaller athenascout-onefile.spec --noconfirm
+
+      - name: Windows — Verify single-file build
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          if [ ! -f "dist/AthenaScout-Portable.exe" ]; then
+            echo "::error::Single-file executable not found at dist/AthenaScout-Portable.exe"
+            ls -la dist/
+            exit 1
+          fi
+          echo "✓ Single-file build verified"
+
+      - name: Windows — Install Inno Setup
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Windows — Generate installer script with version
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          sed "s/{VERSION}/$VERSION/g" build_assets/installer.iss > installer-build.iss
+          cat installer-build.iss
+
+      - name: Windows — Build installer with Inno Setup
+        if: matrix.os == 'windows-latest'
+        shell: cmd
+        run: |
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer-build.iss
+
+      - name: Windows — Collect native packages
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p packages
+          # Single-file portable executable (rename to include version)
+          cp "dist/AthenaScout-Portable.exe" "packages/AthenaScout-${VERSION}.exe"
+          # Inno Setup installer (already named with version by the .iss script)
+          cp Output/AthenaScout-*-Setup.exe packages/
+          ls -lh packages/
+
+      - name: Windows — Upload native packages
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: athenascout-windows-packages
+          path: packages/
+          retention-days: 30
+          if-no-files-found: error
+
   release:
     name: Create Release
     needs: build
@@ -243,13 +311,27 @@ jobs:
           for dir in */; do
             name="${dir%/}"
             echo "Processing $name..."
-            if [[ "$name" == "athenascout-linux-packages" ]]; then
-              # Native packages — copy directly without re-archiving
-              find "$dir" -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} ../release/ \;
-            else
-              # Source bundles — tar.gz the directory contents
-              tar -czf "../release/${name}.tar.gz" -C "$dir" .
-            fi
+            case "$name" in
+              athenascout-linux-packages|athenascout-windows-packages)
+                # Native packages — copy directly without re-archiving.
+                # Includes .AppImage, .deb, .rpm (Linux) and .exe (Windows).
+                find "$dir" -type f \( \
+                  -name "*.AppImage" -o \
+                  -name "*.deb" -o \
+                  -name "*.rpm" -o \
+                  -name "*.exe" \
+                  \) -exec cp {} ../release/ \;
+                ;;
+              athenascout-windows)
+                # Windows source bundle — use .zip (native Explorer support).
+                # tar.gz requires extra tools that most Windows users don't have.
+                (cd "$dir" && zip -qr "../../release/${name}.zip" .)
+                ;;
+              *)
+                # Linux/macOS source bundles — use tar.gz (preserves file modes).
+                tar -czf "../release/${name}.tar.gz" -C "$dir" .
+                ;;
+            esac
           done
           cd ..
           echo "Release files:"
