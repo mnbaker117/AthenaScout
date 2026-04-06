@@ -141,14 +141,16 @@ return<Section title={header} count={countStr} ownedCount={series.owned_count} t
 function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
 
 // ─── Dashboard ──────────────────────────────────────────────
-function Dash({onNav}){const t=T();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
-useEffect(()=>{api.get("/lookup/status").then(r=>{if(r.running)setLookupScan(r)}).catch(()=>{});api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{})},[]);
+function Dash({onNav,libs=[],activeLib="",switchLib}){const t=T();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
+useEffect(()=>{api.get("/lookup/status").then(r=>{if(r.running)setLookupScan(r)}).catch(()=>{});api.get("/mam/scan/status").then(r=>{if(r.running||r.status==="complete")setMamScan(r)}).catch(()=>{})},[]);
 useEffect(()=>{if(!lookupScan?.running)return;const iv=setInterval(()=>{api.get("/lookup/status").then(r=>{setLookupScan(r);if(!r.running){clearInterval(iv);api.get("/stats").then(setD)}}).catch(()=>{})},3000);return()=>clearInterval(iv)},[lookupScan?.running]);
 useEffect(()=>{if(!mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running)clearInterval(iv)}).catch(()=>{})},5000);return()=>clearInterval(iv)},[mamScan?.running]);
+useEffect(()=>{if(mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{})},30000);return()=>clearInterval(iv)},[mamScan?.running]);
 if(!d)return<Load/>;
 const p=pct(d.owned_books,d.total_books);
 return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 
+{libs.length>1?<div style={{marginBottom:16,display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:13,fontWeight:500,color:t.tf}}>Library:</span><select value={activeLib} onChange={e=>switchLib(e.target.value)} style={{padding:"7px 28px 7px 12px",borderRadius:8,border:`1px solid ${t.border}`,background:t.bg2,color:t.accent,fontSize:14,fontWeight:600,cursor:"pointer",appearance:"none",WebkitAppearance:"none",backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 10px center"}}>{libs.map(l=><option key={l.slug} value={l.slug}>{l.name}</option>)}</select></div>:null}
 {/* Hero */}
 <div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:16,padding:28}}>
 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
@@ -205,11 +207,11 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 
 {mamScan&&mamScan.status!=="idle"?<div style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{mamScan.running?<div>
 <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}>
-<span>{mamScan.status==="paused"?"Paused — resuming in 5 min":mamScan.type==="scheduled"?"Scheduled scan running...":"Scanning MAM..."}{" "}{mamScan.scanned} of {mamScan.total} books{mamScan.remaining&&mamScan.remaining>mamScan.total?` (${mamScan.remaining} total remaining)`:""}</span>
+<span>{mamScan.status==="paused"?"Paused — resuming in 5 min":mamScan.status==="waiting (author scan running)"?"Waiting for author scan...":mamScan.type==="scheduled"?"Scheduled scan running...":"Scanning MAM..."}{" "}{mamScan.scanned} of {mamScan.total} books{mamScan.remaining?(()=>{const rem=mamScan.remaining-(mamScan.scanned||0);return rem>0?` (${rem.toLocaleString()} total remaining)`:""})():""}</span>
 <span style={{fontSize:11,textTransform:"capitalize",color:t.tg}}>{mamScan.type||"scan"}</span></div>
 <div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${mamScan.total>0?Math.round(mamScan.scanned/mamScan.total*100):0}%`,height:"100%",borderRadius:3,background:mamScan.status==="paused"?t.ylw:t.accent,transition:"width 0.5s"}}/></div>
 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",gap:12,fontSize:11,color:t.tg}}><span style={{color:t.grnt}}>Found: {mamScan.found}</span><span style={{color:t.ylwt}}>Possible: {mamScan.possible}</span><span style={{color:t.redt}}>Not found: {mamScan.not_found}</span>{mamScan.errors>0?<span style={{color:t.red}}>Errors: {mamScan.errors}</span>:null}</div><Btn size="sm" onClick={async()=>{try{await api.post("/mam/scan/cancel");const r=await api.get("/mam/scan/status");setMamScan(r)}catch{}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
-</div>:<div style={{fontSize:13}}><span style={{color:mamScan.status==="complete"?t.grnt:t.redt}}>{mamScan.status==="complete"?`MAM Scan Complete — ${mamScan.scanned} scanned: ${mamScan.found} found, ${mamScan.possible} possible, ${mamScan.not_found} not found${mamScan.errors>0?`, ${mamScan.errors} errors`:""}`:`MAM Scan: ${mamScan.status}`}</span></div>}</div>:null}
+</div>:<div style={{fontSize:13}}><span style={{color:mamScan.status==="complete"?t.grnt:t.redt}}>{mamScan.status==="complete"?(()=>{const rem=mamScan.remaining!=null?mamScan.remaining-(mamScan.scanned||0):(mamScan.total||0)-(mamScan.scanned||0);return`MAM Scan Complete — ${mamScan.scanned} scanned: ${mamScan.found} found, ${mamScan.possible} possible, ${mamScan.not_found} not found${mamScan.errors>0?`, ${mamScan.errors} errors`:""}${rem>0?` · ${rem.toLocaleString()} unscanned`:""}`})():`MAM Scan: ${mamScan.status}`}</span></div>}</div>:null}
 
 {d.mam_enabled?<div style={{fontSize:11,color:t.tg,marginTop:6,fontStyle:"italic"}}>MAM Scan checks all books missing MAM data (100 per batch, 5-min pauses between batches).</div>:null}
 </div>
@@ -853,7 +855,6 @@ input,select{font-family:inherit}
 <svg viewBox="0 0 512 512" style={{width:28,height:28}}><defs><linearGradient id="ig" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:"#f0c060"}}/><stop offset="100%" style={{stopColor:"#d4a040"}}/></linearGradient></defs><circle cx="256" cy="256" r="240" fill="#2a1f4e" stroke="#d4a040" strokeWidth="12"/><circle cx="220" cy="200" r="22" fill="none" stroke="url(#ig)" strokeWidth="6"/><circle cx="292" cy="200" r="22" fill="none" stroke="url(#ig)" strokeWidth="6"/><circle cx="220" cy="200" r="8" fill="url(#ig)"/><circle cx="292" cy="200" r="8" fill="url(#ig)"/><path d="M248 220 L256 235 L264 220" fill="none" stroke="url(#ig)" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round"/><path d="M195 155 L212 178 L180 173" fill="url(#ig)" opacity="0.8"/><path d="M317 155 L300 178 L332 173" fill="url(#ig)" opacity="0.8"/><path d="M140 320 L256 290 L372 320 L372 365 C372 365 314 348 256 358 C198 348 140 365 140 365 Z" fill="url(#ig)" opacity="0.85"/></svg>
 <span style={{fontSize:18,fontWeight:700,color:theme.accent}}>AthenaScout</span>
 </button>
-{libs.length>1?<div style={{position:"relative",flexShrink:0}}><select value={activeLib} onChange={e=>switchLib(e.target.value)} style={{padding:"6px 28px 6px 10px",borderRadius:8,border:`1px solid ${theme.border}`,background:theme.bg2,color:theme.accent,fontSize:13,fontWeight:600,cursor:"pointer",appearance:"none",WebkitAppearance:"none",backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 8px center",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{libs.map(l=><option key={l.slug} value={l.slug}>{l.name}</option>)}</select></div>:libs.length===1?<span style={{fontSize:13,fontWeight:500,color:theme.tf,flexShrink:0,padding:"0 4px"}}>{libs[0].name}</span>:null}
 <div className="nav-items" style={{display:"flex",alignItems:"center",gap:2,overflowX:"auto",flex:1,minWidth:0}}>
 {NAV.filter(n=>n.id!=="mam"||mamOn).map(n=><button key={n.id} onClick={()=>nav(n.id)} style={{padding:"8px 14px",borderRadius:8,fontSize:14,fontWeight:500,border:"none",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,height:36,whiteSpace:"nowrap",flexShrink:0,background:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.bg4:"transparent",color:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.accent:theme.tf}}>
 <span style={{fontSize:15,lineHeight:1}}>{n.icon}</span>{n.label}
@@ -877,7 +878,7 @@ input,select{font-family:inherit}
 {/* ── Main Content ── */}
 <main className="main-content" style={{maxWidth:1120,margin:"0 auto",padding:"28px 20px"}}>
 <div className="page-content" key={pg+(pa||"")+activeLib}>
-{pg==="dashboard"&&<Dash onNav={nav}/>}
+{pg==="dashboard"&&<Dash onNav={nav} libs={libs} activeLib={activeLib} switchLib={switchLib}/>}
 {pg==="library"&&<BP title="My Library" subtitle="books in your Calibre library" apiPath="/books" extraParams={{owned:true}} exportFilter="library"/>}
 {pg==="authors"&&<AP onNav={nav}/>}
 {pg==="author"&&<ADP authorId={pa} onNav={nav}/>}

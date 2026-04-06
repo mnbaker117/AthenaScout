@@ -41,15 +41,63 @@ def migrate_legacy_db(target_slug):
 
     Called once during startup when migrating from single-library to multi-library.
     Only renames if the legacy file exists and the target does not.
-    Returns True if migration occurred.
+    Returns the slug the DB was migrated to, or None if no migration occurred.
     """
     legacy = APP_DB_PATH  # /app/data/athenascout.db
+    if not legacy.exists():
+        return None
     target = DATA_DIR / f"athenascout_{target_slug}.db"
-    if legacy.exists() and not target.exists():
+    if not target.exists():
         legacy.rename(target)
         _db_logger.info(f"Migrated legacy database → athenascout_{target_slug}.db")
-        return True
-    return False
+        return target_slug
+    return None
+
+
+def match_legacy_db_to_library(libraries):
+    """Determine which discovered library the legacy athenascout.db belongs to.
+
+    Counts books in the legacy DB and each Calibre metadata.db, then picks
+    the library whose book count is closest. This prevents assigning a 2700-book
+    DB to a 17-book library just because of alphabetical ordering.
+
+    Returns the best-matching library slug, or the first library's slug as fallback.
+    """
+    import sqlite3
+
+    legacy = APP_DB_PATH
+    if not legacy.exists() or len(libraries) <= 1:
+        return libraries[0]["slug"] if libraries else "default"
+
+    # Count books in the legacy AthenaScout DB
+    try:
+        conn = sqlite3.connect(f"file:{legacy}?mode=ro", uri=True)
+        legacy_count = conn.execute("SELECT COUNT(*) FROM books WHERE source='calibre'").fetchone()[0]
+        conn.close()
+    except Exception as e:
+        _db_logger.warning(f"Could not read legacy DB for migration matching: {e}")
+        return libraries[0]["slug"]
+
+    _db_logger.info(f"Legacy DB has {legacy_count} Calibre-sourced books")
+
+    # Count books in each Calibre metadata.db
+    best_slug = libraries[0]["slug"]
+    best_diff = float("inf")
+    for lib in libraries:
+        try:
+            conn = sqlite3.connect(f"file:{lib['calibre_db_path']}?mode=ro", uri=True)
+            cal_count = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+            conn.close()
+            diff = abs(legacy_count - cal_count)
+            _db_logger.info(f"  Library '{lib['name']}': {cal_count} books in Calibre (diff={diff})")
+            if diff < best_diff:
+                best_diff = diff
+                best_slug = lib["slug"]
+        except Exception as e:
+            _db_logger.warning(f"  Could not read Calibre DB for '{lib['name']}': {e}")
+
+    _db_logger.info(f"Best match for legacy DB: '{best_slug}'")
+    return best_slug
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS authors (
@@ -199,6 +247,7 @@ async def get_db(slug=None) -> aiosqlite.Connection:
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
+    await db.execute("PRAGMA busy_timeout=5000")
     return db
 
 

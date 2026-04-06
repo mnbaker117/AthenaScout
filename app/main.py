@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import (SYNC_INTERVAL_MINUTES, LOOKUP_INTERVAL_MINUTES, load_settings, save_settings, CALIBRE_LIBRARY_PATH, LANGUAGE_OPTIONS, apply_logging, ENV_WEBUI_PORT, discover_libraries)
-from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, get_db_path
+from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library, get_db_path
 
 
 # Filter out noisy health check and cover/series access logs
@@ -66,10 +66,13 @@ async def lifespan(app: FastAPI):
         lib_names = [f'"{l["name"]}" ({l["slug"]})' for l in _discovered_libraries]
         logger.info(f"Discovered {len(_discovered_libraries)} Calibre libraries: {', '.join(lib_names)}")
 
-        # Migration: rename legacy athenascout.db → first library's DB file
+        # Migration: rename legacy athenascout.db → best-matching library's DB file
         first_slug = _discovered_libraries[0]["slug"]
-        if migrate_legacy_db(first_slug):
-            logger.info(f"Legacy database migrated to library '{first_slug}'")
+        migration_slug = match_legacy_db_to_library(_discovered_libraries)
+        migrated_to = migrate_legacy_db(migration_slug)
+        if migrated_to:
+            logger.info(f"Legacy database migrated to library '{migrated_to}'")
+            first_slug = migrated_to  # use migrated library as default active
 
         # Initialize all library databases
         for lib in _discovered_libraries:
@@ -313,17 +316,55 @@ async def list_libraries():
 
 @app.post("/api/libraries/active")
 async def switch_library(body: dict = Body(...)):
-    """Switch the active library."""
+    """Switch the active library. Cancels any running scans first."""
+    global _lookup_task, _lookup_progress, _mam_scan_task, _mam_scan_progress, _mam_full_scan_task
     slug = body.get("slug", "")
     valid_slugs = [l["slug"] for l in _discovered_libraries]
     if slug not in valid_slugs:
         raise HTTPException(400, f"Unknown library slug: {slug}. Valid: {valid_slugs}")
+
+    old_slug = get_active_library()
+    if slug == old_slug:
+        return {"status": "ok", "active": slug, "message": "Already active"}
+
+    # ── Cancel all running scans before switching ──
+    cancelled = []
+
+    # Cancel author lookup
+    if _lookup_task and not _lookup_task.done():
+        _lookup_task.cancel()
+        _lookup_progress.update({"running": False, "status": "cancelled (library switch)"})
+        cancelled.append("author scan")
+
+    # Cancel MAM scan (manual or scheduled)
+    if _mam_scan_task and not _mam_scan_task.done():
+        _mam_scan_task.cancel()
+        _mam_scan_progress.update({"running": False, "status": "cancelled (library switch)"})
+        cancelled.append("MAM scan")
+
+    # Cancel MAM full scan
+    if _mam_full_scan_task and not _mam_full_scan_task.done():
+        _mam_full_scan_task.cancel()
+        try:
+            db = await get_db()
+            try:
+                await mam_cancel_full_scan(db)
+            finally:
+                await db.close()
+        except Exception:
+            pass
+        cancelled.append("MAM full scan")
+
+    if cancelled:
+        logger.info(f"Cancelled running scans due to library switch ({old_slug} → {slug}): {', '.join(cancelled)}")
+
+    # ── Switch the active library ──
     set_active_library(slug)
     s = load_settings()
     s["active_library"] = slug
     save_settings(s)
     logger.info(f"Switched active library to '{slug}'")
-    return {"status": "ok", "active": slug}
+    return {"status": "ok", "active": slug, "cancelled": cancelled}
 
 # ─── Health & Stats ──────────────────────────────────────────
 @app.get("/api/health")
