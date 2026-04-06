@@ -140,7 +140,11 @@ jobs:
           chmod +x "$APPDIR/AppRun"
 
           # Build the AppImage
-          ARCH=x86_64 /tmp/appimagetool "$APPDIR" "packages/AthenaScout-${VERSION}-x86_64.AppImage"
+          # --appimage-extract-and-run is required because GitHub runners don't have libfuse2.
+          # This tells appimagetool (which is itself an AppImage) to extract and run from a
+          # temp dir instead of mounting via FUSE. The output AppImage is unaffected — it's
+          # a normal AppImage that uses FUSE on end-user systems where it's available.
+          ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run "$APPDIR" "packages/AthenaScout-${VERSION}-x86_64.AppImage"
           ls -lh packages/
 
       - name: Linux — Build .deb package
