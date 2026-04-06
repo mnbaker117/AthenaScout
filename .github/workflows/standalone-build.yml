@@ -291,6 +291,112 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      # ─── macOS Native Packaging (.app bundle + .dmg) ────────────────
+      - name: macOS — Determine version
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Building macOS packages for version: $VERSION"
+
+      - name: macOS — Generate .icns icon from SVG
+        if: matrix.os == 'macos-latest'
+        run: |
+          # Install librsvg for SVG → PNG conversion (sips can't read SVG directly)
+          brew install librsvg
+
+          # Convert source SVG to a high-resolution PNG
+          mkdir -p build/icon-staging
+          rsvg-convert -w 1024 -h 1024 frontend/public/icon.svg -o build/icon-staging/icon.png
+
+          # Build the .iconset directory with all required sizes for retina displays.
+          # macOS expects a specific naming convention for each size.
+          mkdir -p build/AthenaScout.iconset
+          sips -z 16 16     build/icon-staging/icon.png --out build/AthenaScout.iconset/icon_16x16.png
+          sips -z 32 32     build/icon-staging/icon.png --out build/AthenaScout.iconset/icon_16x16@2x.png
+          sips -z 32 32     build/icon-staging/icon.png --out build/AthenaScout.iconset/icon_32x32.png
+          sips -z 64 64     build/icon-staging/icon.png --out build/AthenaScout.iconset/icon_32x32@2x.png
+          sips -z 128 128   build/icon-staging/icon.png --out build/AthenaScout.iconset/icon_128x128.png
+          sips -z 256 256   build/icon-staging/icon.png --out build/AthenaScout.iconset/icon_128x128@2x.png
+          sips -z 256 256   build/icon-staging/icon.png --out build/AthenaScout.iconset/icon_256x256.png
+          sips -z 512 512   build/icon-staging/icon.png --out build/AthenaScout.iconset/icon_256x256@2x.png
+          sips -z 512 512   build/icon-staging/icon.png --out build/AthenaScout.iconset/icon_512x512.png
+          cp                build/icon-staging/icon.png   build/AthenaScout.iconset/icon_512x512@2x.png
+
+          # Compile the .iconset folder into a single .icns file
+          iconutil -c icns build/AthenaScout.iconset -o build/AthenaScout.icns
+          file build/AthenaScout.icns
+          ls -lh build/AthenaScout.icns
+
+          # Export the icon path for the spec to find via os.environ
+          echo "ATHENASCOUT_ICON_PATH=$PWD/build/AthenaScout.icns" >> $GITHUB_ENV
+
+      - name: macOS — Build .app bundle with PyInstaller
+        if: matrix.os == 'macos-latest'
+        run: |
+          # --distpath dist-mac keeps the .app bundle in a separate directory
+          # from the main athenascout.spec output (dist/athenascout/) so they
+          # don't collide on the same runner.
+          pyinstaller athenascout-macos.spec --noconfirm --distpath dist-mac
+
+      - name: macOS — Verify .app bundle
+        if: matrix.os == 'macos-latest'
+        run: |
+          if [ ! -d "dist-mac/AthenaScout.app" ]; then
+            echo "::error::AthenaScout.app not created"
+            ls -la dist-mac/ || true
+            exit 1
+          fi
+          if [ ! -f "dist-mac/AthenaScout.app/Contents/MacOS/athenascout" ]; then
+            echo "::error::Executable not found inside .app bundle"
+            find dist-mac/AthenaScout.app -type f | head -20
+            exit 1
+          fi
+          if [ ! -f "dist-mac/AthenaScout.app/Contents/Info.plist" ]; then
+            echo "::error::Info.plist not found"
+            exit 1
+          fi
+          echo "✓ .app bundle structure verified"
+          du -sh dist-mac/AthenaScout.app
+
+      - name: macOS — Build .dmg disk image
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p packages
+
+          # Stage the .dmg contents: the .app bundle + a symlink to /Applications
+          # for the iconic "drag to Applications" install experience.
+          mkdir -p build/dmg-staging
+          cp -R dist-mac/AthenaScout.app build/dmg-staging/
+          ln -s /Applications build/dmg-staging/Applications
+
+          # Create the .dmg using macOS's built-in hdiutil.
+          # UDZO = compressed disk image (zlib).
+          hdiutil create \
+            -volname "AthenaScout" \
+            -srcfolder build/dmg-staging \
+            -ov \
+            -format UDZO \
+            -fs HFS+ \
+            "packages/AthenaScout-${VERSION}.dmg"
+
+          ls -lh packages/
+
+      - name: macOS — Upload native packages
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: athenascout-macos-packages
+          path: packages/
+          retention-days: 30
+          if-no-files-found: error
+
   release:
     name: Create Release
     needs: build
@@ -312,14 +418,15 @@ jobs:
             name="${dir%/}"
             echo "Processing $name..."
             case "$name" in
-              athenascout-linux-packages|athenascout-windows-packages)
+              athenascout-linux-packages|athenascout-windows-packages|athenascout-macos-packages)
                 # Native packages — copy directly without re-archiving.
-                # Includes .AppImage, .deb, .rpm (Linux) and .exe (Windows).
+                # Includes .AppImage, .deb, .rpm (Linux), .exe (Windows), .dmg (macOS).
                 find "$dir" -type f \( \
                   -name "*.AppImage" -o \
                   -name "*.deb" -o \
                   -name "*.rpm" -o \
-                  -name "*.exe" \
+                  -name "*.exe" -o \
+                  -name "*.dmg" \
                   \) -exec cp {} ../release/ \;
                 ;;
               athenascout-windows)
