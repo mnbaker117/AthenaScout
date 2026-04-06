@@ -29,6 +29,7 @@ const Ic={
   sun:_i(<><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></>),
   cloudsun:_i(<><path d="M12 2v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="M20 12h2"/><path d="m19.07 4.93-1.41 1.41"/><path d="M15.95 13.14A4 4 0 109.5 9.5"/><path d="M13 16.5a5.5 5.5 0 10-11 0 3.5 3.5 0 007 0h4z"/></>),
   gear:_i(<><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></>),
+  database:_i(<><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></>),
 };
 
 // ─── Hooks ──────────────────────────────────────────────────
@@ -476,6 +477,109 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 {showExp?<ExportModal onClose={()=>setShowExp(false)} defaultFilter="missing"/>:null}
 </div>}
 
+// ─── Database Browser ───────────────────────────────────────
+function DBP(){const t=T();
+const[tables,setTables]=useState([]);
+const[tab,setTab]=usePersist("db_tab","books");
+const[schema,setSchema]=useState(null);
+const[rows,setRows]=useState([]);
+const[total,setTotal]=useState(0);
+const[pg,setPg]=useState(1);
+const[ld,setLd]=useState(true);
+const[q,setQ]=useState("");
+const[sort,setSort]=usePersist("db_sort","id");
+const[sortDir,setSortDir]=usePersist("db_dir","asc");
+const perPage=50;
+
+// Load table list on mount
+useEffect(()=>{api.get("/db/tables").then(r=>setTables(r.tables||[])).catch(()=>{})},[]);
+
+// Load schema when tab changes
+useEffect(()=>{setSchema(null);api.get(`/db/table/${tab}/schema`).then(setSchema).catch(()=>{})},[tab]);
+
+// Load rows when tab/page/sort/search changes
+const load=useCallback(()=>{setLd(true);const p=new URLSearchParams({page:String(pg),per_page:String(perPage),sort,sort_dir:sortDir});if(q)p.set("search",q);api.get(`/db/table/${tab}?${p}`).then(d=>{setRows(d.rows||[]);setTotal(d.total||0);setLd(false)}).catch(()=>setLd(false))},[tab,pg,sort,sortDir,q]);
+useEffect(()=>{load()},[load]);
+
+const totalPages=Math.max(1,Math.ceil(total/perPage));
+const switchTab=tb=>{setTab(tb);setPg(1);setQ("");setSort("id");setSortDir("asc")};
+const toggleSort=col=>{if(sort===col){setSortDir(d=>d==="asc"?"desc":"asc")}else{setSort(col);setSortDir("asc")}setPg(1)};
+
+// Format cell value for display
+const fmtCell=(val,colName,colType)=>{
+if(val===null||val===undefined)return<span style={{color:t.tg,fontStyle:"italic",opacity:0.5}}>null</span>;
+// Timestamp formatting for REAL columns ending in _at
+if(colType==="REAL"&&(colName.endsWith("_at")||colName==="started_at"||colName==="finished_at")){
+const ts=Number(val);if(ts>1e9&&ts<2e10){try{return new Date(ts*1000).toLocaleString()}catch{}}
+}
+// Truncate long text
+const s=String(val);
+if(s.length>120)return<span title={s}>{s.substring(0,120)}…</span>;
+return s;
+};
+
+// Column type color
+const typeColor=tp=>{const u=(tp||"").toUpperCase();if(u.includes("INTEGER"))return t.cyant;if(u.includes("REAL"))return t.ylwt;if(u.includes("TEXT"))return t.grnt;return t.tg};
+
+return<div style={{display:"flex",flexDirection:"column",gap:16}}>
+
+{/* Header */}
+<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:12}}>
+<div>
+<h1 style={{fontSize:22,fontWeight:700,color:t.text,margin:0}}>Database Browser</h1>
+<p style={{fontSize:13,color:t.td,marginTop:4}}>Viewing active library database{schema?` · ${schema.row_count.toLocaleString()} rows in ${tab}`:""}</p>
+</div>
+</div>
+
+{/* Tab bar */}
+<div style={{display:"flex",gap:4,overflowX:"auto",paddingBottom:4}}>
+{tables.map(tb=><button key={tb} onClick={()=>switchTab(tb)} style={{padding:"8px 16px",borderRadius:8,fontSize:13,fontWeight:500,border:"none",cursor:"pointer",whiteSpace:"nowrap",background:tab===tb?t.accent+"22":t.bg2,color:tab===tb?t.accent:t.tf,border:`1px solid ${tab===tb?t.accent+"44":t.border}`}}>{tb.replace(/_/g," ")}</button>)}
+</div>
+
+{/* Search + info bar */}
+<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}>
+<input value={q} onChange={e=>{setQ(e.target.value);setPg(1)}} placeholder={`Search ${tab}...`} style={{padding:"8px 12px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:13,width:260}}/>
+<div style={{display:"flex",alignItems:"center",gap:12,fontSize:12,color:t.tg}}>
+<span>{total.toLocaleString()} row{total!==1?"s":""}</span>
+{schema?<span>{schema.columns.length} columns</span>:null}
+</div>
+</div>
+
+{/* Data table */}
+{ld?<Load/>:rows.length===0?<div style={{padding:40,textAlign:"center",color:t.tg,fontSize:14}}>{q?"No rows match your search":"This table is empty"}</div>:
+<div style={{overflowX:"auto",border:`1px solid ${t.border}`,borderRadius:10,background:t.bg2}}>
+<table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:schema&&schema.columns.length>6?schema.columns.length*120:undefined}}>
+<thead>
+<tr>
+{(schema?.columns||[]).map(c=><th key={c.name} onClick={()=>toggleSort(c.name)} style={{padding:"10px 12px",textAlign:"left",borderBottom:`2px solid ${t.border}`,background:t.bg4,cursor:"pointer",whiteSpace:"nowrap",userSelect:"none",position:"sticky",top:0,zIndex:1}}>
+<div style={{display:"flex",alignItems:"center",gap:4}}>
+<span style={{fontWeight:600,color:sort===c.name?t.accent:t.text2}}>{c.name}</span>
+{sort===c.name?<span style={{fontSize:10,color:t.accent}}>{sortDir==="asc"?"▲":"▼"}</span>:null}
+<span style={{fontSize:9,color:typeColor(c.type),opacity:0.6,marginLeft:2}}>{(c.type||"TEXT").split(" ")[0]}</span>
+{c.pk?<span style={{fontSize:8,fontWeight:700,color:t.ylwt,background:t.ylw+"22",padding:"1px 4px",borderRadius:3,marginLeft:2}}>PK</span>:null}
+</div>
+</th>)}
+</tr>
+</thead>
+<tbody>
+{rows.map((row,ri)=><tr key={ri} style={{borderBottom:`1px solid ${t.borderL}`}}>
+{(schema?.columns||[]).map(c=><td key={c.name} style={{padding:"8px 12px",maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:t.text2}}>
+{fmtCell(row[c.name],c.name,(c.type||"").toUpperCase())}
+</td>)}
+</tr>)}
+</tbody>
+</table>
+</div>}
+
+{/* Pagination */}
+{totalPages>1?<div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:8,padding:8}}>
+<Btn size="sm" disabled={pg<=1} onClick={()=>{setPg(pg-1);window.scrollTo(0,0)}}>← Prev</Btn>
+<span style={{fontSize:13,color:t.td}}>Page {pg} of {totalPages}</span>
+<Btn size="sm" disabled={pg>=totalPages} onClick={()=>{setPg(pg+1);window.scrollTo(0,0)}}>Next →</Btn>
+</div>:null}
+
+</div>}
+
 // ─── Settings Helpers (outside SP to prevent re-mount on state change) ───
 function SF({label,desc,children,warn}){const t=T();return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 0",borderBottom:`1px solid ${t.borderL}`}}><div style={{flex:1}}><div style={{fontSize:14,fontWeight:500,color:t.text2}}>{label}</div>{desc?<div style={{fontSize:12,color:t.tf,marginTop:2}}>{desc}</div>:null}{warn?<div style={{fontSize:11,color:t.ylwt,marginTop:2}}>⚠ {warn}</div>:null}</div><div>{children}</div></div>}
 function STog({on,onToggle,disabled}){const t=T();return<div onClick={disabled?undefined:onToggle} style={{width:44,height:24,borderRadius:12,background:on?t.grn:t.bg4,cursor:disabled?"not-allowed":"pointer",padding:3,transition:"background 0.2s",opacity:disabled?0.5:1}}><div style={{width:18,height:18,borderRadius:"50%",background:"#fff",transform:on?"translateX(20px)":"translateX(0)",transition:"transform 0.2s"}}/></div>}
@@ -871,6 +975,7 @@ input,select{font-family:inherit}
 </div>}
 </div>
 <button onClick={nextT} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:"transparent",color:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title={`Theme: ${theme.name}`}>{tn==="dark"?Ic.moon:tn==="light"?Ic.sun:Ic.cloudsun}</button>
+<button onClick={()=>nav("database")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="database"?theme.bg4:"transparent",color:pg==="database"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Database">{Ic.database}</button>
 <button onClick={()=>nav("settings")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="settings"?theme.bg4:"transparent",color:pg==="settings"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Settings">{Ic.gear}</button>
 </div></div></nav>
 
@@ -889,6 +994,7 @@ input,select{font-family:inherit}
 {pg==="hidden"&&<HP onNav={nav}/>}
 {pg==="importexport"&&<IEP/>}
 {pg==="mam"&&<MP onNav={nav}/>}
+{pg==="database"&&<DBP/>}
 {pg==="settings"&&<SP/>}
 </div></main>
 

@@ -36,6 +36,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 logger = logging.getLogger("athenascout")
 scheduler = AsyncIOScheduler()
 HF = "b.hidden = 0"
+DB_TABLES = {"books", "authors", "series", "sync_log", "mam_scan_log"}
 _discovered_libraries = []
 _last_calibre_check = {"at": None, "synced": False}
 _mam_scan_task: asyncio.Task | None = None
@@ -1744,6 +1745,114 @@ async def mam_reset_scans():
         return {"status": "ok", "message": "All MAM scan data cleared"}
     finally:
         await db.close()
+
+# ─── Database Browser ────────────────────────────────────────
+@app.get("/api/db/tables")
+async def db_list_tables():
+    """List all browsable tables in the active library database."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+        tables = [r[0] for r in rows if r[0] in DB_TABLES]
+        return {"tables": sorted(tables)}
+    finally:
+        await db.close()
+
+
+@app.get("/api/db/table/{table_name}/schema")
+async def db_table_schema(table_name: str):
+    """Get column definitions for a table using PRAGMA table_info."""
+    if table_name not in DB_TABLES:
+        raise HTTPException(400, f"Table '{table_name}' is not accessible. Allowed: {sorted(DB_TABLES)}")
+    db = await get_db()
+    try:
+        cols = await db.execute_fetchall(f"PRAGMA table_info({table_name})")
+        count_row = await (await db.execute(f"SELECT COUNT(*) FROM [{table_name}]")).fetchone()
+        row_count = count_row[0] if count_row else 0
+        return {
+            "table": table_name,
+            "columns": [
+                {
+                    "name": c[1],
+                    "type": c[2] or "TEXT",
+                    "notnull": bool(c[3]),
+                    "default": c[4],
+                    "pk": bool(c[5]),
+                }
+                for c in cols
+            ],
+            "row_count": row_count,
+        }
+    finally:
+        await db.close()
+
+
+@app.get("/api/db/table/{table_name}")
+async def db_table_rows(
+    table_name: str,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=500),
+    sort: str = Query("id"),
+    sort_dir: str = Query("asc"),
+    search: str = Query(""),
+):
+    """Get paginated rows from a table with optional sorting and search."""
+    if table_name not in DB_TABLES:
+        raise HTTPException(400, f"Table '{table_name}' is not accessible. Allowed: {sorted(DB_TABLES)}")
+    db = await get_db()
+    try:
+        # Get column info for search and sort validation
+        cols = await db.execute_fetchall(f"PRAGMA table_info({table_name})")
+        col_names = [c[1] for c in cols]
+        col_types = {c[1]: (c[2] or "TEXT").upper() for c in cols}
+
+        # Validate sort column
+        sort_col = sort if sort in col_names else "id" if "id" in col_names else col_names[0]
+        direction = "DESC" if sort_dir.lower() == "desc" else "ASC"
+
+        # Build search filter (search across all TEXT-like columns)
+        where = "1=1"
+        params = []
+        if search.strip():
+            text_cols = [c for c in col_names if col_types[c] in ("TEXT", "")]
+            if text_cols:
+                clauses = [f"[{c}] LIKE ?" for c in text_cols]
+                where = f"({' OR '.join(clauses)})"
+                params = [f"%{search.strip()}%"] * len(text_cols)
+
+        # Count total matching rows
+        count_row = await (await db.execute(
+            f"SELECT COUNT(*) FROM [{table_name}] WHERE {where}", params
+        )).fetchone()
+        total = count_row[0] if count_row else 0
+
+        # Fetch page
+        offset = (page - 1) * per_page
+        rows = await db.execute_fetchall(
+            f"SELECT * FROM [{table_name}] WHERE {where} ORDER BY [{sort_col}] {direction} LIMIT ? OFFSET ?",
+            params + [per_page, offset]
+        )
+
+        # Convert rows to dicts
+        row_dicts = []
+        for row in rows:
+            d = {}
+            for i, col in enumerate(col_names):
+                d[col] = row[i]
+            row_dicts.append(d)
+
+        return {
+            "rows": row_dicts,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": max(1, (total + per_page - 1) // per_page),
+        }
+    finally:
+        await db.close()
+
 
 # ─── Covers ──────────────────────────────────────────────────
 @app.get("/api/covers/{bid}")
