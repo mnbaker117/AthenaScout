@@ -799,11 +799,15 @@ export default function App(){
   const[showAdd,setShowAdd]=useState(null);
 const[mamWarn,setMamWarn]=useState(false);
 const[mamOn,setMamOn]=useState(false);
+const[libs,setLibs]=useState([]);
+const[activeLib,setActiveLib]=useState(()=>{try{return localStorage.getItem("cl_active_lib")||""}catch{return""}});
+useEffect(()=>{api.get("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{})},[]);
 useEffect(()=>{api.get("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{})},[pg]); // null, "manual", "url", "choose"
   const theme=THEMES[tn]||THEMES.dark;
   const nav=(p,a=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
   useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);
   const nextT=()=>{const n=Object.keys(THEMES);setTn(n[(n.indexOf(tn)+1)%n.length])};
+  const switchLib=async(slug)=>{if(slug===activeLib)return;try{await api.post("/libraries/active",{slug});setActiveLib(slug);try{localStorage.setItem("cl_active_lib",slug)}catch{}setPg("dashboard");setPa(null)}catch(e){console.error("Library switch failed:",e)}};
 
 return<TC.Provider value={theme}>
 <style>{`*{box-sizing:border-box;margin:0}html{height:100%;background:${theme.bg}}body{background:${theme.bg};color:${theme.text2};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;min-height:100%;min-height:100dvh;min-height:-webkit-fill-available}::selection{background:${theme.accent}44}::-webkit-scrollbar{width:8px}::-webkit-scrollbar-track{background:${theme.bg}}::-webkit-scrollbar-thumb{background:${theme.border};border-radius:4px}
@@ -835,6 +839,7 @@ input,select{font-family:inherit}
   .sb-actions button{min-height:44px!important;min-width:44px!important;font-size:15px!important}
   .modal-panel{width:95vw!important;max-width:95vw!important}
   .dash-stats{grid-template-columns:repeat(3,1fr)!important;gap:8px!important}
+  .lib-switcher select{max-width:120px!important;font-size:11px!important}
   .author-header{flex-direction:column!important;gap:12px!important}
   .author-controls{width:100%!important;justify-content:flex-start!important;flex-wrap:wrap!important}
   .author-controls button{min-height:40px!important}
@@ -848,6 +853,7 @@ input,select{font-family:inherit}
 <svg viewBox="0 0 512 512" style={{width:28,height:28}}><defs><linearGradient id="ig" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:"#f0c060"}}/><stop offset="100%" style={{stopColor:"#d4a040"}}/></linearGradient></defs><circle cx="256" cy="256" r="240" fill="#2a1f4e" stroke="#d4a040" strokeWidth="12"/><circle cx="220" cy="200" r="22" fill="none" stroke="url(#ig)" strokeWidth="6"/><circle cx="292" cy="200" r="22" fill="none" stroke="url(#ig)" strokeWidth="6"/><circle cx="220" cy="200" r="8" fill="url(#ig)"/><circle cx="292" cy="200" r="8" fill="url(#ig)"/><path d="M248 220 L256 235 L264 220" fill="none" stroke="url(#ig)" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round"/><path d="M195 155 L212 178 L180 173" fill="url(#ig)" opacity="0.8"/><path d="M317 155 L300 178 L332 173" fill="url(#ig)" opacity="0.8"/><path d="M140 320 L256 290 L372 320 L372 365 C372 365 314 348 256 358 C198 348 140 365 140 365 Z" fill="url(#ig)" opacity="0.85"/></svg>
 <span style={{fontSize:18,fontWeight:700,color:theme.accent}}>AthenaScout</span>
 </button>
+{libs.length>1?<div style={{position:"relative",flexShrink:0}}><select value={activeLib} onChange={e=>switchLib(e.target.value)} style={{padding:"6px 28px 6px 10px",borderRadius:8,border:`1px solid ${theme.border}`,background:theme.bg2,color:theme.accent,fontSize:13,fontWeight:600,cursor:"pointer",appearance:"none",WebkitAppearance:"none",backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 8px center",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{libs.map(l=><option key={l.slug} value={l.slug}>{l.name}</option>)}</select></div>:libs.length===1?<span style={{fontSize:13,fontWeight:500,color:theme.tf,flexShrink:0,padding:"0 4px"}}>{libs[0].name}</span>:null}
 <div className="nav-items" style={{display:"flex",alignItems:"center",gap:2,overflowX:"auto",flex:1,minWidth:0}}>
 {NAV.filter(n=>n.id!=="mam"||mamOn).map(n=><button key={n.id} onClick={()=>nav(n.id)} style={{padding:"8px 14px",borderRadius:8,fontSize:14,fontWeight:500,border:"none",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,height:36,whiteSpace:"nowrap",flexShrink:0,background:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.bg4:"transparent",color:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.accent:theme.tf}}>
 <span style={{fontSize:15,lineHeight:1}}>{n.icon}</span>{n.label}
@@ -870,7 +876,7 @@ input,select{font-family:inherit}
 
 {/* ── Main Content ── */}
 <main className="main-content" style={{maxWidth:1120,margin:"0 auto",padding:"28px 20px"}}>
-<div className="page-content" key={pg+(pa||"")}>
+<div className="page-content" key={pg+(pa||"")+activeLib}>
 {pg==="dashboard"&&<Dash onNav={nav}/>}
 {pg==="library"&&<BP title="My Library" subtitle="books in your Calibre library" apiPath="/books" extraParams={{owned:true}} exportFilter="library"/>}
 {pg==="authors"&&<AP onNav={nav}/>}

@@ -1,8 +1,55 @@
 """
 Database layer for AthenaScout.
 """
+import logging
 import aiosqlite
-from app.config import APP_DB_PATH
+from app.config import APP_DB_PATH, DATA_DIR
+
+_db_logger = logging.getLogger("athenascout.database")
+
+# ─── Active Library Tracking ─────────────────────────────────
+_active_library_slug = None
+
+
+def set_active_library(slug):
+    """Set the active library slug. All get_db() calls will use this library."""
+    global _active_library_slug
+    _active_library_slug = slug
+    _db_logger.debug(f"Active library set to: {slug}")
+
+
+def get_active_library():
+    """Get the current active library slug."""
+    return _active_library_slug
+
+
+def get_db_path(slug=None):
+    """Get the database file path for a library slug.
+
+    If slug is provided, returns the per-library path.
+    If slug is None, uses the active library slug.
+    If no active library is set, falls back to the legacy APP_DB_PATH.
+    """
+    effective_slug = slug or _active_library_slug
+    if effective_slug:
+        return DATA_DIR / f"athenascout_{effective_slug}.db"
+    return APP_DB_PATH
+
+
+def migrate_legacy_db(target_slug):
+    """Rename legacy athenascout.db to the per-library filename.
+
+    Called once during startup when migrating from single-library to multi-library.
+    Only renames if the legacy file exists and the target does not.
+    Returns True if migration occurred.
+    """
+    legacy = APP_DB_PATH  # /app/data/athenascout.db
+    target = DATA_DIR / f"athenascout_{target_slug}.db"
+    if legacy.exists() and not target.exists():
+        legacy.rename(target)
+        _db_logger.info(f"Migrated legacy database → athenascout_{target_slug}.db")
+        return True
+    return False
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS authors (
@@ -140,16 +187,28 @@ MIGRATIONS = [
 ]
 
 
-async def get_db() -> aiosqlite.Connection:
-    db = await aiosqlite.connect(str(APP_DB_PATH))
+async def get_db(slug=None) -> aiosqlite.Connection:
+    """Get a database connection for a specific library (or the active library).
+
+    Args:
+        slug: Library slug. If None, uses the active library.
+              Falls back to legacy APP_DB_PATH if no active library is set.
+    """
+    path = get_db_path(slug)
+    db = await aiosqlite.connect(str(path))
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
     return db
 
 
-async def init_db():
-    db = await get_db()
+async def init_db(slug=None):
+    """Initialize schema and run migrations for a library database.
+
+    Args:
+        slug: Library slug. If None, uses the active library / legacy path.
+    """
+    db = await get_db(slug)
     try:
         # Step 1: Create tables (IF NOT EXISTS — safe for existing DBs)
         # Split schema: tables first, indexes later

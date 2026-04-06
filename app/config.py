@@ -1,7 +1,12 @@
 import os
+import re as _re
 import json
+import logging
 from pathlib import Path
 
+_cfg_logger = logging.getLogger("athenascout.config")
+
+CALIBRE_PATH = os.getenv("CALIBRE_PATH", "")
 CALIBRE_DB_PATH = os.getenv("CALIBRE_DB_PATH", "/calibre/metadata.db")
 CALIBRE_LIBRARY_PATH = os.getenv("CALIBRE_LIBRARY_PATH", "/calibre")
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
@@ -67,6 +72,9 @@ DEFAULT_SETTINGS = {
     "mam_full_scan_batch_delay_minutes": 60,
     "last_mam_validated_at": None,
     "mam_validation_ok": True,
+    "active_library": "",
+    "calibre_mtimes": {},
+    "library_sources": [],
 }
 
 
@@ -81,6 +89,93 @@ def apply_logging(verbose: bool = False):
     # Keep httpx at INFO always (too noisy at DEBUG)
     logging.getLogger("httpx").setLevel(logging.INFO)
     logging.getLogger("athenascout").info(f"Logging set to {'VERBOSE (DEBUG)' if verbose else 'NORMAL (INFO)'}")
+
+
+def slugify(name):
+    """Convert a folder name to a safe slug for DB filenames."""
+    s = name.lower().strip()
+    s = _re.sub(r'[^a-z0-9]+', '-', s)
+    s = s.strip('-')
+    return s or 'default'
+
+
+def discover_libraries(settings=None):
+    """Find all Calibre libraries. Returns list of dicts.
+
+    Priority:
+    1. User-configured library_sources in settings (for future Settings UI)
+    2. CALIBRE_PATH env var (recursive scan for metadata.db)
+    3. CALIBRE_DB_PATH env var (legacy single-library fallback)
+    """
+    libraries = []
+    seen_slugs = set()
+
+    def _add_library(mdb_path):
+        """Add a library from a metadata.db path, deduplicating by slug."""
+        parent = mdb_path.parent
+        name = parent.name
+        slug = slugify(name)
+        # Handle duplicate slugs by appending a counter
+        base_slug = slug
+        counter = 2
+        while slug in seen_slugs:
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        seen_slugs.add(slug)
+        libraries.append({
+            "name": name,
+            "slug": slug,
+            "calibre_db_path": str(mdb_path),
+            "calibre_library_path": str(parent),
+        })
+
+    def _scan_root(root_path):
+        """Scan a root directory for metadata.db files (one level deep)."""
+        root = Path(root_path)
+        if not root.exists():
+            _cfg_logger.warning(f"Library root path does not exist: {root_path}")
+            return
+        # Look for metadata.db in immediate subdirectories
+        for child in sorted(root.iterdir()):
+            if child.is_dir():
+                mdb = child / "metadata.db"
+                if mdb.exists():
+                    _add_library(mdb)
+        # Also check root itself (in case metadata.db is directly in root)
+        root_mdb = root / "metadata.db"
+        if root_mdb.exists():
+            _add_library(root_mdb)
+
+    # Priority 1: User-configured library sources (from Settings UI, Phase 17C)
+    if settings and settings.get("library_sources"):
+        for src in settings["library_sources"]:
+            src_path = src.get("path", "")
+            src_type = src.get("type", "root")
+            if not src_path:
+                continue
+            if src_type == "root":
+                _scan_root(src_path)
+            elif src_type == "direct":
+                mdb = Path(src_path)
+                if mdb.exists() and mdb.name == "metadata.db":
+                    _add_library(mdb)
+                else:
+                    _cfg_logger.warning(f"Direct library path not found or invalid: {src_path}")
+        if libraries:
+            return libraries
+
+    # Priority 2: CALIBRE_PATH env var (root scan)
+    if CALIBRE_PATH:
+        _scan_root(CALIBRE_PATH)
+        if libraries:
+            return libraries
+
+    # Priority 3: Legacy CALIBRE_DB_PATH (single direct path)
+    legacy_mdb = Path(CALIBRE_DB_PATH)
+    if legacy_mdb.exists():
+        _add_library(legacy_mdb)
+
+    return libraries
 
 
 def load_settings() -> dict:

@@ -17,8 +17,15 @@ SEP = "|||"
 FIELD_SEP = ":::"
 
 
-def _read_calibre_db(calibre_path: str) -> dict:
-    """Read Calibre metadata.db (synchronous, read-only)."""
+def _read_calibre_db(calibre_path: str, library_path: str = None) -> dict:
+    """Read Calibre metadata.db (synchronous, read-only).
+
+    Args:
+        calibre_path: Path to metadata.db
+        library_path: Path to the Calibre library root (for cover images).
+                      If None, falls back to CALIBRE_LIBRARY_PATH.
+    """
+    lib_path = library_path or CALIBRE_LIBRARY_PATH
     if not Path(calibre_path).exists():
         raise FileNotFoundError(f"Calibre database not found at {calibre_path}")
 
@@ -100,7 +107,7 @@ def _read_calibre_db(calibre_path: str) -> dict:
             # Build cover path
             cover_path = None
             if bk["book_path"]:
-                candidate = os.path.join(CALIBRE_LIBRARY_PATH, bk["book_path"], "cover.jpg")
+                candidate = os.path.join(lib_path, bk["book_path"], "cover.jpg")
                 if os.path.exists(candidate):
                     cover_path = candidate
 
@@ -135,9 +142,16 @@ def _read_calibre_db(calibre_path: str) -> dict:
         conn.close()
 
 
-async def sync_calibre():
-    """Main sync — imports Calibre data into our database."""
-    logger.info("Starting Calibre sync...")
+async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
+    """Main sync — imports Calibre data into our database.
+
+    Args:
+        calibre_db_path: Path to metadata.db. If None, uses CALIBRE_DB_PATH from config.
+        calibre_library_path: Path to library root. If None, uses CALIBRE_LIBRARY_PATH from config.
+    """
+    cal_path = calibre_db_path or CALIBRE_DB_PATH
+    lib_path = calibre_library_path or CALIBRE_LIBRARY_PATH
+    logger.info(f"Starting Calibre sync from {cal_path}...")
     start_time = time.time()
 
     db = await get_db()
@@ -149,7 +163,7 @@ async def sync_calibre():
         sync_id = cursor.lastrowid
         await db.commit()
 
-        calibre_data = _read_calibre_db(CALIBRE_DB_PATH)
+        calibre_data = _read_calibre_db(cal_path, lib_path)
         books_found = 0
         books_new = 0
 

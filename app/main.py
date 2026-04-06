@@ -6,8 +6,8 @@ from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from app.config import (SYNC_INTERVAL_MINUTES, LOOKUP_INTERVAL_MINUTES, load_settings, save_settings, CALIBRE_LIBRARY_PATH, LANGUAGE_OPTIONS, apply_logging, ENV_WEBUI_PORT)
-from app.database import init_db, get_db
+from app.config import (SYNC_INTERVAL_MINUTES, LOOKUP_INTERVAL_MINUTES, load_settings, save_settings, CALIBRE_LIBRARY_PATH, LANGUAGE_OPTIONS, apply_logging, ENV_WEBUI_PORT, discover_libraries)
+from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, get_db_path
 
 
 # Filter out noisy health check and cover/series access logs
@@ -37,6 +37,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 logger = logging.getLogger("athenascout")
 scheduler = AsyncIOScheduler()
 HF = "b.hidden = 0"
+_discovered_libraries = []
 _mam_scan_task: asyncio.Task | None = None
 _mam_full_scan_task: asyncio.Task | None = None
 _mam_scan_progress: dict = {"running": False, "scanned": 0, "total": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0, "status": "idle", "type": "none"}
@@ -45,16 +46,98 @@ _lookup_progress: dict = {"running": False, "checked": 0, "total": 0, "current_a
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db(); reload_sources()
+    global _discovered_libraries
+    import os as _os
+
     s = load_settings()
     apply_logging(s.get("verbose_logging", False))
-    try: await sync_calibre()
-    except Exception as e: logger.warning(f"Initial sync failed: {e}")
+    reload_sources()
+
+    # ─── Library Discovery ────────────────────────────────
+    _discovered_libraries = discover_libraries(s)
+    if not _discovered_libraries:
+        logger.warning("No Calibre libraries found! Falling back to legacy single-library mode.")
+        await init_db()
+        try:
+            await sync_calibre()
+        except Exception as e:
+            logger.warning(f"Initial sync failed: {e}")
+    else:
+        lib_names = [f'"{l["name"]}" ({l["slug"]})' for l in _discovered_libraries]
+        logger.info(f"Discovered {len(_discovered_libraries)} Calibre libraries: {', '.join(lib_names)}")
+
+        # Migration: rename legacy athenascout.db → first library's DB file
+        first_slug = _discovered_libraries[0]["slug"]
+        if migrate_legacy_db(first_slug):
+            logger.info(f"Legacy database migrated to library '{first_slug}'")
+
+        # Initialize all library databases
+        for lib in _discovered_libraries:
+            await init_db(lib["slug"])
+            logger.debug(f"Initialized database for library '{lib['name']}'")
+
+        # Set active library (from settings or first discovered)
+        active = s.get("active_library") or first_slug
+        valid_slugs = [l["slug"] for l in _discovered_libraries]
+        if active not in valid_slugs:
+            active = first_slug
+        set_active_library(active)
+        s["active_library"] = active
+        save_settings(s)
+        logger.info(f"Active library: '{active}'")
+
+        # Sync each library (with mtime optimization)
+        mtimes = s.get("calibre_mtimes", {})
+        for lib in _discovered_libraries:
+            set_active_library(lib["slug"])
+            try:
+                current_mtime = _os.path.getmtime(lib["calibre_db_path"])
+                last_mtime = mtimes.get(lib["slug"])
+                if last_mtime is not None and current_mtime == last_mtime:
+                    logger.info(f"Library '{lib['name']}': metadata.db unchanged, skipping sync")
+                else:
+                    logger.info(f"Library '{lib['name']}': syncing from Calibre...")
+                    await sync_calibre(lib["calibre_db_path"], lib["calibre_library_path"])
+                    mtimes[lib["slug"]] = current_mtime
+                    s["calibre_mtimes"] = mtimes
+                    save_settings(s)
+            except Exception as e:
+                logger.warning(f"Sync failed for library '{lib['name']}': {e}")
+
+        # Restore active library after syncing all
+        set_active_library(active)
+
+    # ─── Scheduled Calibre Sync (all libraries) ───────────
     s = load_settings()
     sync_min = s.get("calibre_sync_interval_minutes", SYNC_INTERVAL_MINUTES)
     lookup_days = s.get("lookup_interval_days", 3)
+
+    async def _sync_all_libraries():
+        """Scheduled task: sync all libraries with mtime optimization."""
+        import os as _os2
+        current_active = get_active_library()
+        st = load_settings()
+        mtimes = st.get("calibre_mtimes", {})
+        for lib in _discovered_libraries:
+            try:
+                set_active_library(lib["slug"])
+                current_mtime = _os2.path.getmtime(lib["calibre_db_path"])
+                last_mtime = mtimes.get(lib["slug"])
+                if last_mtime is not None and current_mtime == last_mtime:
+                    continue
+                await sync_calibre(lib["calibre_db_path"], lib["calibre_library_path"])
+                mtimes[lib["slug"]] = current_mtime
+                st["calibre_mtimes"] = mtimes
+                save_settings(st)
+            except Exception as e:
+                logger.warning(f"Scheduled sync failed for '{lib['name']}': {e}")
+        set_active_library(current_active)
+
     if sync_min and sync_min > 0:
-        scheduler.add_job(sync_calibre, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
+        if _discovered_libraries:
+            scheduler.add_job(_sync_all_libraries, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
+        else:
+            scheduler.add_job(sync_calibre, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
     else:
         logger.info("Calibre auto-sync disabled (interval = 0)")
     async def _scheduled_lookup():
@@ -210,6 +293,38 @@ async def reset_settings():
     logger.info("All settings reset to defaults")
     return {"status": "ok"}
 
+# ─── Libraries ───────────────────────────────────────────────
+@app.get("/api/libraries")
+async def list_libraries():
+    """Return all discovered Calibre libraries with active flag."""
+    active = get_active_library()
+    return {
+        "libraries": [
+            {
+                "name": lib["name"],
+                "slug": lib["slug"],
+                "calibre_db_path": lib["calibre_db_path"],
+                "calibre_library_path": lib["calibre_library_path"],
+                "active": lib["slug"] == active,
+            }
+            for lib in _discovered_libraries
+        ]
+    }
+
+@app.post("/api/libraries/active")
+async def switch_library(body: dict = Body(...)):
+    """Switch the active library."""
+    slug = body.get("slug", "")
+    valid_slugs = [l["slug"] for l in _discovered_libraries]
+    if slug not in valid_slugs:
+        raise HTTPException(400, f"Unknown library slug: {slug}. Valid: {valid_slugs}")
+    set_active_library(slug)
+    s = load_settings()
+    s["active_library"] = slug
+    save_settings(s)
+    logger.info(f"Switched active library to '{slug}'")
+    return {"status": "ok", "active": slug}
+
 # ─── Health & Stats ──────────────────────────────────────────
 @app.get("/api/health")
 async def health(): return {"status": "ok", "time": time.time()}
@@ -233,7 +348,9 @@ async def get_stats():
         mam_stats = None
         if s.get("mam_enabled") and s.get("mam_session_id"):
             mam_stats = await get_mam_stats(db)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True)}
+        active_lib = get_active_library()
+        lib_info = next((l for l in _discovered_libraries if l["slug"] == active_lib), None)
+        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(_discovered_libraries)}
     finally: await db.close()
 
 # ─── Authors ─────────────────────────────────────────────────
@@ -918,8 +1035,23 @@ async def import_add_books(data: dict = Body(...)):
 # ─── Sync ────────────────────────────────────────────────────
 @app.post("/api/sync/calibre")
 async def trigger_sync():
-    try: return {"status": "ok", **(await sync_calibre())}
-    except Exception as e: raise HTTPException(500, str(e))
+    import os as _os
+    active_slug = get_active_library()
+    lib = next((l for l in _discovered_libraries if l["slug"] == active_slug), None)
+    try:
+        if lib:
+            result = await sync_calibre(lib["calibre_db_path"], lib["calibre_library_path"])
+            # Update mtime after successful manual sync
+            s = load_settings()
+            mtimes = s.get("calibre_mtimes", {})
+            mtimes[active_slug] = _os.path.getmtime(lib["calibre_db_path"])
+            s["calibre_mtimes"] = mtimes
+            save_settings(s)
+        else:
+            result = await sync_calibre()
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 @app.post("/api/sync")
 async def trigger_sync_alias():
