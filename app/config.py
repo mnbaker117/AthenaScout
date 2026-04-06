@@ -3,19 +3,25 @@ import re as _re
 import json
 import logging
 from pathlib import Path
+from app.runtime import IS_DOCKER, get_data_dir
 
 _cfg_logger = logging.getLogger("athenascout.config")
 
 CALIBRE_PATH = os.getenv("CALIBRE_PATH", "")
 CALIBRE_EXTRA_PATHS = os.getenv("CALIBRE_EXTRA_PATHS", "")
-CALIBRE_DB_PATH = os.getenv("CALIBRE_DB_PATH", "/calibre/metadata.db")
-CALIBRE_LIBRARY_PATH = os.getenv("CALIBRE_LIBRARY_PATH", "/calibre")
+# In Docker, default to container paths. In standalone, default to empty
+# (user configures via Settings UI or setup wizard).
+CALIBRE_DB_PATH = os.getenv("CALIBRE_DB_PATH", "/calibre/metadata.db" if IS_DOCKER else "")
+CALIBRE_LIBRARY_PATH = os.getenv("CALIBRE_LIBRARY_PATH", "/calibre" if IS_DOCKER else "")
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
 LOOKUP_INTERVAL_MINUTES = int(os.getenv("LOOKUP_INTERVAL_MINUTES", "4320"))
 MAM_SESSION_ID = os.getenv("MAM_SESSION_ID", "")
 # MAM_SKIP_IP_UPDATE removed — always True (IP registration skipped)
 MAM_SCAN_INTERVAL_MINUTES = int(os.getenv("MAM_SCAN_INTERVAL_MINUTES", "360"))
-DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+# DATA_DIR: use explicit env var if set, otherwise OS-appropriate default.
+# Docker sets DATA_DIR=/app/data in Dockerfile. Standalone gets OS standard location.
+_data_dir_env = os.getenv("DATA_DIR", "")
+DATA_DIR = Path(_data_dir_env) if _data_dir_env else get_data_dir()
 APP_DB_PATH = DATA_DIR / "athenascout.db"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
@@ -76,6 +82,7 @@ DEFAULT_SETTINGS = {
     "active_library": "",
     "calibre_mtimes": {},
     "library_sources": [],
+    "setup_complete": False,
 }
 
 

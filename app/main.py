@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import (SYNC_INTERVAL_MINUTES, load_settings, save_settings, LANGUAGE_OPTIONS, apply_logging, discover_libraries, get_extra_mount_paths)
-from app.library_apps import get_app, get_all_apps
+from app.library_apps import get_app
 from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library
 
 
@@ -58,12 +58,13 @@ async def lifespan(app: FastAPI):
     # ─── Library Discovery ────────────────────────────────
     _discovered_libraries = discover_libraries(s)
     if not _discovered_libraries:
-        logger.warning("No Calibre libraries found! Falling back to legacy single-library mode.")
+        from app.runtime import IS_DOCKER
+        if IS_DOCKER:
+            logger.warning("No libraries found. Check CALIBRE_PATH env var and volume mounts, or use the setup wizard.")
+        else:
+            logger.info("No libraries configured yet. The setup wizard will guide you through setup.")
+        # Initialize a default database so the app can start and serve the UI
         await init_db()
-        try:
-            await sync_calibre()
-        except Exception as e:
-            logger.warning(f"Initial sync failed: {e}")
     else:
         # Group discovered libraries by app type for logging
         by_app = {}
@@ -405,38 +406,48 @@ async def switch_library(body: dict = Body(...)):
 
 @app.post("/api/libraries/validate-path")
 async def validate_library_path(body: dict = Body(...)):
-    """Validate a filesystem path for use as a library source."""
+    """Validate a filesystem path for use as a library source.
+
+    Supports any registered library app type — uses the app's db_filename
+    to look for the correct database file (e.g., metadata.db for Calibre).
+    """
     import os as _os
     path = body.get("path", "").strip()
     path_type = body.get("type", "root")
+    app_type = body.get("app_type", "calibre")
+
     if not path:
         return {"valid": False, "error": "No path provided"}
     if not _os.path.exists(path):
         return {"valid": False, "error": f"Path does not exist: {path}"}
+
+    # Get the database filename for this app type
+    app_instance = get_app(app_type)
+    db_filename = app_instance.db_filename if app_instance else "metadata.db"
 
     found = []
     if path_type == "root":
         root = Path(path)
         for child in sorted(root.iterdir()):
             if child.is_dir():
-                mdb = child / "metadata.db"
-                if mdb.exists():
-                    found.append({"name": child.name, "path": str(mdb)})
-        root_mdb = root / "metadata.db"
-        if root_mdb.exists():
-            found.append({"name": root.name, "path": str(root_mdb)})
+                db_file = child / db_filename
+                if db_file.exists():
+                    found.append({"name": child.name, "path": str(db_file)})
+        root_db = root / db_filename
+        if root_db.exists():
+            found.append({"name": root.name, "path": str(root_db)})
         if not found:
-            return {"valid": False, "error": "No metadata.db files found in subdirectories"}
+            return {"valid": False, "error": f"No {db_filename} files found in subdirectories"}
         return {"valid": True, "libraries_found": len(found), "details": found}
 
     elif path_type == "direct":
         p = Path(path)
-        if p.name == "metadata.db" and p.exists():
+        if p.name == db_filename and p.exists():
             return {"valid": True, "libraries_found": 1, "details": [{"name": p.parent.name, "path": str(p)}]}
-        elif (p / "metadata.db").exists():
-            return {"valid": True, "libraries_found": 1, "details": [{"name": p.name, "path": str(p / "metadata.db")}]}
+        elif (p / db_filename).exists():
+            return {"valid": True, "libraries_found": 1, "details": [{"name": p.name, "path": str(p / db_filename)}]}
         else:
-            return {"valid": False, "error": "No metadata.db found at this path"}
+            return {"valid": False, "error": f"No {db_filename} found at this path"}
     else:
         return {"valid": False, "error": f"Unknown type: {path_type}"}
 
@@ -486,6 +497,29 @@ async def rescan_libraries():
 # ─── Health & Stats ──────────────────────────────────────────
 @app.get("/api/health")
 async def health(): return {"status": "ok", "time": time.time()}
+
+@app.get("/api/platform")
+async def platform_info():
+    """Return platform/runtime info for the frontend.
+
+    Used by the setup wizard to detect first-run state, suggest
+    library paths, and adapt UI to the runtime environment.
+    """
+    from app.runtime import get_platform_info
+    info = get_platform_info()
+    s = load_settings()
+    # First run: no libraries discovered AND no user-configured sources AND setup not completed
+    info["first_run"] = (
+        not _discovered_libraries
+        and not s.get("library_sources")
+        and not s.get("setup_complete")
+    )
+    # Check which suggested default paths actually exist on this system
+    info["existing_default_paths"] = [
+        p for p in info["default_library_paths"]
+        if Path(p["path"]).exists()
+    ]
+    return info
 
 @app.get("/api/stats")
 async def get_stats():
@@ -2198,10 +2232,24 @@ async def get_cover(bid: int):
     finally: await db.close()
 
 # ─── Frontend ────────────────────────────────────────────────
-FD = Path(__file__).parent.parent / "frontend" / "dist"
+# Support both source tree and PyInstaller bundle layouts.
+# PyInstaller sets sys._MEIPASS to its temp extraction directory.
+import sys as _sys
+_pyinstaller_base = getattr(_sys, '_MEIPASS', None)
+if _pyinstaller_base:
+    FD = Path(_pyinstaller_base) / "frontend" / "dist"
+else:
+    FD = Path(__file__).parent.parent / "frontend" / "dist"
+
 if FD.exists():
     if (FD / "assets").exists(): app.mount("/assets", StaticFiles(directory=FD / "assets"), name="assets")
     @app.get("/{path:path}")
     async def serve_fe(path: str):
         fp = FD / path
         return FileResponse(fp if fp.is_file() else FD / "index.html")
+else:
+    from app.runtime import IS_STANDALONE
+    if IS_STANDALONE:
+        @app.get("/{path:path}")
+        async def serve_fe_missing(path: str):
+            return {"error": "Frontend not built. Run 'cd frontend && npm install && npm run build' first."}
