@@ -267,6 +267,12 @@ async def get_settings():
         sid = d["mam_session_id"]
         d["mam_session_id"] = sid[:8] + "..." + sid[-4:] if len(sid) > 12 else "***"
     d["language_options"] = LANGUAGE_OPTIONS
+    d["_discovered_libraries"] = [
+        {"name": l["name"], "slug": l["slug"],
+         "calibre_db_path": l["calibre_db_path"],
+         "active": l["slug"] == get_active_library()}
+        for l in _discovered_libraries
+    ]
     return d
 
 @app.post("/api/settings")
@@ -365,6 +371,86 @@ async def switch_library(body: dict = Body(...)):
     save_settings(s)
     logger.info(f"Switched active library to '{slug}'")
     return {"status": "ok", "active": slug, "cancelled": cancelled}
+
+@app.post("/api/libraries/validate-path")
+async def validate_library_path(body: dict = Body(...)):
+    """Validate a filesystem path for use as a library source."""
+    import os as _os
+    path = body.get("path", "").strip()
+    path_type = body.get("type", "root")
+    if not path:
+        return {"valid": False, "error": "No path provided"}
+    if not _os.path.exists(path):
+        return {"valid": False, "error": f"Path does not exist: {path}"}
+
+    found = []
+    if path_type == "root":
+        root = Path(path)
+        for child in sorted(root.iterdir()):
+            if child.is_dir():
+                mdb = child / "metadata.db"
+                if mdb.exists():
+                    found.append({"name": child.name, "path": str(mdb)})
+        root_mdb = root / "metadata.db"
+        if root_mdb.exists():
+            found.append({"name": root.name, "path": str(root_mdb)})
+        if not found:
+            return {"valid": False, "error": "No metadata.db files found in subdirectories"}
+        return {"valid": True, "libraries_found": len(found), "details": found}
+
+    elif path_type == "direct":
+        p = Path(path)
+        if p.name == "metadata.db" and p.exists():
+            return {"valid": True, "libraries_found": 1, "details": [{"name": p.parent.name, "path": str(p)}]}
+        elif (p / "metadata.db").exists():
+            return {"valid": True, "libraries_found": 1, "details": [{"name": p.name, "path": str(p / "metadata.db")}]}
+        else:
+            return {"valid": False, "error": "No metadata.db found at this path"}
+    else:
+        return {"valid": False, "error": f"Unknown type: {path_type}"}
+
+
+@app.post("/api/libraries/rescan")
+async def rescan_libraries():
+    """Re-run library discovery from current settings. Initializes new databases."""
+    global _discovered_libraries
+    s = load_settings()
+    new_libs = discover_libraries(s)
+    if not new_libs:
+        return {"status": "error", "error": "No libraries found after rescan"}
+
+    # Initialize any new library databases
+    existing_slugs = {l["slug"] for l in _discovered_libraries}
+    for lib in new_libs:
+        if lib["slug"] not in existing_slugs:
+            await init_db(lib["slug"])
+            logger.info(f"Initialized new library database: {lib['slug']}")
+
+    _discovered_libraries = new_libs
+    lib_names = [f'"{l["name"]}" ({l["slug"]})' for l in new_libs]
+    logger.info(f"Library rescan complete: {len(new_libs)} libraries found: {', '.join(lib_names)}")
+
+    # Ensure active library is still valid
+    active = get_active_library()
+    valid_slugs = [l["slug"] for l in new_libs]
+    if active not in valid_slugs:
+        new_active = new_libs[0]["slug"]
+        set_active_library(new_active)
+        s["active_library"] = new_active
+        save_settings(s)
+        logger.info(f"Active library reset to '{new_active}' after rescan")
+
+    return {
+        "status": "ok",
+        "libraries": [
+            {"name": l["name"], "slug": l["slug"],
+             "calibre_db_path": l["calibre_db_path"],
+             "calibre_library_path": l["calibre_library_path"],
+             "active": l["slug"] == get_active_library()}
+            for l in new_libs
+        ]
+    }
+
 
 # ─── Health & Stats ──────────────────────────────────────────
 @app.get("/api/health")
