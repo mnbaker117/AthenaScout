@@ -251,11 +251,48 @@ class GoodreadsSource(BaseSource):
                 if author_img and "nophoto" in author_img:
                     author_img = None
 
-            # Phase 1: Collect all book entries from author list page
+            # Phase 1: Collect all book entries from author list pages (with pagination)
             raw_books = []
-            rows = soup.select("tr[itemtype='http://schema.org/Book']")
-            if not rows:
-                rows = soup.select("table.tableList tr")
+            max_pages = 70  # Safety cap: 70 pages × 30 = ~2100 books max (Goodreads caps at 30/page)
+
+            def _parse_book_rows(page_soup):
+                """Parse book rows from a single author list page."""
+                parsed = []
+                page_rows = page_soup.select("tr[itemtype='http://schema.org/Book']")
+                if not page_rows:
+                    page_rows = page_soup.select("table.tableList tr")
+                for row in page_rows:
+                    title_el = row.select_one("a.bookTitle span") or row.select_one("a.bookTitle")
+                    if not title_el:
+                        continue
+                    parsed.append(row)
+                return parsed
+
+            # Parse first page
+            rows = _parse_book_rows(soup)
+
+            # Check for additional pages and fetch them
+            page_num = 1
+            while page_num < max_pages:
+                next_link = soup.select_one("a.next_page")
+                if not next_link or not next_link.get("href"):
+                    break
+                page_num += 1
+                logger.debug(f"  Goodreads: fetching author list page {page_num}...")
+                try:
+                    r = await self._get(f"{BASE}/author/list/{author_id}", retries=1,
+                                        params={"per_page": 100, "page": page_num})
+                    soup = BeautifulSoup(r.text, "lxml")
+                    new_rows = _parse_book_rows(soup)
+                    if not new_rows:
+                        break
+                    rows.extend(new_rows)
+                except Exception as e:
+                    logger.warning(f"  Goodreads: failed to fetch page {page_num}: {e}")
+                    break
+
+            if page_num > 1:
+                logger.info(f"  Goodreads: fetched {page_num} pages of author books ({len(rows)} entries)")
 
             for row in rows:
                 title_el = row.select_one("a.bookTitle span") or row.select_one("a.bookTitle")
