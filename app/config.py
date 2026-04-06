@@ -101,102 +101,109 @@ def slugify(name):
 
 
 def get_extra_mount_paths():
-    """Parse CALIBRE_EXTRA_PATHS env var into a list of paths.
+    """Collect extra mount paths from all registered library apps.
 
-    These are filesystem locations mounted into the container that are NOT
-    auto-scanned at startup. Users can manually add library sources from
-    these paths via the Settings UI.
-
-    Env var format: comma-delimited paths
-    Example: CALIBRE_EXTRA_PATHS=/downloads,/extra-libs,/mnt/other
+    Each app can define its own EXTRA_PATHS env var. All valid paths
+    are merged into a single list for the Settings UI.
     """
-    if not CALIBRE_EXTRA_PATHS:
-        return []
-    paths = [p.strip() for p in CALIBRE_EXTRA_PATHS.split(",") if p.strip()]
-    valid = []
-    for p in paths:
-        if Path(p).exists():
-            valid.append(p)
-        else:
-            _cfg_logger.warning(f"Extra mount path does not exist (skipped): {p}")
-    return valid
+    from app.library_apps import get_all_apps
+    all_paths = []
+    # Include paths from all registered apps
+    for app_type, app in get_all_apps().items():
+        for p in app.get_extra_paths():
+            if p not in all_paths:
+                all_paths.append(p)
+    # Also include legacy CALIBRE_EXTRA_PATHS for backward compat
+    if CALIBRE_EXTRA_PATHS:
+        for p in [x.strip() for x in CALIBRE_EXTRA_PATHS.split(",") if x.strip()]:
+            if Path(p).exists() and p not in all_paths:
+                all_paths.append(p)
+    return all_paths
 
 
 def discover_libraries(settings=None):
-    """Find all Calibre libraries. Returns list of dicts.
+    """Find all libraries from all registered source apps. Returns list of dicts.
 
     Priority:
-    1. User-configured library_sources in settings (for future Settings UI)
-    2. CALIBRE_PATH env var (recursive scan for metadata.db)
+    1. User-configured library_sources in settings
+    2. Registered library apps (each checks its own env var)
     3. CALIBRE_DB_PATH env var (legacy single-library fallback)
+
+    Each library dict includes: name, slug, app_type, content_type,
+    display_name, source_db_path, library_path
     """
+    from app.library_apps import get_all_apps
+
     libraries = []
     seen_slugs = set()
 
-    def _add_library(mdb_path):
-        """Add a library from a metadata.db path, deduplicating by slug."""
-        parent = mdb_path.parent
-        name = parent.name
-        slug = slugify(name)
-        # Handle duplicate slugs by appending a counter
+    def _add_library(lib_dict):
+        """Add a library, deduplicating by slug."""
+        slug = lib_dict["slug"]
         base_slug = slug
         counter = 2
         while slug in seen_slugs:
             slug = f"{base_slug}-{counter}"
             counter += 1
         seen_slugs.add(slug)
-        libraries.append({
-            "name": name,
-            "slug": slug,
-            "calibre_db_path": str(mdb_path),
-            "calibre_library_path": str(parent),
-        })
+        lib_dict["slug"] = slug
+        libraries.append(lib_dict)
 
-    def _scan_root(root_path):
-        """Scan a root directory for metadata.db files (one level deep)."""
-        root = Path(root_path)
-        if not root.exists():
-            _cfg_logger.warning(f"Library root path does not exist: {root_path}")
-            return
-        # Look for metadata.db in immediate subdirectories
-        for child in sorted(root.iterdir()):
-            if child.is_dir():
-                mdb = child / "metadata.db"
-                if mdb.exists():
-                    _add_library(mdb)
-        # Also check root itself (in case metadata.db is directly in root)
-        root_mdb = root / "metadata.db"
-        if root_mdb.exists():
-            _add_library(root_mdb)
-
-    # Priority 1: User-configured library sources (from Settings UI, Phase 17C)
+    # Priority 1: User-configured library sources (from Settings UI)
     if settings and settings.get("library_sources"):
         for src in settings["library_sources"]:
             src_path = src.get("path", "")
             src_type = src.get("type", "root")
+            src_app = src.get("app_type", "calibre")
             if not src_path:
                 continue
+            app = get_all_apps().get(src_app)
+            if not app:
+                _cfg_logger.warning(f"Unknown app type '{src_app}' in library_sources, skipping")
+                continue
             if src_type == "root":
-                _scan_root(src_path)
+                for lib in app.discover(src_path):
+                    _add_library(lib)
             elif src_type == "direct":
                 mdb = Path(src_path)
-                if mdb.exists() and mdb.name == "metadata.db":
-                    _add_library(mdb)
+                if mdb.exists() and mdb.name == app.db_filename:
+                    _add_library({
+                        "name": mdb.parent.name,
+                        "slug": slugify(mdb.parent.name),
+                        "app_type": app.app_type,
+                        "content_type": app.content_type,
+                        "display_name": app.display_name,
+                        "source_db_path": str(mdb),
+                        "library_path": str(mdb.parent),
+                    })
                 else:
                     _cfg_logger.warning(f"Direct library path not found or invalid: {src_path}")
         if libraries:
             return libraries
 
-    # Priority 2: CALIBRE_PATH env var (root scan)
-    if CALIBRE_PATH:
-        _scan_root(CALIBRE_PATH)
-        if libraries:
-            return libraries
+    # Priority 2: Registered library apps (each checks its env var)
+    for app_type, app in get_all_apps().items():
+        root_path = app.get_root_path()
+        if root_path:
+            found = app.discover(root_path)
+            for lib in found:
+                _add_library(lib)
+
+    if libraries:
+        return libraries
 
     # Priority 3: Legacy CALIBRE_DB_PATH (single direct path)
     legacy_mdb = Path(CALIBRE_DB_PATH)
     if legacy_mdb.exists():
-        _add_library(legacy_mdb)
+        _add_library({
+            "name": legacy_mdb.parent.name,
+            "slug": slugify(legacy_mdb.parent.name),
+            "app_type": "calibre",
+            "content_type": "ebook",
+            "display_name": "Calibre",
+            "source_db_path": str(legacy_mdb),
+            "library_path": str(legacy_mdb.parent),
+        })
 
     return libraries
 

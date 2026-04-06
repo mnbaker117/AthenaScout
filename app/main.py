@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import (SYNC_INTERVAL_MINUTES, load_settings, save_settings, LANGUAGE_OPTIONS, apply_logging, discover_libraries, get_extra_mount_paths)
+from app.library_apps import get_app, get_all_apps
 from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library
 
 
@@ -64,8 +65,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Initial sync failed: {e}")
     else:
-        lib_names = [f'"{l["name"]}" ({l["slug"]})' for l in _discovered_libraries]
-        logger.info(f"Discovered {len(_discovered_libraries)} Calibre libraries: {', '.join(lib_names)}")
+        # Group discovered libraries by app type for logging
+        by_app = {}
+        for l in _discovered_libraries:
+            at = l.get("display_name", "Unknown")
+            by_app.setdefault(at, []).append(l["name"])
+        lib_summary = "; ".join(f'{len(v)} {k} ({", ".join(v)})' for k, v in by_app.items())
+        logger.info(f"Discovered {len(_discovered_libraries)} libraries: {lib_summary}")
 
         # Migration: rename legacy athenascout.db → best-matching library's DB file
         first_slug = _discovered_libraries[0]["slug"]
@@ -95,13 +101,18 @@ async def lifespan(app: FastAPI):
         for lib in _discovered_libraries:
             set_active_library(lib["slug"])
             try:
-                current_mtime = _os.path.getmtime(lib["calibre_db_path"])
+                current_mtime = _os.path.getmtime(lib["source_db_path"])
                 last_mtime = mtimes.get(lib["slug"])
                 if last_mtime is not None and current_mtime == last_mtime:
                     logger.info(f"Library '{lib['name']}': metadata.db unchanged, skipping sync")
                 else:
-                    logger.info(f"Library '{lib['name']}': syncing from Calibre...")
-                    await sync_calibre(lib["calibre_db_path"], lib["calibre_library_path"])
+                    app = get_app(lib.get("app_type", "calibre"))
+                    logger.info(f"Library '{lib['name']}': syncing from {app.display_name if app else 'unknown'}...")
+                    if app:
+                        await app.sync(lib["source_db_path"], lib["library_path"])
+                    else:
+                        from app.calibre_sync import sync_calibre
+                        await sync_calibre(lib["source_db_path"], lib["library_path"])
                     mtimes[lib["slug"]] = current_mtime
                     s["calibre_mtimes"] = mtimes
                     save_settings(s)
@@ -128,13 +139,18 @@ async def lifespan(app: FastAPI):
         for lib in _discovered_libraries:
             try:
                 set_active_library(lib["slug"])
-                current_mtime = _os2.path.getmtime(lib["calibre_db_path"])
+                current_mtime = _os2.path.getmtime(lib["source_db_path"])
                 last_mtime = mtimes.get(lib["slug"])
                 if last_mtime is not None and current_mtime == last_mtime:
                     logger.debug(f"Scheduled sync: '{lib['name']}' metadata.db unchanged, skipping")
                     continue
-                logger.info(f"Scheduled sync: '{lib['name']}' metadata.db changed, syncing...")
-                await sync_calibre(lib["calibre_db_path"], lib["calibre_library_path"])
+                app = get_app(lib.get("app_type", "calibre"))
+                logger.info(f"Scheduled sync: '{lib['name']}' {app.db_filename if app else 'database'} changed, syncing...")
+                if app:
+                    await app.sync(lib["source_db_path"], lib["library_path"])
+                else:
+                    from app.calibre_sync import sync_calibre
+                    await sync_calibre(lib["source_db_path"], lib["library_path"])
                 mtimes[lib["slug"]] = current_mtime
                 st["calibre_mtimes"] = mtimes
                 save_settings(st)
@@ -279,7 +295,9 @@ async def get_settings():
     d["_extra_mount_paths"] = get_extra_mount_paths()
     d["_discovered_libraries"] = [
         {"name": l["name"], "slug": l["slug"],
-         "calibre_db_path": l["calibre_db_path"],
+         "app_type": l.get("app_type", "calibre"),
+         "content_type": l.get("content_type", "ebook"),
+         "source_db_path": l["source_db_path"],
          "active": l["slug"] == get_active_library()}
         for l in _discovered_libraries
     ]
@@ -322,8 +340,11 @@ async def list_libraries():
             {
                 "name": lib["name"],
                 "slug": lib["slug"],
-                "calibre_db_path": lib["calibre_db_path"],
-                "calibre_library_path": lib["calibre_library_path"],
+                "app_type": lib.get("app_type", "calibre"),
+                "content_type": lib.get("content_type", "ebook"),
+                "display_name": lib.get("display_name", "Calibre"),
+                "source_db_path": lib["source_db_path"],
+                "library_path": lib["library_path"],
                 "active": lib["slug"] == active,
             }
             for lib in _discovered_libraries
@@ -454,8 +475,8 @@ async def rescan_libraries():
         "status": "ok",
         "libraries": [
             {"name": l["name"], "slug": l["slug"],
-             "calibre_db_path": l["calibre_db_path"],
-             "calibre_library_path": l["calibre_library_path"],
+             "source_db_path": l["source_db_path"],
+             "library_path": l["library_path"],
              "active": l["slug"] == get_active_library()}
             for l in new_libs
         ]
@@ -487,7 +508,7 @@ async def get_stats():
             mam_stats = await get_mam_stats(db)
         active_lib = get_active_library()
         lib_info = next((l for l in _discovered_libraries if l["slug"] == active_lib), None)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(_discovered_libraries), "last_calibre_check": _last_calibre_check}
+        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(_discovered_libraries), "active_content_type": lib_info.get("content_type", "ebook") if lib_info else "ebook", "active_app_type": lib_info.get("app_type", "calibre") if lib_info else "calibre", "last_calibre_check": _last_calibre_check}
     finally: await db.close()
 
 # ─── Authors ─────────────────────────────────────────────────
@@ -1176,11 +1197,16 @@ async def trigger_sync():
     lib = next((l for l in _discovered_libraries if l["slug"] == active_slug), None)
     try:
         if lib:
-            result = await sync_calibre(lib["calibre_db_path"], lib["calibre_library_path"])
+            app = get_app(lib.get("app_type", "calibre"))
+            if app:
+                result = await app.sync(lib["source_db_path"], lib["library_path"])
+            else:
+                from app.calibre_sync import sync_calibre
+                result = await sync_calibre(lib["source_db_path"], lib["library_path"])
             # Update mtime after successful manual sync
             s = load_settings()
             mtimes = s.get("calibre_mtimes", {})
-            mtimes[active_slug] = _os.path.getmtime(lib["calibre_db_path"])
+            mtimes[active_slug] = _os.path.getmtime(lib["source_db_path"])
             s["calibre_mtimes"] = mtimes
             save_settings(s)
         else:
