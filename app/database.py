@@ -7,6 +7,11 @@ from app.config import APP_DB_PATH, DATA_DIR
 
 _db_logger = logging.getLogger("athenascout.database")
 
+# Common SQL filter constant used by routes that query books.
+# Excludes hidden books from results. Apply as:
+#     WHERE {HF} AND other_conditions...
+HF = "b.hidden = 0"
+
 # ─── Active Library Tracking ─────────────────────────────────
 _active_library_slug = None
 

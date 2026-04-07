@@ -8,8 +8,9 @@ from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import (SYNC_INTERVAL_MINUTES, load_settings, save_settings, LANGUAGE_OPTIONS, apply_logging, discover_libraries, get_extra_mount_paths)
 from app.library_apps import get_app
-from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library
+from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library, HF
 from app import state
+from app.routers.db_editor import DB_TABLES, DB_FK_RESOLVERS
 
 
 # Filter out noisy health check and cover/series access logs
@@ -37,8 +38,6 @@ from app.sources.mam import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("athenascout")
 scheduler = AsyncIOScheduler()
-HF = "b.hidden = 0"
-DB_TABLES = {"books", "authors", "series", "sync_log", "mam_scan_log"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -272,6 +271,32 @@ async def lifespan(app: FastAPI):
     scheduler.start(); yield; scheduler.shutdown()
 
 app = FastAPI(title="AthenaScout", lifespan=lifespan)
+
+# ─── Router registration ─────────────────────────────────────
+# Routers are currently empty scaffolds; routes still live inline below.
+# Stage A3 will move routes out one group at a time.
+from app.routers import (
+    config as _r_config,
+    libraries as _r_libraries,
+    books as _r_books,
+    authors as _r_authors,
+    series as _r_series,
+    covers as _r_covers,
+    scan as _r_scan,
+    mam as _r_mam,
+    db_editor as _r_db_editor,
+    import_export as _r_import_export,
+)
+app.include_router(_r_config.router)
+app.include_router(_r_libraries.router)
+app.include_router(_r_books.router)
+app.include_router(_r_authors.router)
+app.include_router(_r_series.router)
+app.include_router(_r_covers.router)
+app.include_router(_r_scan.router)
+app.include_router(_r_mam.router)
+app.include_router(_r_db_editor.router)
+app.include_router(_r_import_export.router)
 
 # ─── Settings ────────────────────────────────────────────────
 @app.get("/api/settings")
@@ -1888,14 +1913,6 @@ async def db_table_rows(
     finally:
         await db.close()
 
-
-# FK columns that support name-to-ID resolution in the DB editor
-DB_FK_RESOLVERS = {
-    "books": {
-        "author_id": {"table": "authors", "name_col": "name", "create_cols": {"sort_name": lambda name: ", ".join(reversed(name.split(" ", 1))) if " " in name else name}},
-        "series_id": {"table": "series", "name_col": "name"},
-    }
-}
 
 
 async def _resolve_fk_value(db, table_name, col_name, value, row_context=None):
