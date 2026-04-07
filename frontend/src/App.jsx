@@ -5,11 +5,15 @@ import { pct, timeAgo, fmtDate } from "./lib/format";
 import { Ic } from "./icons";
 import { usePersist } from "./hooks/usePersist";
 import { NAV } from "./lib/constants";
+import { Btn } from "./components/Btn";
+import { Spin } from "./components/Spin";
+import { SBRow } from "./components/SBRow";
+import { AddBookModal } from "./components/AddBookModal";
+import { UrlSearchModal } from "./components/UrlSearchModal";
+import { SetupWizard } from "./components/SetupWizard";
 
 // ─── Shared Components ──────────────────────────────────────
-function Spin(){return<div style={{width:16,height:16,border:"2px solid transparent",borderTopColor:"currentColor",borderRadius:"50%",animation:"spin 0.6s linear infinite"}}/>}
 function Load(){const t=useTheme();return<div style={{display:"flex",justifyContent:"center",padding:60}}><Spin/><span style={{marginLeft:10,color:t.td}}>Loading...</span></div>}
-function Btn({children,onClick,disabled,variant="default",size="md",style:sx,...rest}){const t=useTheme();const s={display:"inline-flex",alignItems:"center",gap:6,border:"none",borderRadius:8,cursor:disabled?"not-allowed":"pointer",fontWeight:500,fontSize:size==="sm"?12:14,padding:size==="sm"?"5px 10px":"8px 16px",opacity:disabled?0.5:1,...(variant==="accent"?{background:t.accent,color:"#000"}:variant==="ghost"?{background:"transparent",color:t.td}:{background:t.bg4,border:`1px solid ${t.border}`,color:t.text2}),...sx};return<button onClick={disabled?undefined:onClick} style={s} {...rest}>{children}</button>}
 function PB({owned,total}){const t=useTheme();const p=pct(owned,total);return<div style={{height:5,borderRadius:3,background:t.bg4,overflow:"hidden"}}><div style={{width:`${p}%`,height:"100%",borderRadius:3,background:p===100?t.grn:p>50?t.ylw:t.red,transition:"width 0.3s"}}/></div>}
 function VT({mode,setMode}){const t=useTheme();return<div style={{display:"flex",borderRadius:6,border:`1px solid ${t.border}`,overflow:"hidden",height:34}}>{["grid","list"].map(m=><button key={m} onClick={()=>setMode(m)} style={{padding:"0 12px",fontSize:12,fontWeight:500,border:"none",cursor:"pointer",background:mode===m?t.bg4:"transparent",color:mode===m?t.accent:t.tg,textTransform:"capitalize",height:"100%"}}>{m==="grid"?"Grid":"List"}</button>)}</div>}
 
@@ -82,7 +86,6 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
 <Btn size="sm" onClick={()=>{if(confirm(`Delete "${book.title}" permanently? This cannot be undone.`)){onAction("delete",book.id);onClose()}}} style={{background:"#6b2020",borderColor:"#8b3030",color:"#ff9090"}}>Delete</Btn>
 </div>:null}
 </div>}
-function SBRow({label,value,color}){const t=useTheme();return<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>{label}</span><span style={{fontSize:13,color:color||t.text2,textAlign:"right"}}>{value}</span></div>}
 
 // ─── Book Card ──────────────────────────────────────────────
 function BCard({book,onAction,onClick,showAuthor,highlightAuthorId,showMamLink}){const t=useTheme();const isUp=!!book.is_unreleased;const hasCover=book.cover_url||book.cover_path;const isOtherAuthor=highlightAuthorId&&book.author_id&&book.author_id!==highlightAuthorId;
@@ -308,48 +311,6 @@ return<div ref={ref} style={{position:"relative",width:300}}>
 </div>}
 
 // ─── Add Book Modal ─────────────────────────────────────────
-function AddBookModal({onClose,onAdded}){const t=useTheme();const[f,setF]=useState({title:"",author_name:"",series_name:"",series_index:"",pub_date:"",expected_date:"",description:"",isbn:"",is_unreleased:false});const[saving,setSaving]=useState(false);const[err,setErr]=useState("");
-const save=async()=>{if(!f.title||!f.author_name){setErr("Title and author are required");return}setSaving(true);try{await api.post("/books/add",f);onAdded&&onAdded();onClose()}catch{setErr("Failed to add")}setSaving(false)};
-const upF=(field,val)=>setF(prev=>({...prev,[field]:val}));
-const ist={padding:"8px 10px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13,width:"100%"};
-const lbl={fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"};
-return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeOverlay 0.2s ease-out"}} onClick={onClose}><div onClick={e=>e.stopPropagation()} className="modal-panel" style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:24,animation:"fadeIn 0.2s ease-out",width:460,maxWidth:"90vw",maxHeight:"80vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:14}}>
-<h2 style={{fontSize:18,fontWeight:700,color:t.text,margin:0}}>Add Book</h2>
-<div style={{display:"flex",flexDirection:"column",gap:4}}><label style={lbl}>Title *</label><input value={f.title} onChange={e=>upF("title",e.target.value)} style={ist}/></div>
-<div style={{display:"flex",flexDirection:"column",gap:4}}><label style={lbl}>Author *</label><input value={f.author_name} onChange={e=>upF("author_name",e.target.value)} style={ist}/></div>
-<div style={{display:"flex",gap:10}}><div style={{flex:2,display:"flex",flexDirection:"column",gap:4}}><label style={lbl}>Series</label><input value={f.series_name} onChange={e=>upF("series_name",e.target.value)} style={ist}/></div><div style={{flex:1,display:"flex",flexDirection:"column",gap:4}}><label style={lbl}>#</label><input type="number" value={f.series_index} onChange={e=>upF("series_index",e.target.value)} style={ist}/></div></div>
-<div style={{display:"flex",gap:10}}><div style={{flex:1,display:"flex",flexDirection:"column",gap:4}}><label style={lbl}>Pub date</label><input type="date" value={f.pub_date} onChange={e=>upF("pub_date",e.target.value)} style={ist}/></div><div style={{flex:1,display:"flex",flexDirection:"column",gap:4}}><label style={lbl}>Expected date</label><input type="date" value={f.expected_date} onChange={e=>upF("expected_date",e.target.value)} style={ist}/></div></div>
-<div style={{display:"flex",flexDirection:"column",gap:4}}><label style={lbl}>ISBN</label><input value={f.isbn} onChange={e=>upF("isbn",e.target.value)} style={ist}/></div>
-<div style={{display:"flex",flexDirection:"column",gap:4}}><label style={lbl}>Description</label><input value={f.description} onChange={e=>upF("description",e.target.value)} style={ist}/></div>
-<div style={{display:"flex",alignItems:"center",gap:8}}><input type="checkbox" checked={f.is_unreleased} onChange={e=>upF("is_unreleased",e.target.checked)}/><label style={{fontSize:13,color:t.text2}}>Unreleased / Upcoming</label></div>
-{err?<div style={{color:t.redt,fontSize:12}}>{err}</div>:null}
-<div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn variant="accent" onClick={save} disabled={saving}>{saving?<Spin/>:"Add Book"}</Btn></div>
-</div></div>}
-
-// ─── Add via URL Modal ──────────────────────────────────────
-function UrlSearchModal({onClose,onAdded}){const t=useTheme();const[url,setUrl]=useState("");const[ld,setLd]=useState(false);const[data,setData]=useState(null);const[err,setErr]=useState("");const[saving,setSaving]=useState(false);
-const search=async()=>{if(!url.trim()){setErr("Paste a Goodreads book URL");return}setLd(true);setErr("");setData(null);try{const d=await api.post("/books/search-url",{url:url.trim()});setData(d)}catch(e){setErr("Could not fetch book details. Make sure it's a valid Goodreads URL.")}setLd(false)};
-const add=async()=>{if(!data)return;setSaving(true);try{await api.post("/books/add",{title:data.title,author_name:data.author_name,series_name:data.series_name||"",series_index:data.series_index||"",pub_date:data.pub_date||"",expected_date:data.expected_date||"",description:data.description||"",isbn:data.isbn||"",cover_url:data.cover_url||"",is_unreleased:!!data.is_unreleased,source:data.source||"goodreads",source_url:data.source_url||""});onAdded&&onAdded();onClose()}catch{setErr("Failed to add book")}setSaving(false)};
-return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeOverlay 0.2s ease-out"}} onClick={onClose}><div onClick={e=>e.stopPropagation()} className="modal-panel" style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:24,animation:"fadeIn 0.2s ease-out",width:500,maxWidth:"90vw",maxHeight:"85vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:16}}>
-<h2 style={{fontSize:18,fontWeight:700,color:t.text,margin:0}}>Add from URL</h2>
-<div style={{display:"flex",gap:8}}><input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://www.goodreads.com/book/show/... or https://hardcover.app/books/..." onKeyDown={e=>e.key==="Enter"&&search()} style={{flex:1,padding:"10px 12px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:8,color:t.text2,fontSize:13}}/><Btn variant="accent" onClick={search} disabled={ld}>{ld?<Spin/>:Ic.search} Fetch</Btn></div>
-{err?<div style={{color:t.redt,fontSize:12}}>{err}</div>:null}
-{data&&<div style={{background:t.bg3,border:`1px solid ${t.borderL}`,borderRadius:10,padding:16,display:"flex",gap:16}}>
-{data.cover_url?<img src={data.cover_url} alt="" style={{width:100,height:150,objectFit:"cover",borderRadius:6,flexShrink:0}}/>:null}
-<div style={{flex:1,display:"flex",flexDirection:"column",gap:6}}>
-<div style={{fontSize:16,fontWeight:700,color:t.text}}>{data.title}</div>
-<div style={{fontSize:13,color:t.td}}>by {data.author_name}</div>
-{data.series_options?<div style={{display:"flex",alignItems:"center",gap:6,marginTop:2}}><span style={{fontSize:11,color:t.tg}}>Series:</span><select value={data.series_name||""} onChange={e=>{const picked=data.series_options.find(o=>o.name===e.target.value);setData(d=>({...d,series_name:picked?.name||"",series_index:picked?.position||""}))}} style={{padding:"2px 6px",borderRadius:4,border:`1px solid ${t.border}`,background:t.inp,color:t.purt,fontSize:12}}>{data.series_options.map(o=><option key={o.name} value={o.name}>{o.name}{o.position?` #${o.position}`:""}</option>)}<option value="">None</option></select></div>:data.series_name?<div style={{fontSize:12,color:t.purt}}>{data.series_name}{data.series_index?` #${data.series_index}`:""}</div>:null}
-{data.pub_date?<div style={{fontSize:12,color:t.td}}>Published: {data.pub_date}</div>:null}
-{data.expected_date?<div style={{fontSize:12,color:t.cyant}}>Expected: {data.expected_date}</div>:null}
-{data.is_unreleased?<span style={{fontSize:10,fontWeight:700,background:t.cyan,color:"#fff",padding:"2px 6px",borderRadius:4,width:"fit-content"}}>UPCOMING</span>:null}
-{data.isbn?<div style={{fontSize:11,color:t.tg}}>ISBN: {data.isbn}</div>:null}
-{data.description?<p style={{fontSize:12,color:t.td,lineHeight:1.4,margin:0,maxHeight:100,overflow:"auto"}}>{data.description.substring(0,300)}...</p>:null}
-</div></div>}
-{data?<div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><Btn variant="ghost" onClick={()=>{setData(null);setUrl("")}}>Clear</Btn><Btn variant="accent" onClick={add} disabled={saving}>{saving?<Spin/>:Ic.plus} Add This Book</Btn></div>:null}
-{!data&&!ld?<p style={{fontSize:12,color:t.tg,textAlign:"center"}}>Paste a Goodreads book URL above and click Fetch to preview</p>:null}
-</div></div>}
-
 // ─── Export Modal ────────────────────────────────────────────
 function ExportModal({onClose,defaultFilter="missing"}){const t=useTheme();const[filter,setFilter]=useState(defaultFilter);const[fmt,setFmt]=useState("csv");const[content,setContent]=useState(null);const[ld,setLd]=useState(false);const[copied,setCopied]=useState(false);const[downloaded,setDownloaded]=useState(false);const taRef=useRef(null);
 const generate=async()=>{setLd(true);setCopied(false);setDownloaded(false);try{const r=await fetch(`/api/export?filter=${filter}&format=${fmt}`);const text=await r.text();setContent(text)}catch{setContent("Error generating export")}setLd(false)};
@@ -921,196 +882,6 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 {sb?<BookSidebar book={sb} closing={sbClosing} onClose={closeSb} onAction={onAction} onEdit={()=>load(pg)}/>:null}
 
 </div>}
-
-// ─── Setup Wizard ─────────────────────────────────────────
-// Shown on first run (no libraries configured). Guides user through
-// library path setup, source configuration, and initial sync.
-// Defined outside App() to prevent re-mount on parent state changes.
-function SetupWizard({onComplete}){
-const t=useTheme();
-const[step,setStep]=useState(0);
-const[platform,setPlatform]=useState(null);
-// Step 2: Library paths
-const[sources,setSources]=useState([]);
-const[srcPath,setSrcPath]=useState("");
-const[srcType,setSrcType]=useState("root");
-const[srcApp,setSrcApp]=useState("calibre");
-const[validating,setValidating]=useState(false);
-const[valResult,setValResult]=useState(null);
-// Step 3: Sources
-const[hcKey,setHcKey]=useState("");
-const[mamToken,setMamToken]=useState("");
-// Step 4: Finish
-const[saving,setSaving]=useState(false);
-const[saveStep,setSaveStep]=useState("");
-const[done,setDone]=useState(false);
-const[result,setResult]=useState(null);
-const[error,setError]=useState(null);
-
-useEffect(()=>{api.get("/platform").then(setPlatform).catch(console.error)},[]);
-
-// Handle skip — mark setup complete without configuring anything
-const skip=async()=>{try{await api.post("/settings",{setup_complete:true});onComplete()}catch(e){console.error("Skip failed:",e)}};
-
-// Validate a path
-const validate=async()=>{if(!srcPath.trim())return;setValidating(true);setValResult(null);try{const r=await api.post("/libraries/validate-path",{path:srcPath.trim(),type:srcType,app_type:srcApp});setValResult(r)}catch{setValResult({valid:false,error:"Network error"})}setValidating(false)};
-
-// Add a source to the list
-const addSource=()=>{if(!srcPath.trim())return;setSources(s=>[...s,{path:srcPath.trim(),type:srcType,app_type:srcApp}]);setSrcPath("");setValResult(null)};
-
-// Remove a source from the list
-const removeSource=i=>setSources(s=>s.filter((_,idx)=>idx!==i));
-
-// Final save + sync
-const finish=async()=>{setSaving(true);setError(null);try{
-// Step 1: Save settings
-setSaveStep("Saving configuration...");
-const settings={setup_complete:true};
-if(sources.length>0)settings.library_sources=sources;
-if(hcKey.trim())settings.hardcover_api_key=hcKey.trim();
-if(mamToken.trim()){settings.mam_session_id=mamToken.trim();settings.mam_enabled=true}
-await api.post("/settings",settings);
-// Step 2: Rescan libraries
-setSaveStep("Discovering libraries...");
-const rescan=await api.post("/libraries/rescan");
-const libCount=rescan.libraries?.length||0;
-// Step 3: Sync if libraries found
-if(libCount>0){setSaveStep("Syncing library data...");try{await api.post("/sync/calibre")}catch(e){console.warn("Initial sync warning:",e)}}
-setResult({libraries:libCount,synced:libCount>0});setDone(true)
-}catch(e){setError(String(e));setDone(true)}setSaving(false)};
-
-// Input style helper
-const ist={padding:"10px 14px",borderRadius:8,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:14,outline:"none",width:"100%"};
-
-// Step indicator
-const steps=["Welcome","Library","Sources","Finish"];
-const StepDots=()=><div style={{display:"flex",justifyContent:"center",gap:8,marginBottom:32}}>{steps.map((s,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:28,height:28,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:600,background:i===step?t.accent:i<step?t.grn:t.bg4,color:i<=step?"#000":t.tg,transition:"all 0.2s"}}>{i<step?"✓":i+1}</div>{i<steps.length-1?<div style={{width:32,height:2,background:i<step?t.grn:t.bg4,borderRadius:1}}/>:null}</div>)}</div>;
-
-if(!platform)return<div style={{display:"flex",justifyContent:"center",alignItems:"center",minHeight:"100vh"}}><Spin/></div>;
-
-return<div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-<div style={{width:"100%",maxWidth:600,background:t.bg2,border:`1px solid ${t.border}`,borderRadius:16,padding:"40px 36px",boxShadow:"0 8px 32px rgba(0,0,0,0.3)"}}>
-
-{/* ── Step 0: Welcome ── */}
-{step===0?<div style={{textAlign:"center"}}>
-<div style={{fontSize:48,marginBottom:8}}>📚</div>
-<h1 style={{fontSize:28,fontWeight:700,color:t.text,marginBottom:8}}>Welcome to AthenaScout</h1>
-<p style={{fontSize:15,color:t.td,marginBottom:24,lineHeight:1.6}}>Your library completionist tracker. Let's get you set up in a few quick steps.</p>
-<div style={{background:t.bg4,borderRadius:10,padding:"12px 16px",marginBottom:32,display:"inline-flex",gap:16,fontSize:13,color:t.tg}}>
-<span>Mode: <strong style={{color:t.text2}}>{platform.is_docker?"Docker":"Standalone"}</strong></span>
-<span>OS: <strong style={{color:t.text2}}>{platform.os_type}</strong></span>
-</div>
-{platform.is_docker?<p style={{fontSize:13,color:t.tf,marginBottom:24,lineHeight:1.5}}>Running in Docker — make sure your Calibre library volume is mounted, then add the container-side path below.</p>:<p style={{fontSize:13,color:t.tf,marginBottom:24,lineHeight:1.5}}>Running standalone — you can point directly to any Calibre library on your filesystem.</p>}
-<div style={{display:"flex",gap:12,justifyContent:"center"}}>
-<Btn variant="accent" onClick={()=>setStep(1)} style={{padding:"12px 32px",fontSize:16}}>Get Started</Btn>
-<Btn variant="ghost" onClick={skip}>Skip Setup</Btn>
-</div>
-</div>:null}
-
-{/* ── Step 1: Library Paths ── */}
-{step===1?<div>
-<StepDots/>
-<h2 style={{fontSize:22,fontWeight:700,color:t.text,marginBottom:6}}>Add Your Library</h2>
-<p style={{fontSize:13,color:t.td,marginBottom:20}}>Point AthenaScout to your Calibre library folder. You can add more libraries later from Settings.</p>
-
-{/* Auto-detected paths */}
-{platform.existing_default_paths?.length>0?<div style={{marginBottom:16}}>
-<div style={{fontSize:12,fontWeight:600,color:t.grnt,marginBottom:6}}>✓ Found Calibre library on your system:</div>
-{platform.existing_default_paths.map((p,i)=><div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 12px",background:t.grn+"12",border:`1px solid ${t.grn}33`,borderRadius:8,marginBottom:4}}>
-<span style={{fontSize:13,color:t.text2}}>{p.path}</span>
-<Btn size="sm" variant="accent" onClick={()=>{setSources(s=>[...s,{path:p.path,type:"root",app_type:p.app_type}])}}>Add</Btn>
-</div>)}
-</div>:null}
-
-{/* Manual path input */}
-<div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
-<div style={{display:"flex",gap:8}}>
-<input value={srcPath} onChange={e=>{setSrcPath(e.target.value);setValResult(null)}} placeholder={platform.os_type==="windows"?"C:\\Users\\You\\Calibre Library":platform.is_docker?"/calibre":"~/Calibre Library"} style={{...ist,flex:1}}/>
-<select value={srcType} onChange={e=>setSrcType(e.target.value)} style={{...ist,width:"auto",minWidth:130}}>
-<option value="root">Root directory</option>
-<option value="direct">Direct path</option>
-</select>
-</div>
-<div style={{display:"flex",gap:8}}>
-<select value={srcApp} onChange={e=>setSrcApp(e.target.value)} style={{...ist,width:"auto"}}>
-<option value="calibre">📖 Calibre (ebook)</option>
-<option value="audiobookshelf" disabled>🎧 Audiobookshelf (coming soon)</option>
-</select>
-<Btn onClick={validate} disabled={validating||!srcPath.trim()}>{validating?"Validating...":"Validate"}</Btn>
-<Btn variant="accent" onClick={addSource} disabled={!srcPath.trim()}>Add</Btn>
-</div>
-</div>
-{valResult?<div style={{fontSize:13,padding:"6px 0",color:valResult.valid?t.grnt:t.redt}}>{valResult.valid?`✓ Found ${valResult.libraries_found} library(s): ${valResult.details.map(d=>d.name).join(", ")}`:`✗ ${valResult.error}`}</div>:null}
-
-{/* Added sources list */}
-{sources.length>0?<div style={{marginTop:12,marginBottom:16}}>
-<div style={{fontSize:12,fontWeight:600,color:t.tm,marginBottom:6}}>Added Sources ({sources.length})</div>
-{sources.map((s,i)=><div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 12px",background:t.bg4,borderRadius:8,marginBottom:4,border:`1px solid ${t.borderL}`}}>
-<div><span style={{fontSize:13,color:t.text2}}>{s.path}</span><span style={{fontSize:11,color:t.tg,marginLeft:8}}>({s.type})</span></div>
-<button onClick={()=>removeSource(i)} style={{background:"none",border:"none",cursor:"pointer",color:t.redt,fontSize:14,padding:"0 4px"}}>✕</button>
-</div>)}
-</div>:null}
-
-{sources.length===0?<p style={{fontSize:12,color:t.tg,fontStyle:"italic",marginBottom:16}}>No sources added yet. Add at least one library path to continue, or skip to configure later.</p>:null}
-
-<div style={{display:"flex",justifyContent:"space-between",marginTop:24}}>
-<Btn variant="ghost" onClick={()=>setStep(0)}>← Back</Btn>
-<div style={{display:"flex",gap:8}}>
-<Btn variant="ghost" onClick={skip}>Skip</Btn>
-<Btn variant="accent" onClick={()=>setStep(2)}>Next →</Btn>
-</div>
-</div>
-</div>:null}
-
-{/* ── Step 2: Sources ── */}
-{step===2?<div>
-<StepDots/>
-<h2 style={{fontSize:22,fontWeight:700,color:t.text,marginBottom:6}}>Metadata Sources</h2>
-<p style={{fontSize:13,color:t.td,marginBottom:24}}>These are optional. AthenaScout uses Goodreads and Kobo by default (no setup needed). Add these for more comprehensive results.</p>
-
-<div style={{display:"flex",flexDirection:"column",gap:20}}>
-<div style={{background:t.bg4,borderRadius:10,padding:16}}>
-<div style={{fontSize:14,fontWeight:600,color:t.text2,marginBottom:4}}>Hardcover API Key</div>
-<p style={{fontSize:12,color:t.tf,marginBottom:10,lineHeight:1.5}}>Get from <span style={{color:t.accent}}>hardcover.app</span> → Account → API. Include the "Bearer " prefix. Adds book data from Hardcover's database.</p>
-<input value={hcKey} onChange={e=>setHcKey(e.target.value)} placeholder="Bearer eyJ..." style={ist}/>
-</div>
-
-<div style={{background:t.bg4,borderRadius:10,padding:16}}>
-<div style={{fontSize:14,fontWeight:600,color:t.text2,marginBottom:4}}>MyAnonamouse Session Token</div>
-<p style={{fontSize:12,color:t.tf,marginBottom:10,lineHeight:1.5}}>Get from MAM → Preferences → Security → Generate Session. Enables MAM availability scanning. Requires an active MAM account.</p>
-<input value={mamToken} onChange={e=>setMamToken(e.target.value)} placeholder="Paste session token..." style={ist}/>
-</div>
-</div>
-
-<div style={{display:"flex",justifyContent:"space-between",marginTop:24}}>
-<Btn variant="ghost" onClick={()=>setStep(1)}>← Back</Btn>
-<Btn variant="accent" onClick={()=>{setStep(3);finish()}}>Finish Setup →</Btn>
-</div>
-</div>:null}
-
-{/* ── Step 3: Finish ── */}
-{step===3?<div style={{textAlign:"center"}}>
-<StepDots/>
-{saving?<div>
-<div style={{marginBottom:16}}><Spin/></div>
-<h2 style={{fontSize:22,fontWeight:700,color:t.text,marginBottom:8}}>Setting Up...</h2>
-<p style={{fontSize:14,color:t.td}}>{saveStep}</p>
-</div>:done?<div>
-{error?<div>
-<div style={{fontSize:48,marginBottom:12}}>⚠️</div>
-<h2 style={{fontSize:22,fontWeight:700,color:t.text,marginBottom:8}}>Setup Hit a Snag</h2>
-<p style={{fontSize:13,color:t.redt,marginBottom:16}}>{error}</p>
-<p style={{fontSize:13,color:t.td,marginBottom:24}}>Don't worry — your settings were saved. You can troubleshoot from the Settings page.</p>
-</div>:<div>
-<div style={{fontSize:48,marginBottom:12}}>🎉</div>
-<h2 style={{fontSize:22,fontWeight:700,color:t.text,marginBottom:8}}>You're All Set!</h2>
-{result?.libraries>0?<p style={{fontSize:14,color:t.td,marginBottom:8}}>Found <strong style={{color:t.grnt}}>{result.libraries}</strong> library(s) and synced your collection.</p>:<p style={{fontSize:14,color:t.td,marginBottom:8}}>No libraries were discovered from the paths provided. You can update your library paths in Settings.</p>}
-</div>}
-<Btn variant="accent" onClick={onComplete} style={{padding:"12px 32px",fontSize:16,marginTop:16}}>Go to Dashboard →</Btn>
-</div>:null}
-</div>:null}
-
-</div></div>}
 
 // ─── App Shell ──────────────────────────────────────────────
 
