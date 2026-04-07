@@ -1,52 +1,23 @@
-import { useState, useEffect, useCallback, createContext, useContext, useRef } from "react";
-
-const THEMES = {
-  dark:{name:"Dark",bg:"#0a0a1a",bg2:"#12122a",bg3:"#0e0e22",bg4:"#1a1a2e",border:"#2a2a4a",borderH:"#4a4a7a",borderL:"#1a1a2e",text:"#e0e0f0",text2:"#c0c0e0",tm:"#a0a0c0",td:"#808098",tf:"#707090",tg:"#505070",ti:"#404060",accent:"#d4a357",abg:"rgba(212,163,87,0.15)",abr:"rgba(212,163,87,0.3)",grn:"#3d9970",grnt:"#5bc49a",grnb:"rgba(61,153,112,0.15)",red:"#c75c5c",redt:"#e87070",redb:"rgba(199,92,92,0.15)",ylw:"#d4a357",ylwt:"#e8c080",ylwb:"rgba(212,163,87,0.15)",pur:"#6a5acd",purt:"#8888cc",purb:"rgba(74,74,138,0.15)",cyan:"#2d8a8a",cyant:"#5ecece",cyanb:"rgba(45,138,138,0.15)",inp:"#12122a"},
-  dim:{name:"Dim",bg:"#2a2a30",bg2:"#333338",bg3:"#2e2e34",bg4:"#3a3a40",border:"#4a4a52",borderH:"#66666e",borderL:"#404048",text:"#eaeaea",text2:"#d8d8d8",tm:"#b8b8c0",td:"#989898",tf:"#808088",tg:"#686870",ti:"#585860",accent:"#e0a850",abg:"rgba(224,168,80,0.18)",abr:"rgba(224,168,80,0.35)",grn:"#4aaa80",grnt:"#66c8a0",grnb:"rgba(74,170,128,0.18)",red:"#d06868",redt:"#f08080",redb:"rgba(208,104,104,0.18)",ylw:"#d4a357",ylwt:"#e8c080",ylwb:"rgba(212,163,87,0.18)",pur:"#7a6ad8",purt:"#a0a0d8",purb:"rgba(122,106,216,0.18)",cyan:"#3a9a9a",cyant:"#6ed8d8",cyanb:"rgba(58,154,154,0.18)",inp:"#333338"},
-  light:{name:"Light",bg:"#f5f5f0",bg2:"#ffffff",bg3:"#fafaf8",bg4:"#eeeee8",border:"#d8d8d0",borderH:"#b0b0a8",borderL:"#e8e8e0",text:"#1a1a2a",text2:"#2a2a3a",tm:"#505068",td:"#686880",tf:"#888898",tg:"#a0a0b0",ti:"#c0c0c8",accent:"#b8862d",abg:"rgba(184,134,45,0.12)",abr:"rgba(184,134,45,0.3)",grn:"#2d8060",grnt:"#1a6848",grnb:"rgba(45,128,96,0.1)",red:"#b84444",redt:"#a03030",redb:"rgba(184,68,68,0.1)",ylw:"#a07828",ylwt:"#886020",ylwb:"rgba(160,120,40,0.1)",pur:"#5848b0",purt:"#4838a0",purb:"rgba(88,72,176,0.1)",cyan:"#1a7070",cyant:"#0a5858",cyanb:"rgba(26,112,112,0.1)",inp:"#ffffff"},
-};
-const TC=createContext(THEMES.dark);const T=()=>useContext(TC);
-const api={get:async u=>{const r=await fetch(`/api${u}`);if(!r.ok)throw new Error(r.status);return r.json()},post:async(u,b)=>{const o={method:"POST"};if(b){o.headers={"Content-Type":"application/json"};o.body=JSON.stringify(b)}const r=await fetch(`/api${u}`,o);if(!r.ok)throw new Error(r.status);return r.json()},put:async(u,b)=>{const r=await fetch(`/api${u}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});if(!r.ok)throw new Error(r.status);return r.json()},del:async u=>{const r=await fetch(`/api${u}`,{method:"DELETE"});if(!r.ok)throw new Error(r.status);return r.json()}};
-const pct=(o,t)=>t===0?100:Math.floor(o/t*1000)/10;
-const timeAgo=ts=>{if(!ts)return"Never";const d=Math.floor((Date.now()/1000-ts)/60);if(d<1)return"Just now";if(d<60)return`${d}m ago`;if(d<1440)return`${Math.floor(d/60)}h ago`;return`${Math.floor(d/1440)}d ago`};
-const fmtDate=d=>d&&d.length>=10?d.substring(0,10):d||"";
-
-// ─── Icons (SVG) ────────────────────────────────────────────
-const _i=(d,s=16)=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">{d}</svg>;
-const Ic={
-  refresh:_i(<><path d="M3 12a9 9 0 019-9 9.75 9.75 0 016.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 01-9 9 9.75 9.75 0 01-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></>),
-  sync:_i(<><path d="M21 12a9 9 0 11-6.22-8.56"/><path d="M21 3v5h-5"/></>),
-  x:_i(<><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>),
-  hide:_i(<><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></>),
-  search:_i(<><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></>),
-  book:_i(<><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M4 4.5A2.5 2.5 0 016.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15z"/></>),
-  expand:_i(<><polyline points="6 9 12 15 18 9"/></>),
-  plus:_i(<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>),
-  edit:_i(<><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></>),
-  collapse:_i(<><polyline points="18 15 12 9 6 15"/></>),
-  calendar:_i(<><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></>),
-  moon:_i(<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>),
-  sun:_i(<><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></>),
-  cloudsun:_i(<><path d="M12 2v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="M20 12h2"/><path d="m19.07 4.93-1.41 1.41"/><path d="M15.95 13.14A4 4 0 109.5 9.5"/><path d="M13 16.5a5.5 5.5 0 10-11 0 3.5 3.5 0 007 0h4z"/></>),
-  gear:_i(<><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></>),
-  database:_i(<><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></>),
-};
-
-// ─── Hooks ──────────────────────────────────────────────────
-function usePersist(key,def){const k=`cl_${key}`;const[v,setV]=useState(()=>{try{const s=sessionStorage.getItem(k);return s?JSON.parse(s):def}catch{return def}});useEffect(()=>{try{sessionStorage.setItem(k,JSON.stringify(v))}catch{}},[k,v]);return[v,setV]}
+import { useState, useEffect, useCallback, useRef } from "react";
+import { THEMES, TC, useTheme } from "./theme";
+import { api } from "./api";
+import { pct, timeAgo, fmtDate } from "./lib/format";
+import { Ic } from "./icons";
+import { usePersist } from "./hooks/usePersist";
+import { NAV } from "./lib/constants";
 
 // ─── Shared Components ──────────────────────────────────────
 function Spin(){return<div style={{width:16,height:16,border:"2px solid transparent",borderTopColor:"currentColor",borderRadius:"50%",animation:"spin 0.6s linear infinite"}}/>}
-function Load(){const t=T();return<div style={{display:"flex",justifyContent:"center",padding:60}}><Spin/><span style={{marginLeft:10,color:t.td}}>Loading...</span></div>}
-function Btn({children,onClick,disabled,variant="default",size="md",style:sx,...rest}){const t=T();const s={display:"inline-flex",alignItems:"center",gap:6,border:"none",borderRadius:8,cursor:disabled?"not-allowed":"pointer",fontWeight:500,fontSize:size==="sm"?12:14,padding:size==="sm"?"5px 10px":"8px 16px",opacity:disabled?0.5:1,...(variant==="accent"?{background:t.accent,color:"#000"}:variant==="ghost"?{background:"transparent",color:t.td}:{background:t.bg4,border:`1px solid ${t.border}`,color:t.text2}),...sx};return<button onClick={disabled?undefined:onClick} style={s} {...rest}>{children}</button>}
-function PB({owned,total}){const t=T();const p=pct(owned,total);return<div style={{height:5,borderRadius:3,background:t.bg4,overflow:"hidden"}}><div style={{width:`${p}%`,height:"100%",borderRadius:3,background:p===100?t.grn:p>50?t.ylw:t.red,transition:"width 0.3s"}}/></div>}
-function VT({mode,setMode}){const t=T();return<div style={{display:"flex",borderRadius:6,border:`1px solid ${t.border}`,overflow:"hidden",height:34}}>{["grid","list"].map(m=><button key={m} onClick={()=>setMode(m)} style={{padding:"0 12px",fontSize:12,fontWeight:500,border:"none",cursor:"pointer",background:mode===m?t.bg4:"transparent",color:mode===m?t.accent:t.tg,textTransform:"capitalize",height:"100%"}}>{m==="grid"?"Grid":"List"}</button>)}</div>}
+function Load(){const t=useTheme();return<div style={{display:"flex",justifyContent:"center",padding:60}}><Spin/><span style={{marginLeft:10,color:t.td}}>Loading...</span></div>}
+function Btn({children,onClick,disabled,variant="default",size="md",style:sx,...rest}){const t=useTheme();const s={display:"inline-flex",alignItems:"center",gap:6,border:"none",borderRadius:8,cursor:disabled?"not-allowed":"pointer",fontWeight:500,fontSize:size==="sm"?12:14,padding:size==="sm"?"5px 10px":"8px 16px",opacity:disabled?0.5:1,...(variant==="accent"?{background:t.accent,color:"#000"}:variant==="ghost"?{background:"transparent",color:t.td}:{background:t.bg4,border:`1px solid ${t.border}`,color:t.text2}),...sx};return<button onClick={disabled?undefined:onClick} style={s} {...rest}>{children}</button>}
+function PB({owned,total}){const t=useTheme();const p=pct(owned,total);return<div style={{height:5,borderRadius:3,background:t.bg4,overflow:"hidden"}}><div style={{width:`${p}%`,height:"100%",borderRadius:3,background:p===100?t.grn:p>50?t.ylw:t.red,transition:"width 0.3s"}}/></div>}
+function VT({mode,setMode}){const t=useTheme();return<div style={{display:"flex",borderRadius:6,border:`1px solid ${t.border}`,overflow:"hidden",height:34}}>{["grid","list"].map(m=><button key={m} onClick={()=>setMode(m)} style={{padding:"0 12px",fontSize:12,fontWeight:500,border:"none",cursor:"pointer",background:mode===m?t.bg4:"transparent",color:mode===m?t.accent:t.tg,textTransform:"capitalize",height:"100%"}}>{m==="grid"?"Grid":"List"}</button>)}</div>}
 
 // ─── Search Bar with Clear Button ───────────────────────────
-function SearchBar({value,onChange,placeholder="Search..."}){const t=T();return<div style={{position:"relative",flex:1,maxWidth:340}}><input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={{width:"100%",padding:"8px 32px 8px 34px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:8,color:t.text2,fontSize:13}}/><span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:t.tg,pointerEvents:"none"}}>{Ic.search}</span>{value&&<button onClick={()=>onChange("")} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:t.tg,padding:2,display:"flex"}}>{Ic.x}</button>}</div>}
+function SearchBar({value,onChange,placeholder="Search..."}){const t=useTheme();return<div style={{position:"relative",flex:1,maxWidth:340}}><input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={{width:"100%",padding:"8px 32px 8px 34px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:8,color:t.text2,fontSize:13}}/><span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:t.tg,pointerEvents:"none"}}>{Ic.search}</span>{value&&<button onClick={()=>onChange("")} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:t.tg,padding:2,display:"flex"}}>{Ic.x}</button>}</div>}
 
 // ─── Book Detail Sidebar ────────────────────────────────────
-function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}){const t=T();const[editing,setEditing]=useState(false);const[ef,setEf]=useState({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");
+function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}){const t=useTheme();const[editing,setEditing]=useState(false);const[ef,setEf]=useState({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");
 useEffect(()=>{api.get("/settings").then(s=>setCwUrl(s.calibre_web_url||"")).catch(()=>{})},[]);
 if(!book)return null;
 const startEdit=()=>{setEf({title:book.title||"",description:book.description||"",pub_date:book.pub_date||"",expected_date:book.expected_date||"",isbn:book.isbn||"",series_index:book.series_index||"",is_unreleased:!!book.is_unreleased,source_url:book.source_url||"",mam_url:book.mam_url||""});setEditing(true)};
@@ -111,30 +82,30 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
 <Btn size="sm" onClick={()=>{if(confirm(`Delete "${book.title}" permanently? This cannot be undone.`)){onAction("delete",book.id);onClose()}}} style={{background:"#6b2020",borderColor:"#8b3030",color:"#ff9090"}}>Delete</Btn>
 </div>:null}
 </div>}
-function SBRow({label,value,color}){const t=T();return<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>{label}</span><span style={{fontSize:13,color:color||t.text2,textAlign:"right"}}>{value}</span></div>}
+function SBRow({label,value,color}){const t=useTheme();return<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>{label}</span><span style={{fontSize:13,color:color||t.text2,textAlign:"right"}}>{value}</span></div>}
 
 // ─── Book Card ──────────────────────────────────────────────
-function BCard({book,onAction,onClick,showAuthor,highlightAuthorId,showMamLink}){const t=T();const isUp=!!book.is_unreleased;const hasCover=book.cover_url||book.cover_path;const isOtherAuthor=highlightAuthorId&&book.author_id&&book.author_id!==highlightAuthorId;
+function BCard({book,onAction,onClick,showAuthor,highlightAuthorId,showMamLink}){const t=useTheme();const isUp=!!book.is_unreleased;const hasCover=book.cover_url||book.cover_path;const isOtherAuthor=highlightAuthorId&&book.author_id&&book.author_id!==highlightAuthorId;
 return<div onClick={()=>onClick&&onClick(book)} style={{minWidth:160,maxWidth:200,flex:"1 1 160px",background:t.bg2,border:`1px solid ${isUp?t.cyan+"66":t.border}`,borderRadius:10,overflow:"hidden",cursor:"pointer",transition:"border-color 0.2s",position:"relative",opacity:isOtherAuthor?0.55:1}}>{isUp?<span style={{position:"absolute",top:6,left:6,fontSize:9,fontWeight:700,background:t.cyan,color:"#fff",padding:"2px 6px",borderRadius:4,zIndex:2}}>UPCOMING</span>:null}{book.is_new?<span style={{position:"absolute",top:6,right:6,fontSize:9,fontWeight:700,background:t.red,color:"#fff",padding:"2px 6px",borderRadius:4,zIndex:2}}>NEW</span>:null}{book.owned===1&&!book.is_new?<span style={{position:"absolute",top:6,right:6,fontSize:9,fontWeight:600,background:t.grn,color:"#fff",padding:"2px 6px",borderRadius:4,zIndex:2}}>OWNED</span>:null}
 <div style={{height:200,background:t.bg3,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",opacity:isUp?0.7:1}}>{hasCover?<img src={book.cover_url||`/api/covers/${book.id}`} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="flex"}}/>:null}<div style={{display:hasCover?"none":"flex",flexDirection:"column",alignItems:"center",gap:4,color:t.tg,fontSize:12,textAlign:"center",padding:12}}><span style={{fontSize:28}}>?</span><span>{book.title}</span></div></div>
 <div style={{padding:"8px 10px"}}><div style={{fontSize:13,fontWeight:600,color:t.text2,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{book.title}</div>{book.series_name&&book.series_index?<div style={{fontSize:10,color:t.purt,marginTop:1}}>#{book.series_index}{book.series_total?` of ${book.series_total}`:""}</div>:null}{showAuthor&&book.author_name?<div style={{fontSize:11,color:isOtherAuthor?t.ylwt:t.td,marginTop:2}}>{book.author_name}</div>:null}{isUp&&book.expected_date?<div style={{fontSize:11,color:t.cyant,marginTop:2}}>Expected: {fmtDate(book.expected_date)}</div>:null}{showMamLink&&book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{display:"inline-flex",alignItems:"center",gap:3,marginTop:3,fontSize:10,fontWeight:600,color:book.mam_status==="found"?t.grnt:t.ylwt,textDecoration:"none",padding:"2px 6px",borderRadius:4,background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",border:`1px solid ${book.mam_status==="found"?"#2a882a33":"#88882a33"}`}}>MAM ↗</a>:null}</div></div>}
 
 // ─── Book List Row ──────────────────────────────────────────
-function BListRow({book,onAction,onClick,showAuthor,highlightAuthorId,showMamLink}){const t=T();const isOtherAuthor=highlightAuthorId&&book.author_id&&book.author_id!==highlightAuthorId;return<tr onClick={()=>onClick&&onClick(book)} style={{cursor:"pointer",borderBottom:`1px solid ${t.borderL}`,opacity:isOtherAuthor?0.55:1}}><td style={{padding:"8px 12px",fontSize:13,color:t.text2}}>{book.title}{book.is_new?<span style={{marginLeft:8,fontSize:9,fontWeight:700,background:t.red,color:"#fff",padding:"1px 5px",borderRadius:3}}>NEW</span>:null}{book.is_unreleased?<span style={{marginLeft:8,fontSize:9,fontWeight:700,background:t.cyan,color:"#fff",padding:"1px 5px",borderRadius:3}}>UPCOMING</span>:null}</td>{showAuthor?<td style={{padding:"8px 12px",fontSize:13,color:isOtherAuthor?t.ylwt:t.td}}>{book.author_name}</td>:null}<td style={{padding:"8px 12px",fontSize:13,color:t.td}}>{book.series_name?`${book.series_name}${book.series_index?` #${book.series_index}`:""}${book.series_total?` (${book.series_total})`:""}`:"—"}</td><td style={{padding:"8px 12px",fontSize:13,color:book.pub_date?t.td:book.expected_date?t.cyant:t.tg}}>{book.pub_date?fmtDate(book.pub_date):book.expected_date?fmtDate(book.expected_date):"Unknown"}</td><td style={{padding:"8px 12px",fontSize:11,color:t.tg}}>{book.source||"—"}</td>{showMamLink?<td style={{padding:"8px 12px"}}>{book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:11,fontWeight:600,color:book.mam_status==="found"?t.grnt:t.ylwt,textDecoration:"none",padding:"2px 8px",borderRadius:4,background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",border:`1px solid ${book.mam_status==="found"?"#2a882a33":"#88882a33"}`}}>MAM ↗</a>:<span style={{fontSize:11,color:t.tg}}>—</span>}</td>:null}</tr>}
+function BListRow({book,onAction,onClick,showAuthor,highlightAuthorId,showMamLink}){const t=useTheme();const isOtherAuthor=highlightAuthorId&&book.author_id&&book.author_id!==highlightAuthorId;return<tr onClick={()=>onClick&&onClick(book)} style={{cursor:"pointer",borderBottom:`1px solid ${t.borderL}`,opacity:isOtherAuthor?0.55:1}}><td style={{padding:"8px 12px",fontSize:13,color:t.text2}}>{book.title}{book.is_new?<span style={{marginLeft:8,fontSize:9,fontWeight:700,background:t.red,color:"#fff",padding:"1px 5px",borderRadius:3}}>NEW</span>:null}{book.is_unreleased?<span style={{marginLeft:8,fontSize:9,fontWeight:700,background:t.cyan,color:"#fff",padding:"1px 5px",borderRadius:3}}>UPCOMING</span>:null}</td>{showAuthor?<td style={{padding:"8px 12px",fontSize:13,color:isOtherAuthor?t.ylwt:t.td}}>{book.author_name}</td>:null}<td style={{padding:"8px 12px",fontSize:13,color:t.td}}>{book.series_name?`${book.series_name}${book.series_index?` #${book.series_index}`:""}${book.series_total?` (${book.series_total})`:""}`:"—"}</td><td style={{padding:"8px 12px",fontSize:13,color:book.pub_date?t.td:book.expected_date?t.cyant:t.tg}}>{book.pub_date?fmtDate(book.pub_date):book.expected_date?fmtDate(book.expected_date):"Unknown"}</td><td style={{padding:"8px 12px",fontSize:11,color:t.tg}}>{book.source||"—"}</td>{showMamLink?<td style={{padding:"8px 12px"}}>{book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:11,fontWeight:600,color:book.mam_status==="found"?t.grnt:t.ylwt,textDecoration:"none",padding:"2px 8px",borderRadius:4,background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",border:`1px solid ${book.mam_status==="found"?"#2a882a33":"#88882a33"}`}}>MAM ↗</a>:<span style={{fontSize:11,color:t.tg}}>—</span>}</td>:null}</tr>}
 
 // ─── Book Grid + List Wrappers ──────────────────────────────
 function BGrid({books,onAction,onBookClick,showAuthor,highlightAuthorId,showMamLink}){return<div className="book-grid" style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"start"}}>{books.map(b=><BCard key={b.id} book={b} onAction={onAction} onClick={onBookClick} showAuthor={showAuthor} highlightAuthorId={highlightAuthorId} showMamLink={showMamLink}/>)}</div>}
-function BList({books,onAction,onBookClick,showAuthor=false,highlightAuthorId,showMamLink}){const t=T();return<table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr style={{borderBottom:`2px solid ${t.border}`}}><th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Title</th>{showAuthor?<th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Author</th>:null}<th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Series</th><th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Date</th><th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Source</th>{showMamLink?<th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM</th>:null}</tr></thead><tbody>{books.map(b=><BListRow key={b.id} book={b} onAction={onAction} onClick={onBookClick} showAuthor={showAuthor} highlightAuthorId={highlightAuthorId} showMamLink={showMamLink}/>)}</tbody></table>}
+function BList({books,onAction,onBookClick,showAuthor=false,highlightAuthorId,showMamLink}){const t=useTheme();return<table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr style={{borderBottom:`2px solid ${t.border}`}}><th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Title</th>{showAuthor?<th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Author</th>:null}<th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Series</th><th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Date</th><th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Source</th>{showMamLink?<th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM</th>:null}</tr></thead><tbody>{books.map(b=><BListRow key={b.id} book={b} onAction={onAction} onClick={onBookClick} showAuthor={showAuthor} highlightAuthorId={highlightAuthorId} showMamLink={showMamLink}/>)}</tbody></table>}
 
 // ─── Collapsible Section ────────────────────────────────────
-function Section({title,count,children,defaultOpen=true,ownedCount,totalCount}){const t=T();const[open,setOpen]=useState(defaultOpen);
+function Section({title,count,children,defaultOpen=true,ownedCount,totalCount}){const t=useTheme();const[open,setOpen]=useState(defaultOpen);
 useEffect(()=>{setOpen(defaultOpen)},[defaultOpen]);
 return<div style={{marginBottom:12}}><div onClick={()=>setOpen(!open)} style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",padding:"8px 0"}}><span style={{color:t.tg,transform:open?"rotate(0)":"rotate(-90deg)",transition:"transform 0.2s",fontSize:12}}>▼</span><span style={{fontSize:14,fontWeight:600,color:t.tm,textTransform:"uppercase"}}>{title}</span><span style={{fontSize:11,color:t.tg}}>{count}</span>{totalCount!=null?<><span style={{fontSize:11,color:t.grnt}}>{ownedCount||0}/{totalCount}</span><div style={{width:60}}><PB owned={ownedCount||0} total={totalCount}/></div></>:null}</div>{open?children:null}</div>}
 
 // ─── Inline Series (for Author Detail) ─────────────────────
-function IS({series,vm,onAction,onBookClick,collapsed,authorId}){const t=T();const[ld,setLd]=useState(false);const[bks,setBks]=useState(null);const load=()=>{if(bks)return;setLd(true);api.get(`/series/${series.id}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
+function IS({series,vm,onAction,onBookClick,collapsed,authorId}){const t=useTheme();const[ld,setLd]=useState(false);const[bks,setBks]=useState(null);const load=()=>{if(bks)return;setLd(true);api.get(`/series/${series.id}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
 const isMulti=!!series.multi_author;
-const header=isMulti?<span>{series.name} <span style={{fontSize:11,color:T().cyant,fontWeight:600,textTransform:"none",background:T().cyan+"22",padding:"2px 8px",borderRadius:4,marginLeft:4}}>shared series</span></span>:series.name;
+const header=isMulti?<span>{series.name} <span style={{fontSize:11,color:useTheme().cyant,fontWeight:600,textTransform:"none",background:useTheme().cyan+"22",padding:"2px 8px",borderRadius:4,marginLeft:4}}>shared series</span></span>:series.name;
 const countStr=isMulti?`${series.owned_count||0}/${series.author_book_count||0} · ${series.book_count||0} total`:`${series.owned_count||0}/${series.book_count||0}`;
 return<Section title={header} count={countStr} ownedCount={series.owned_count} totalCount={isMulti?series.author_book_count:series.book_count} defaultOpen={!collapsed}>{ld?<Load/>:bks?(vm==="list"?<BList books={bks} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>:<BGrid books={bks} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>):null}</Section>}
 
@@ -142,7 +113,7 @@ return<Section title={header} count={countStr} ownedCount={series.owned_count} t
 function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
 
 // ─── Dashboard ──────────────────────────────────────────────
-function Dash({onNav,libs=[],activeLib="",switchLib}){const t=T();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
+function Dash({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
 useEffect(()=>{api.get("/lookup/status").then(r=>{if(r.running)setLookupScan(r)}).catch(()=>{});api.get("/mam/scan/status").then(r=>{if(r.running||r.status==="complete")setMamScan(r)}).catch(()=>{})},[]);
 useEffect(()=>{if(!lookupScan?.running)return;const iv=setInterval(()=>{api.get("/lookup/status").then(r=>{setLookupScan(r);if(!r.running){clearInterval(iv);api.get("/stats").then(setD)}}).catch(()=>{})},3000);return()=>clearInterval(iv)},[lookupScan?.running]);
 useEffect(()=>{if(!mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running)clearInterval(iv)}).catch(()=>{})},5000);return()=>clearInterval(iv)},[mamScan?.running]);
@@ -230,7 +201,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 </div>}
 
 // ─── Books Page (Library/Missing/Upcoming) ──────────────────
-function BP({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}){const t=T();const[bks,setBks]=useState([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist(`bp_${title}_q`,"");const[vm,setVm]=usePersist(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist(`bp_${title}_sort`,"title");const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
+function BP({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}){const t=useTheme();const[bks,setBks]=useState([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist(`bp_${title}_q`,"");const[vm,setVm]=usePersist(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist(`bp_${title}_sort`,"title");const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
 const[mamFilter,setMamFilter]=usePersist(`bp_${title}_mam`,"");const[mamOn,setMamOn]=useState(false);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
@@ -271,7 +242,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 </div>}
 
 // ─── Authors Page ───────────────────────────────────────────
-function AP({onNav}){const t=T();const[aus,setAus]=useState([]);const[ld,setLd]=useState(true);const[q,setQ]=usePersist("ap_q","");const[sort,setSort]=usePersist("ap_sort","name");const[vm,setVm]=usePersist("ap_vm","list");
+function AP({onNav}){const t=useTheme();const[aus,setAus]=useState([]);const[ld,setLd]=useState(true);const[q,setQ]=usePersist("ap_q","");const[sort,setSort]=usePersist("ap_sort","name");const[vm,setVm]=usePersist("ap_vm","list");
 const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState(new Set());const[clearing,setClearing]=useState(false);
 const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
 const clearData=async(type)=>{const labels={source:"source scan",mam:"MAM scan",both:"all scan"};if(!confirm(`Clear ${labels[type]} data for ${sel.size} author(s)? ${type==="source"||type==="both"?"This will DELETE all discovered (non-Calibre) books for these authors.":"MAM status will be reset and books will need re-scanning."}`))return;setClearing(true);try{await api.post("/authors/clear-scan-data",{author_ids:[...sel],clear_source:type==="source"||type==="both",clear_mam:type==="mam"||type==="both"});setSel(new Set());setSelMode(false);setLd(true);api.get(`/authors?search=${q}&sort=${sort}`).then(d=>{setAus(d.authors||[]);setLd(false)})}catch{alert("Error clearing data")}setClearing(false)};
@@ -294,7 +265,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 </div>}
 
 // ─── Author Detail ──────────────────────────────────────────
-function ADP({authorId,onNav}){const t=T();const[a,setA]=useState(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[vm,setVm]=usePersist("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);
+function ADP({authorId,onNav}){const t=useTheme();const[a,setA]=useState(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[vm,setVm]=usePersist("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const loadA=useCallback(()=>{setLd(true);api.get(`/authors/${authorId}`).then(d=>{setA(d);setLd(false)}).catch(console.error)},[authorId]);useEffect(()=>{loadA()},[loadA]);
@@ -325,7 +296,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 </div>}
 
 // ─── Language Multi-Select Dropdown ─────────────────────────
-function LangSelect({selected,options,onChange}){const t=T();const[open,setOpen]=useState(false);const[q,setQ]=useState("");const ref=useRef(null);
+function LangSelect({selected,options,onChange}){const t=useTheme();const[open,setOpen]=useState(false);const[q,setQ]=useState("");const ref=useRef(null);
 useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h)},[]);
 const filtered=(options||[]).filter(l=>l.toLowerCase().includes(q.toLowerCase()));
 const toggle=lang=>{if(selected.includes(lang))onChange(selected.filter(l=>l!==lang));else onChange([...selected,lang])};
@@ -337,7 +308,7 @@ return<div ref={ref} style={{position:"relative",width:300}}>
 </div>}
 
 // ─── Add Book Modal ─────────────────────────────────────────
-function AddBookModal({onClose,onAdded}){const t=T();const[f,setF]=useState({title:"",author_name:"",series_name:"",series_index:"",pub_date:"",expected_date:"",description:"",isbn:"",is_unreleased:false});const[saving,setSaving]=useState(false);const[err,setErr]=useState("");
+function AddBookModal({onClose,onAdded}){const t=useTheme();const[f,setF]=useState({title:"",author_name:"",series_name:"",series_index:"",pub_date:"",expected_date:"",description:"",isbn:"",is_unreleased:false});const[saving,setSaving]=useState(false);const[err,setErr]=useState("");
 const save=async()=>{if(!f.title||!f.author_name){setErr("Title and author are required");return}setSaving(true);try{await api.post("/books/add",f);onAdded&&onAdded();onClose()}catch{setErr("Failed to add")}setSaving(false)};
 const upF=(field,val)=>setF(prev=>({...prev,[field]:val}));
 const ist={padding:"8px 10px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13,width:"100%"};
@@ -356,7 +327,7 @@ return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:
 </div></div>}
 
 // ─── Add via URL Modal ──────────────────────────────────────
-function UrlSearchModal({onClose,onAdded}){const t=T();const[url,setUrl]=useState("");const[ld,setLd]=useState(false);const[data,setData]=useState(null);const[err,setErr]=useState("");const[saving,setSaving]=useState(false);
+function UrlSearchModal({onClose,onAdded}){const t=useTheme();const[url,setUrl]=useState("");const[ld,setLd]=useState(false);const[data,setData]=useState(null);const[err,setErr]=useState("");const[saving,setSaving]=useState(false);
 const search=async()=>{if(!url.trim()){setErr("Paste a Goodreads book URL");return}setLd(true);setErr("");setData(null);try{const d=await api.post("/books/search-url",{url:url.trim()});setData(d)}catch(e){setErr("Could not fetch book details. Make sure it's a valid Goodreads URL.")}setLd(false)};
 const add=async()=>{if(!data)return;setSaving(true);try{await api.post("/books/add",{title:data.title,author_name:data.author_name,series_name:data.series_name||"",series_index:data.series_index||"",pub_date:data.pub_date||"",expected_date:data.expected_date||"",description:data.description||"",isbn:data.isbn||"",cover_url:data.cover_url||"",is_unreleased:!!data.is_unreleased,source:data.source||"goodreads",source_url:data.source_url||""});onAdded&&onAdded();onClose()}catch{setErr("Failed to add book")}setSaving(false)};
 return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeOverlay 0.2s ease-out"}} onClick={onClose}><div onClick={e=>e.stopPropagation()} className="modal-panel" style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:24,animation:"fadeIn 0.2s ease-out",width:500,maxWidth:"90vw",maxHeight:"85vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:16}}>
@@ -380,7 +351,7 @@ return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:
 </div></div>}
 
 // ─── Export Modal ────────────────────────────────────────────
-function ExportModal({onClose,defaultFilter="missing"}){const t=T();const[filter,setFilter]=useState(defaultFilter);const[fmt,setFmt]=useState("csv");const[content,setContent]=useState(null);const[ld,setLd]=useState(false);const[copied,setCopied]=useState(false);const[downloaded,setDownloaded]=useState(false);const taRef=useRef(null);
+function ExportModal({onClose,defaultFilter="missing"}){const t=useTheme();const[filter,setFilter]=useState(defaultFilter);const[fmt,setFmt]=useState("csv");const[content,setContent]=useState(null);const[ld,setLd]=useState(false);const[copied,setCopied]=useState(false);const[downloaded,setDownloaded]=useState(false);const taRef=useRef(null);
 const generate=async()=>{setLd(true);setCopied(false);setDownloaded(false);try{const r=await fetch(`/api/export?filter=${filter}&format=${fmt}`);const text=await r.text();setContent(text)}catch{setContent("Error generating export")}setLd(false)};
 const download=()=>{if(!content)return;const blob=new Blob([content],{type:fmt==="csv"?"text/csv":"text/plain"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`books_${filter}.${fmt==="csv"?"csv":"txt"}`;a.click();URL.revokeObjectURL(url);setDownloaded(true);setTimeout(()=>setDownloaded(false),2000)};
 const copy=async()=>{if(!content)return;try{await navigator.clipboard.writeText(content);setCopied(true);setTimeout(()=>setCopied(false),2000)}catch{try{if(taRef.current){taRef.current.select();document.execCommand("copy");setCopied(true);setTimeout(()=>setCopied(false),2000)}}catch{}}};
@@ -408,14 +379,14 @@ return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:
 </div></div>}
 
 // ─── Hidden Books Page ──────────────────────────────────────
-function HP({onNav}){const t=T();const[bks,setBks]=useState([]);const[ld,setLd]=useState(true);const load=()=>{setLd(true);api.get("/books/hidden").then(d=>{setBks(d.books);setLd(false)}).catch(console.error)};useEffect(()=>{load()},[]);const unhide=async id=>{await api.post(`/books/${id}/unhide`);load()};
+function HP({onNav}){const t=useTheme();const[bks,setBks]=useState([]);const[ld,setLd]=useState(true);const load=()=>{setLd(true);api.get("/books/hidden").then(d=>{setBks(d.books);setLd(false)}).catch(console.error)};useEffect(()=>{load()},[]);const unhide=async id=>{await api.post(`/books/${id}/unhide`);load()};
 return<div style={{display:"flex",flexDirection:"column",gap:20}}>
 <div style={{display:"flex",alignItems:"center",gap:12}}><Btn variant="ghost" onClick={()=>onNav("dashboard")}>← Dashboard</Btn><h1 style={{fontSize:22,fontWeight:700,color:t.text,margin:0}}>Hidden Books</h1><span style={{fontSize:13,color:t.tg}}>({bks.length})</span></div>
 {ld?<Load/>:bks.length===0?<div style={{textAlign:"center",padding:60,color:t.tg}}>No hidden books</div>:<BList books={bks} showAuthor onAction={(a,id)=>a==="unhide"&&unhide(id)}/>}
 </div>}
 
 // ─── Import/Export Page ─────────────────────────────────────
-function IEP(){const t=T();
+function IEP(){const t=useTheme();
 const[urls,setUrls]=useState("");const[results,setResults]=useState(null);const[fetching,setFetching]=useState(false);const[progress,setProgress]=useState("");
 const[adding,setAdding]=useState(false);const[addResult,setAddResult]=useState(null);
 const[showExp,setShowExp]=useState(false);
@@ -478,7 +449,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 </div>}
 
 // ─── Database Browser ───────────────────────────────────────
-function DBP(){const t=T();
+function DBP(){const t=useTheme();
 const[tables,setTables]=useState([]);
 const[tab,setTab]=usePersist("db_tab","books");
 const[schema,setSchema]=useState(null);
@@ -643,13 +614,13 @@ return<td key={c.name} onClick={()=>{if(!isEditing&&!c.pk)startEdit(rowId,c,disp
 </div>}
 
 // ─── Settings Helpers (outside SP to prevent re-mount on state change) ───
-function SF({label,desc,children,warn}){const t=T();return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 0",borderBottom:`1px solid ${t.borderL}`}}><div style={{flex:1}}><div style={{fontSize:14,fontWeight:500,color:t.text2}}>{label}</div>{desc?<div style={{fontSize:12,color:t.tf,marginTop:2}}>{desc}</div>:null}{warn?<div style={{fontSize:11,color:t.ylwt,marginTop:2}}>⚠ {warn}</div>:null}</div><div>{children}</div></div>}
-function STog({on,onToggle,disabled}){const t=T();return<div onClick={disabled?undefined:onToggle} style={{width:44,height:24,borderRadius:12,background:on?t.grn:t.bg4,cursor:disabled?"not-allowed":"pointer",padding:3,transition:"background 0.2s",opacity:disabled?0.5:1}}><div style={{width:18,height:18,borderRadius:"50%",background:"#fff",transform:on?"translateX(20px)":"translateX(0)",transition:"transform 0.2s"}}/></div>}
+function SF({label,desc,children,warn}){const t=useTheme();return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 0",borderBottom:`1px solid ${t.borderL}`}}><div style={{flex:1}}><div style={{fontSize:14,fontWeight:500,color:t.text2}}>{label}</div>{desc?<div style={{fontSize:12,color:t.tf,marginTop:2}}>{desc}</div>:null}{warn?<div style={{fontSize:11,color:t.ylwt,marginTop:2}}>⚠ {warn}</div>:null}</div><div>{children}</div></div>}
+function STog({on,onToggle,disabled}){const t=useTheme();return<div onClick={disabled?undefined:onToggle} style={{width:44,height:24,borderRadius:12,background:on?t.grn:t.bg4,cursor:disabled?"not-allowed":"pointer",padding:3,transition:"background 0.2s",opacity:disabled?0.5:1}}><div style={{width:18,height:18,borderRadius:"50%",background:"#fff",transform:on?"translateX(20px)":"translateX(0)",transition:"transform 0.2s"}}/></div>}
 
-function SSection({title,defaultOpen=true,children}){const t=T();const[open,setOpen]=useState(defaultOpen);return<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,overflow:"hidden"}}><div onClick={()=>setOpen(!open)} style={{display:"flex",alignItems:"center",gap:8,padding:"14px 20px",cursor:"pointer",userSelect:"none"}}><span style={{transform:open?"rotate(0)":"rotate(-90deg)",transition:"transform 0.2s",fontSize:11,color:t.tg}}>▼</span><span style={{fontSize:13,fontWeight:600,color:t.text,textTransform:"uppercase",letterSpacing:"0.05em"}}>{title}</span></div>{open?<div style={{padding:"0 20px 16px"}}>{children}</div>:null}</div>}
+function SSection({title,defaultOpen=true,children}){const t=useTheme();const[open,setOpen]=useState(defaultOpen);return<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,overflow:"hidden"}}><div onClick={()=>setOpen(!open)} style={{display:"flex",alignItems:"center",gap:8,padding:"14px 20px",cursor:"pointer",userSelect:"none"}}><span style={{transform:open?"rotate(0)":"rotate(-90deg)",transition:"transform 0.2s",fontSize:11,color:t.tg}}>▼</span><span style={{fontSize:13,fontWeight:600,color:t.text,textTransform:"uppercase",letterSpacing:"0.05em"}}>{title}</span></div>{open?<div style={{padding:"0 20px 16px"}}>{children}</div>:null}</div>}
 
 // ─── Settings ───────────────────────────────────────────────
-function SP(){const t=T();const[s,setS]=useState(null);const[sv,setSv]=useState(false);const[msg,setMsg]=useState("");
+function SP(){const t=useTheme();const[s,setS]=useState(null);const[sv,setSv]=useState(false);const[msg,setMsg]=useState("");
 const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState(null);const[fsStatus,setFsStatus]=useState(null);const[dragIdx,setDragIdx]=useState(null);const[testRun,setTestRun]=useState(false);const[testRes,setTestRes]=useState(null);const[newSrcPath,setNewSrcPath]=useState("");const[newSrcType,setNewSrcType]=useState("root");const[newSrcApp,setNewSrcApp]=useState("calibre");const[pathVld,setPathVld]=useState(false);const[pathRes,setPathRes]=useState(null);useEffect(()=>{api.get("/settings").then(setS).catch(console.error)},[]);
 useEffect(()=>{if(!s?.mam_enabled)return;const poll=()=>api.get("/mam/full-scan/status").then(setFsStatus).catch(()=>{});poll();const iv=setInterval(poll,10000);return()=>clearInterval(iv)},[s?.mam_enabled]);
 const save=async()=>{setSv(true);setMsg("");try{const toSave={...s};if(s._editingKey&&s._newKey){toSave.hardcover_api_key=s._newKey}delete toSave._editingKey;delete toSave._newKey;delete toSave._editingMam;delete toSave._newMam;delete toSave._scanClearQ;delete toSave._scanClearResults;delete toSave._scanClearSel;delete toSave.hardcover_api_key_set;delete toSave.language_options;delete toSave._discovered_libraries;delete toSave._extra_mount_paths;delete toSave._newSrcApp;await api.post("/settings",toSave);setMsg("Saved!");upd("_editingKey",false);upd("_newKey","");const fresh=await api.get("/settings");setS(fresh);setTimeout(()=>setMsg(""),2000)}catch(e){setMsg("Error")}setSv(false)};
@@ -826,7 +797,7 @@ return<div style={{paddingBottom:40}}>
 </div>}
 
 // ─── MAM Page ───────────────────────────────────────────────
-function MP({onNav}){const t=T();
+function MP({onNav}){const t=useTheme();
 // Tab + section data
 const[tab,setTab]=usePersist("mam_tab","upload");
 const[books,setBooks]=useState([]);const[total,setTotal]=useState(0);
@@ -956,7 +927,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 // library path setup, source configuration, and initial sync.
 // Defined outside App() to prevent re-mount on parent state changes.
 function SetupWizard({onComplete}){
-const t=T();
+const t=useTheme();
 const[step,setStep]=useState(0);
 const[platform,setPlatform]=useState(null);
 // Step 2: Library paths
@@ -1142,14 +1113,6 @@ return<div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyC
 </div></div>}
 
 // ─── App Shell ──────────────────────────────────────────────
-const NAV=[
-  {id:"library",label:"Library",icon:"📖"},
-  {id:"authors",label:"Authors",icon:"◉"},
-  {id:"missing",label:"Missing",icon:"◌"},
-  {id:"upcoming",label:"Upcoming",icon:"📅"},
-  {id:"mam",label:"MAM",icon:"🔍"},
-  {id:"importexport",label:"Import/Export",icon:"↕"},
-];
 
 export default function App(){
   const[pg,setPg]=usePersist("page","dashboard");
