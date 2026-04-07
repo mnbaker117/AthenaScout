@@ -1,814 +1,342 @@
-"""AthenaScout — Main FastAPI Application"""
-import logging, time, json, asyncio, httpx
+"""AthenaScout — Main FastAPI Application
+
+This file is the application entry point. It creates the FastAPI app, sets up
+the lifespan context manager (library discovery, initial sync, scheduler,
+shutdown cleanup), and registers all route modules from app/routers/.
+
+For individual endpoints, see app/routers/. For shared background-task state
+(scan tasks, library discovery cache), see app/state.py.
+"""
+import asyncio
+import logging
+import os
+import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Query, HTTPException, Body
+
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from app.config import (SYNC_INTERVAL_MINUTES, LOOKUP_INTERVAL_MINUTES, load_settings, save_settings, CALIBRE_LIBRARY_PATH, LANGUAGE_OPTIONS, apply_logging, ENV_WEBUI_PORT)
-from app.database import init_db, get_db
+
+from app.calibre_sync import sync_calibre
+from app.config import (
+    SYNC_INTERVAL_MINUTES,
+    apply_logging,
+    discover_libraries,
+    load_settings,
+    save_settings,
+)
+from app.database import (
+    get_active_library,
+    get_db,
+    init_db,
+    match_legacy_db_to_library,
+    migrate_legacy_db,
+    set_active_library,
+)
+from app.library_apps import get_app
+from app.lookup import reload_sources, run_full_lookup
+from app.routers import (
+    authors,
+    books,
+    config,
+    covers,
+    db_editor,
+    import_export,
+    libraries,
+    mam,
+    scan,
+    series,
+)
+from app.runtime import IS_DOCKER, IS_STANDALONE
+from app.sources.mam import (
+    close_session as mam_close_session,
+    scan_books_batch as mam_scan_batch,
+    validate_connection as mam_validate,
+    _resolve_mam_languages,
+)
+from app import state
 
 
-# Filter out noisy health check and cover/series access logs
+# ─── Logging setup ───────────────────────────────────────────
 class QuietAccessFilter(logging.Filter):
+    """Filter out noisy polling endpoints from uvicorn's access log."""
     NOISY = ("/api/health", "/api/covers/", "/api/series/")
+
     def filter(self, record):
         msg = record.getMessage()
         return not any(p in msg for p in self.NOISY)
 
-# Apply filter to uvicorn access logger
-uv_access = logging.getLogger("uvicorn.access")
-uv_access.addFilter(QuietAccessFilter())
-from app.calibre_sync import sync_calibre
-from app.lookup import run_full_lookup, run_full_rescan, lookup_author, reload_sources
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+logging.getLogger("uvicorn.access").addFilter(QuietAccessFilter())
 logger = logging.getLogger("athenascout")
-scheduler = AsyncIOScheduler()
-HF = "b.hidden = 0"
 
+scheduler = AsyncIOScheduler()
+
+
+# ─── Lifespan ────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db(); reload_sources()
     s = load_settings()
     apply_logging(s.get("verbose_logging", False))
-    try: await sync_calibre()
-    except Exception as e: logger.warning(f"Initial sync failed: {e}")
+    reload_sources()
+
+    # ─── Library Discovery ────────────────────────────────
+    state._discovered_libraries = discover_libraries(s)
+    if not state._discovered_libraries:
+        if IS_DOCKER:
+            logger.warning("No libraries found. Check CALIBRE_PATH env var and volume mounts, or use the setup wizard.")
+        else:
+            logger.info("No libraries configured yet. The setup wizard will guide you through setup.")
+        # Initialize a default database so the app can start and serve the UI
+        await init_db()
+    else:
+        # Group discovered libraries by app type for logging
+        by_app = {}
+        for l in state._discovered_libraries:
+            at = l.get("display_name", "Unknown")
+            by_app.setdefault(at, []).append(l["name"])
+        lib_summary = "; ".join(f'{len(v)} {k} ({", ".join(v)})' for k, v in by_app.items())
+        logger.info(f"Discovered {len(state._discovered_libraries)} libraries: {lib_summary}")
+
+        # Migration: rename legacy athenascout.db → best-matching library's DB file
+        first_slug = state._discovered_libraries[0]["slug"]
+        migration_slug = match_legacy_db_to_library(state._discovered_libraries)
+        migrated_to = migrate_legacy_db(migration_slug)
+        if migrated_to:
+            logger.info(f"Legacy database migrated to library '{migrated_to}'")
+            first_slug = migrated_to  # use migrated library as default active
+
+        # Initialize all library databases
+        for lib in state._discovered_libraries:
+            await init_db(lib["slug"])
+            logger.debug(f"Initialized database for library '{lib['name']}'")
+
+        # Set active library (from settings or first discovered)
+        active = s.get("active_library") or first_slug
+        valid_slugs = [l["slug"] for l in state._discovered_libraries]
+        if active not in valid_slugs:
+            active = first_slug
+        set_active_library(active)
+        s["active_library"] = active
+        save_settings(s)
+        logger.info(f"Active library: '{active}'")
+
+        # Sync each library (with mtime optimization)
+        mtimes = s.get("calibre_mtimes", {})
+        for lib in state._discovered_libraries:
+            set_active_library(lib["slug"])
+            try:
+                current_mtime = os.path.getmtime(lib["source_db_path"])
+                last_mtime = mtimes.get(lib["slug"])
+                if last_mtime is not None and current_mtime == last_mtime:
+                    logger.info(f"Library '{lib['name']}': metadata.db unchanged, skipping sync")
+                else:
+                    lib_app = get_app(lib.get("app_type", "calibre"))
+                    logger.info(f"Library '{lib['name']}': syncing from {lib_app.display_name if lib_app else 'unknown'}...")
+                    if lib_app:
+                        await lib_app.sync(lib["source_db_path"], lib["library_path"])
+                    else:
+                        await sync_calibre(lib["source_db_path"], lib["library_path"])
+                    mtimes[lib["slug"]] = current_mtime
+                    s["calibre_mtimes"] = mtimes
+                    save_settings(s)
+            except Exception as e:
+                logger.warning(f"Sync failed for library '{lib['name']}': {e}")
+
+        # Restore active library after syncing all
+        set_active_library(active)
+        state._last_calibre_check["at"] = time.time()
+        state._last_calibre_check["synced"] = True
+
+    # ─── Scheduled Calibre Sync (all libraries) ───────────
     s = load_settings()
     sync_min = s.get("calibre_sync_interval_minutes", SYNC_INTERVAL_MINUTES)
     lookup_days = s.get("lookup_interval_days", 3)
+
+    async def _sync_all_libraries():
+        """Scheduled task: sync all libraries with mtime optimization."""
+        current_active = get_active_library()
+        st = load_settings()
+        mtimes = st.get("calibre_mtimes", {})
+        any_synced = False
+        for lib in state._discovered_libraries:
+            try:
+                set_active_library(lib["slug"])
+                current_mtime = os.path.getmtime(lib["source_db_path"])
+                last_mtime = mtimes.get(lib["slug"])
+                if last_mtime is not None and current_mtime == last_mtime:
+                    logger.debug(f"Scheduled sync: '{lib['name']}' metadata.db unchanged, skipping")
+                    continue
+                lib_app = get_app(lib.get("app_type", "calibre"))
+                logger.info(f"Scheduled sync: '{lib['name']}' {lib_app.db_filename if lib_app else 'database'} changed, syncing...")
+                if lib_app:
+                    await lib_app.sync(lib["source_db_path"], lib["library_path"])
+                else:
+                    await sync_calibre(lib["source_db_path"], lib["library_path"])
+                mtimes[lib["slug"]] = current_mtime
+                st["calibre_mtimes"] = mtimes
+                save_settings(st)
+                any_synced = True
+            except Exception as e:
+                logger.warning(f"Scheduled sync failed for '{lib['name']}': {e}")
+        set_active_library(current_active)
+        state._last_calibre_check["at"] = time.time()
+        state._last_calibre_check["synced"] = any_synced
+
     if sync_min and sync_min > 0:
-        scheduler.add_job(sync_calibre, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
+        if state._discovered_libraries:
+            scheduler.add_job(_sync_all_libraries, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
+        else:
+            logger.info("Calibre auto-sync skipped - no libraries configured")
     else:
         logger.info("Calibre auto-sync disabled (interval = 0)")
+
+    async def _scheduled_lookup():
+        s = load_settings()
+        if not s.get("author_scanning_enabled", True):
+            return
+        if state._lookup_progress.get("running"):
+            return
+        state._lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+                            "new_books": 0, "status": "scanning", "type": "scheduled_lookup"}
+        def _progress(data):
+            state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
+                                     "current_author": data["current_author"], "new_books": data["new_books"]})
+        try:
+            await run_full_lookup(on_progress=_progress)
+            state._lookup_progress.update({"running": False, "status": "complete"})
+        except Exception as e:
+            logger.error(f"Scheduled lookup error: {e}")
+            state._lookup_progress.update({"running": False, "status": f"error: {e}"})
+
     if lookup_days and lookup_days > 0:
-        scheduler.add_job(run_full_lookup, "interval", minutes=lookup_days*1440, id="author_lookup", replace_existing=True)
+        scheduler.add_job(_scheduled_lookup, "interval", minutes=lookup_days*1440, id="author_lookup", replace_existing=True)
     else:
         logger.info("Auto-lookup disabled (interval = 0)")
-    scheduler.start(); yield; scheduler.shutdown()
 
-app = FastAPI(title="AthenaScout", lifespan=lifespan)
-
-# ─── Settings ────────────────────────────────────────────────
-@app.get("/api/settings")
-async def get_settings():
-    s = load_settings()
-    d = dict(s)
-    if d.get("hardcover_api_key"): d["hardcover_api_key_set"] = True; d["hardcover_api_key"] = d["hardcover_api_key"][:8] + "..."
-    else: d["hardcover_api_key_set"] = False
-    d["language_options"] = LANGUAGE_OPTIONS
-    return d
-
-@app.post("/api/settings")
-async def update_settings(body: dict = Body(...)):
-    cur = load_settings()
-    for k, v in body.items():
-        if k not in cur:
-            continue
-        # Don't overwrite real API key with masked/truncated value
-        if k == "hardcover_api_key" and isinstance(v, str) and (v.endswith("...") or v == ""):
-            continue
-        cur[k] = v
-    save_settings(cur); reload_sources()
-    apply_logging(cur.get("verbose_logging", False))
-    return {"status": "ok"}
-
-# ─── Health & Stats ──────────────────────────────────────────
-@app.get("/api/health")
-async def health(): return {"status": "ok", "time": time.time()}
-
-@app.get("/api/stats")
-async def get_stats():
-    db = await get_db()
-    try:
-        g = lambda sql: db.execute(sql)
-        authors = (await (await g("SELECT COUNT(*) c FROM authors")).fetchone())["c"]
-        total = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE {HF}")).fetchone())["c"]
-        owned = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE owned=1 AND {HF}")).fetchone())["c"]
-        missing = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE owned=0 AND {HF}")).fetchone())["c"]
-        new = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE is_new=1 AND owned=0 AND {HF}")).fetchone())["c"]
-        upcoming = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE is_unreleased=1 AND owned=0 AND {HF}")).fetchone())["c"]
-        series = (await (await g("SELECT COUNT(*) c FROM series")).fetchone())["c"]
-        hidden = (await (await g("SELECT COUNT(*) c FROM books WHERE hidden=1")).fetchone())["c"]
-        ls = await (await g("SELECT * FROM sync_log WHERE sync_type='calibre' ORDER BY started_at DESC LIMIT 1")).fetchone()
-        ll = await (await g("SELECT * FROM sync_log WHERE sync_type='lookup' ORDER BY started_at DESC LIMIT 1")).fetchone()
-        s = load_settings()
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", "")}
-    finally: await db.close()
-
-# ─── Authors ─────────────────────────────────────────────────
-@app.get("/api/authors")
-async def get_authors(search: str = Query(None), sort: str = Query("name"), sort_dir: str = Query("asc"), has_missing: bool = Query(None), book_type: str = Query(None)):
-    db = await get_db()
-    try:
-        q = f"SELECT a.*, COUNT(DISTINCT CASE WHEN {HF} THEN b.id END) as total_books, SUM(CASE WHEN b.owned=1 AND {HF} THEN 1 ELSE 0 END) as owned_count, SUM(CASE WHEN b.owned=0 AND {HF} THEN 1 ELSE 0 END) as missing_count, SUM(CASE WHEN b.is_new=1 AND b.owned=0 AND {HF} THEN 1 ELSE 0 END) as new_count, COUNT(DISTINCT b.series_id) as series_count FROM authors a LEFT JOIN books b ON a.id=b.author_id"
-        p = []; c = []
-        if search: c.append("a.name LIKE ?"); p.append(f"%{search}%")
-        if book_type == "series": c.append("b.series_id IS NOT NULL")
-        elif book_type == "standalone": c.append("b.series_id IS NULL")
-        if c: q += " WHERE " + " AND ".join(c)
-        q += " GROUP BY a.id"
-        if has_missing: q += " HAVING missing_count > 0"
-        d = "DESC" if sort_dir == "desc" else "ASC"
-        q += {"missing": f" ORDER BY missing_count {d}, a.sort_name ASC", "new": f" ORDER BY new_count {d}, a.sort_name ASC", "total": f" ORDER BY total_books {d}, a.sort_name ASC"}.get(sort, f" ORDER BY a.sort_name {d}")
-        return {"authors": [dict(r) for r in await (await db.execute(q, p)).fetchall()]}
-    finally: await db.close()
-
-@app.get("/api/authors/{aid}")
-async def get_author(aid: int):
-    db = await get_db()
-    try:
-        r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
-        if not r: raise HTTPException(404)
-        a = dict(r)
-        # Find series through books (supports multi-author series)
-        a["series"] = [dict(s) for s in await (await db.execute(
-            f"""SELECT s.*,
-                COUNT(DISTINCT CASE WHEN {HF} THEN b.id END) as book_count,
-                COUNT(DISTINCT CASE WHEN b.author_id=? AND {HF} THEN b.id END) as author_book_count,
-                SUM(CASE WHEN b.owned=1 AND b.author_id=? AND {HF} THEN 1 ELSE 0 END) as owned_count,
-                SUM(CASE WHEN b.owned=0 AND b.author_id=? AND {HF} THEN 1 ELSE 0 END) as missing_count,
-                CASE WHEN COUNT(DISTINCT b.author_id) > 1 THEN 1 ELSE 0 END as multi_author
-            FROM series s
-            JOIN books b ON s.id=b.series_id
-            WHERE s.id IN (SELECT DISTINCT series_id FROM books WHERE author_id=? AND series_id IS NOT NULL)
-            GROUP BY s.id ORDER BY s.name""",
-            (aid, aid, aid, aid)
-        )).fetchall()]
-        a["standalone_books"] = [dict(b) for b in await (await db.execute(f"SELECT b.*, a2.name as author_name FROM books b JOIN authors a2 ON b.author_id=a2.id WHERE b.author_id=? AND b.series_id IS NULL AND {HF} ORDER BY b.pub_date ASC, b.title ASC", (aid,))).fetchall()]
-        return a
-    finally: await db.close()
-
-# ─── Series ──────────────────────────────────────────────────
-@app.get("/api/series/{sid}")
-async def get_series(sid: int):
-    db = await get_db()
-    try:
-        r = await (await db.execute("SELECT s.*, a.name as author_name FROM series s LEFT JOIN authors a ON s.author_id=a.id WHERE s.id=?", (sid,))).fetchone()
-        if not r: raise HTTPException(404)
-        s = dict(r)
-        s["books"] = [dict(b) for b in await (await db.execute(f"SELECT b.*, a.name as author_name, sr.name as series_name, (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series sr ON b.series_id=sr.id WHERE b.series_id=? AND {HF} ORDER BY COALESCE(b.series_index,999), b.pub_date ASC", (sid,))).fetchall()]
-        return s
-    finally: await db.close()
-
-@app.get("/api/series")
-async def list_series(search: str = Query(None), sort: str = Query("name"), sort_dir: str = Query("asc"), has_missing: bool = Query(None)):
-    db = await get_db()
-    try:
-        q = f"""SELECT s.*, a.name as author_name,
-            COUNT(DISTINCT CASE WHEN {HF} THEN b.id END) as book_count,
-            SUM(CASE WHEN b.owned=1 AND {HF} THEN 1 ELSE 0 END) as owned_count,
-            SUM(CASE WHEN b.owned=0 AND {HF} THEN 1 ELSE 0 END) as missing_count,
-            CASE WHEN COUNT(DISTINCT b.author_id) > 1 THEN 1 ELSE 0 END as multi_author
-            FROM series s LEFT JOIN authors a ON s.author_id=a.id LEFT JOIN books b ON s.id=b.series_id"""
-        p = []; c = []
-        if search: c.append("(s.name LIKE ? OR a.name LIKE ?)"); p.extend([f"%{search}%"]*2)
-        if c: q += " WHERE " + " AND ".join(c)
-        q += " GROUP BY s.id"
-        if has_missing: q += " HAVING missing_count > 0"
-        d = "DESC" if sort_dir == "desc" else "ASC"
-        q += {"missing": f" ORDER BY missing_count {d}", "author": f" ORDER BY a.sort_name {d}"}.get(sort, f" ORDER BY s.name {d}")
-        return {"series": [dict(r) for r in await (await db.execute(q, p)).fetchall()]}
-    finally: await db.close()
-
-# ─── Books ───────────────────────────────────────────────────
-@app.get("/api/books")
-async def get_books(search: str = Query(None), author_id: int = Query(None), series_id: int = Query(None), owned: bool = Query(None), book_type: str = Query(None), sort: str = Query("title"), sort_dir: str = Query("asc"), group_by: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000), include_hidden: bool = Query(False)):
-    db = await get_db()
-    try:
-        c = []; p = []
-        if not include_hidden: c.append(HF)
-        if search: c.append("(b.title LIKE ? OR a.name LIKE ? OR COALESCE(s.name,'') LIKE ?)"); p.extend([f"%{search}%"]*3)
-        if author_id: c.append("b.author_id=?"); p.append(author_id)
-        if series_id: c.append("b.series_id=?"); p.append(series_id)
-        if owned is True: c.append("b.owned=1")
-        elif owned is False: c.append("b.owned=0")
-        if book_type == "series": c.append("b.series_id IS NOT NULL")
-        elif book_type == "standalone": c.append("b.series_id IS NULL")
-        w = " AND ".join(c) if c else "1=1"
-        cnt = (await (await db.execute(f"SELECT COUNT(*) c FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w}", p)).fetchone())["c"]
-        d = "DESC" if sort_dir == "desc" else "ASC"
-        o = {"title": f"b.title {d}", "author": f"a.sort_name {d}, b.title ASC", "series": f"COALESCE(s.name,'zzz') {d}, b.series_index ASC", "date": f"b.pub_date {d}", "added": f"b.first_seen_at {d}"}.get(sort, f"b.title {d}")
-        off = (page-1)*per_page
-        rows = await (await db.execute(f"SELECT b.*, a.name as author_name, s.name as series_name, (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w} ORDER BY {o} LIMIT ? OFFSET ?", p+[per_page, off])).fetchall()
-        return {"books": [dict(r) for r in rows], "total": cnt, "page": page, "per_page": per_page, "pages": max(1, (cnt+per_page-1)//per_page)}
-    finally: await db.close()
-
-@app.get("/api/missing")
-async def get_missing(**kw): return await get_books(owned=False, **kw)
-
-@app.get("/api/upcoming")
-async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sort_dir: str = Query("asc"), group_by: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(60, ge=1, le=5000)):
-    db = await get_db()
-    try:
-        c = [HF, "b.owned=0", "b.is_unreleased=1"]; p = []
-        if search: c.append("(b.title LIKE ? OR a.name LIKE ? OR COALESCE(s.name,'') LIKE ?)"); p.extend([f"%{search}%"]*3)
-        w = " AND ".join(c)
-        cnt = (await (await db.execute(f"SELECT COUNT(*) c FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w}", p)).fetchone())["c"]
-        d = "DESC" if sort_dir == "desc" else "ASC"
-        o = {"date": f"COALESCE(b.expected_date, '9999') {d}", "title": f"b.title {d}", "author": f"a.sort_name {d}"}.get(sort, f"COALESCE(b.expected_date, '9999') {d}")
-        off = (page-1)*per_page
-        rows = await (await db.execute(f"SELECT b.*, a.name as author_name, s.name as series_name, (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w} ORDER BY {o} LIMIT ? OFFSET ?", p+[per_page, off])).fetchall()
-        return {"books": [dict(r) for r in rows], "total": cnt, "page": page, "per_page": per_page, "pages": max(1, (cnt+per_page-1)//per_page)}
-    finally: await db.close()
-
-# ─── Book Actions ────────────────────────────────────────────
-@app.post("/api/books/{bid}/hide")
-async def hide(bid: int):
-    db = await get_db()
-    try: await db.execute("UPDATE books SET hidden=1 WHERE id=?", (bid,)); await db.commit(); return {"status": "ok"}
-    finally: await db.close()
-
-@app.post("/api/books/{bid}/unhide")
-async def unhide(bid: int):
-    db = await get_db()
-    try: await db.execute("UPDATE books SET hidden=0 WHERE id=?", (bid,)); await db.commit(); return {"status": "ok"}
-    finally: await db.close()
-
-@app.get("/api/books/hidden")
-async def get_hidden():
-    db = await get_db()
-    try:
-        rows = await (await db.execute("SELECT b.*, a.name as author_name, s.name as series_name, (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE b.hidden=1 ORDER BY a.sort_name, b.title")).fetchall()
-        return {"books": [dict(r) for r in rows]}
-    finally: await db.close()
-
-@app.post("/api/books/{bid}/dismiss")
-async def dismiss(bid: int):
-    db = await get_db()
-    try: await db.execute("UPDATE books SET is_new=0 WHERE id=?", (bid,)); await db.commit(); return {"status": "ok"}
-    finally: await db.close()
-
-@app.put("/api/books/{bid}")
-async def update_book(bid: int, data: dict = Body(...)):
-    db = await get_db()
-    try:
-        fields = []; vals = []
-        for k in ["title", "description", "pub_date", "expected_date", "isbn", "cover_url", "series_index", "source_url"]:
-            if k in data:
-                fields.append(f"{k}=?"); vals.append(data[k])
-        if "is_unreleased" in data:
-            fields.append("is_unreleased=?"); vals.append(1 if data["is_unreleased"] else 0)
-        if not fields:
-            return {"status": "no changes"}
-        vals.append(bid)
-        await db.execute(f"UPDATE books SET {', '.join(fields)} WHERE id=?", vals)
-        await db.commit()
-        return {"status": "ok"}
-    finally: await db.close()
-
-@app.post("/api/books/add")
-async def add_book(data: dict = Body(...)):
-    """Manually add a missing/upcoming book."""
-    db = await get_db()
-    try:
-        title = data.get("title", "").strip()
-        author_name = data.get("author_name", "").strip()
-        if not title or not author_name:
-            raise HTTPException(400, "Title and author are required")
-        # Find or create author
-        row = await (await db.execute("SELECT id FROM authors WHERE name=?", (author_name,))).fetchone()
-        if row:
-            aid = row["id"]
-        else:
-            cur = await db.execute("INSERT INTO authors (name, sort_name) VALUES (?, ?)", (author_name, author_name))
-            aid = cur.lastrowid
-        # Find series if specified
-        sid = None
-        if data.get("series_name"):
-            srow = await (await db.execute("SELECT id FROM series WHERE name=? AND author_id=?", (data["series_name"], aid))).fetchone()
-            if srow:
-                sid = srow["id"]
-            else:
-                cur = await db.execute("INSERT INTO series (name, author_id) VALUES (?, ?)", (data["series_name"], aid))
-                sid = cur.lastrowid
-        is_unreleased = 1 if data.get("is_unreleased") else 0
-        src = data.get("source", "manual")
-        cur = await db.execute(
-            "INSERT INTO books (title, author_id, series_id, series_index, pub_date, expected_date, is_unreleased, description, isbn, cover_url, source, source_url, owned, is_new) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,1)",
-            (title, aid, sid, data.get("series_index"), data.get("pub_date"), data.get("expected_date"), is_unreleased, data.get("description"), data.get("isbn"), data.get("cover_url"), src, data.get("source_url"))
-        )
-        await db.commit()
-        return {"status": "ok", "book_id": cur.lastrowid}
-    finally: await db.close()
-
-@app.post("/api/books/dismiss-all")
-async def dismiss_all():
-    db = await get_db()
-    try: await db.execute("UPDATE books SET is_new=0 WHERE is_new=1"); await db.commit(); return {"status": "ok"}
-    finally: await db.close()
-
-@app.delete("/api/books/{bid}")
-async def delete_book(bid: int):
-    """Delete a book entry — only non-Calibre (discovered/imported) books can be deleted."""
-    db = await get_db()
-    try:
-        row = await (await db.execute("SELECT id, source, owned, calibre_id FROM books WHERE id=?", (bid,))).fetchone()
-        if not row: raise HTTPException(404, "Book not found")
-        if row["calibre_id"] and row["source"] == "calibre":
-            raise HTTPException(400, "Cannot delete books synced from Calibre. Remove them from Calibre instead.")
-        await db.execute("DELETE FROM books WHERE id=?", (bid,))
-        await db.commit()
-        return {"status": "ok"}
-    finally: await db.close()
-
-@app.get("/api/export")
-async def export_books(filter: str = Query("missing"), format: str = Query("csv")):
-    """Export books as CSV or text. filter: all|library|missing. format: csv|text."""
-    from fastapi.responses import Response
-    db = await get_db()
-    try:
-        c = [HF]; p = []
-        if filter == "library": c.append("b.owned=1")
-        elif filter == "missing": c.append("b.owned=0")
-        w = " AND ".join(c)
-        rows = await (await db.execute(
-            f"SELECT b.title, a.name as author_name, b.pub_date, b.expected_date, b.source, b.source_url, b.is_unreleased "
-            f"FROM books b JOIN authors a ON b.author_id=a.id WHERE {w} ORDER BY a.sort_name, b.title", p
-        )).fetchall()
-        
-        # Priority order for "best" URL
-        url_priority = ["goodreads", "hardcover", "kobo", "fantasticfiction"]
-        
-        def _best_url(source_url_json):
-            """Extract the best URL and its source name from JSON."""
-            if not source_url_json:
-                return "", ""
-            try:
-                urls = json.loads(source_url_json)
-                if not isinstance(urls, dict):
-                    return "", ""
-                for src in url_priority:
-                    if src in urls:
-                        return src, urls[src]
-                # Return first available if none match priority
-                for src, url in urls.items():
-                    return src, url
-            except:
-                pass
-            return "", ""
-        
-        def _all_urls(source_url_json):
-            """Get all URLs as formatted string."""
-            if not source_url_json:
-                return ""
-            try:
-                urls = json.loads(source_url_json)
-                if isinstance(urls, dict):
-                    parts = []
-                    for src in url_priority:
-                        if src in urls:
-                            parts.append(urls[src])
-                    for src, url in urls.items():
-                        if url not in parts:
-                            parts.append(url)
-                    return " | ".join(parts)
-            except:
-                pass
-            return ""
-        
-        if format == "csv":
-            import csv, io
-            buf = io.StringIO()
-            writer = csv.writer(buf)
-            writer.writerow(["Title", "Author", "Release Date", "Source", "Source URL"])
-            for r in rows:
-                src_name, src_url = _best_url(r["source_url"])
-                date = r["pub_date"] or r["expected_date"] or ""
-                if r["is_unreleased"] and r["expected_date"]:
-                    date = f"{r['expected_date']} (upcoming)"
-                writer.writerow([r["title"], r["author_name"], date, src_name or r["source"] or "", src_url])
-            content = buf.getvalue()
-            return Response(content=content, media_type="text/csv",
-                          headers={"Content-Disposition": f"attachment; filename=books_{filter}.csv"})
-        else:
-            lines = ["Title, Author, Release Date, Source, Source URL"]
-            for r in rows:
-                src_name, src_url = _best_url(r["source_url"])
-                date = r["pub_date"] or r["expected_date"] or ""
-                if r["is_unreleased"] and r["expected_date"]:
-                    date = f"{r['expected_date']} (upcoming)"
-                # Escape commas in titles/authors
-                title = r["title"].replace(",", ";")
-                author = r["author_name"].replace(",", ";")
-                lines.append(f"{title}, {author}, {date}, {src_name or r['source'] or ''}, {src_url}")
-            content = "\n".join(lines)
-            return Response(content=content, media_type="text/plain",
-                          headers={"Content-Disposition": f"attachment; filename=books_{filter}.txt"})
-    finally: await db.close()
-
-async def _fetch_goodreads_book(book_id: str) -> dict:
-    """Fetch book details from Goodreads by book ID."""
-    import re as _re, httpx
-    from bs4 import BeautifulSoup
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}
-    async with httpx.AsyncClient(timeout=30, headers=headers, follow_redirects=True) as client:
-        r = await client.get(f"https://www.goodreads.com/book/show/{book_id}")
-        r.raise_for_status()
-    soup = BeautifulSoup(r.text, "lxml")
-    result = {"goodreads_id": book_id, "source": "goodreads", "source_url": json.dumps({"goodreads": f"https://www.goodreads.com/book/show/{book_id}"})}
-    title_el = soup.find("h1", {"data-testid": "bookTitle"}) or soup.find("h1")
-    result["title"] = title_el.get_text(strip=True) if title_el else ""
-    author_el = soup.find("span", {"data-testid": "name"}) or soup.select_one("a.ContributorLink span")
-    result["author_name"] = author_el.get_text(strip=True) if author_el else ""
-    for script in soup.select("script[type='application/ld+json']"):
-        try:
-            ld = json.loads(script.string)
-            if ld.get("image"): result["cover_url"] = ld["image"]
-            if ld.get("datePublished"): result["pub_date"] = ld["datePublished"][:10]
-            if ld.get("isbn"): result["isbn"] = ld["isbn"]
-            if ld.get("numberOfPages"): result["page_count"] = int(ld["numberOfPages"])
-        except: pass
-    desc_el = soup.find("div", {"data-testid": "description"})
-    if desc_el:
-        spans = desc_el.find_all("span", class_=_re.compile("Formatted"))
-        result["description"] = (spans[-1] if spans else desc_el).get_text(strip=True)[:1000]
-    series_el = soup.find("div", {"data-testid": "seriesTitle"})
-    if series_el:
-        for link in series_el.find_all("a"):
-            sm = _re.match(r'(.+?)\s*(?:\(|#)([\d.]+)\)?', link.get_text(strip=True))
-            if sm:
-                result["series_name"] = sm.group(1).strip()
-                try: result["series_index"] = float(sm.group(2))
-                except: pass
-                break
-    pub_el = soup.find("p", {"data-testid": "publicationInfo"})
-    if pub_el:
-        pt = pub_el.get_text(strip=True)
-        em = _re.search(r'[Ee]xpected\s+(?:publication\s+)?(.+?)$', pt)
-        if em:
-            result["is_unreleased"] = True
-            from datetime import datetime
-            for fmt in ["%B %d, %Y", "%B %Y", "%Y"]:
-                try:
-                    result["expected_date"] = datetime.strptime(_re.sub(r'(\d+)(?:st|nd|rd|th)', r'\1', em.group(1).strip()), fmt).strftime("%Y-%m-%d")
-                    break
-                except: pass
-    return result
-
-
-async def _fetch_hardcover_book(slug: str) -> dict:
-    """Fetch book details from Hardcover by slug using search API."""
-    import re as _re
-    settings = load_settings()
-    api_key = settings.get("hardcover_api_key", "")
-    if not api_key:
-        raise Exception("Hardcover API key not configured")
-    headers = {"Content-Type": "application/json", "Authorization": api_key if api_key.startswith("Bearer") else f"Bearer {api_key}"}
-    
-    # Convert slug to search query: "honor-among-thieves-2014" → "honor among thieves"
-    search_term = _re.sub(r'-\d{4}$', '', slug).replace('-', ' ')
-    logger.debug(f"  Hardcover import: slug='{slug}' → search='{search_term}'")
-    
-    # Step 1: Search for candidate book IDs
-    search_query = """query($q: String!) {
-        search(query: $q, query_type: "Book", per_page: 10, page: 1) { ids }
-    }"""
-    async with httpx.AsyncClient(timeout=30, headers=headers) as client:
-        r = await client.post("https://api.hardcover.app/v1/graphql",
-            json={"query": search_query, "variables": {"q": search_term}})
-        r.raise_for_status()
-    
-    data = r.json()
-    ids_list = data.get("data", {}).get("search", {}).get("ids", [])
-    logger.debug(f"  Hardcover import: search returned {len(ids_list)} IDs: {ids_list[:10]}")
-    
-    if not ids_list:
-        raise Exception(f"No results on Hardcover for: {search_term}")
-    
-    # Step 2: Fetch all candidates and match by slug
-    detail_query = """query($ids: [Int!]) { books(where: {id: {_in: $ids}}) {
-        id title slug description
-        series: cached_featured_series
-        book_series { position series { name id } }
-        contributions { author { name id } }
-        editions(order_by: {users_count: desc_nulls_last}, limit: 1) {
-            isbn_13 release_date
-            image: cached_image
-        }
-    }}"""
-    async with httpx.AsyncClient(timeout=30, headers=headers) as client:
-        r = await client.post("https://api.hardcover.app/v1/graphql",
-            json={"query": detail_query, "variables": {"ids": [int(i) for i in ids_list[:10]]}})
-        r.raise_for_status()
-    
-    bdata = r.json()
-    candidates = bdata.get("data", {}).get("books", [])
-    logger.debug(f"  Hardcover import: fetched {len(candidates)} candidates")
-    
-    # Match by exact slug first
-    book = None
-    for c in candidates:
-        c_slug = c.get("slug", "")
-        logger.debug(f"  Hardcover import: candidate slug='{c_slug}' title='{c.get('title')}'")
-        if c_slug == slug:
-            book = c
-            logger.debug(f"  Hardcover import: MATCHED by slug → '{c.get('title')}'")
-            break
-    
-    # Fallback: match by title similarity
-    if not book:
-        for c in candidates:
-            if search_term.lower() in c.get("title", "").lower():
-                book = c
-                logger.debug(f"  Hardcover import: MATCHED by title → '{c.get('title')}'")
-                break
-    
-    # Last fallback: first result
-    if not book and candidates:
-        book = candidates[0]
-        logger.debug(f"  Hardcover import: FALLBACK to first → '{book.get('title')}'")
-    
-    if not book:
-        raise Exception(f"Book not found on Hardcover for: {search_term}")
-    
-    # Parse the matched book data (already fetched with full details)
-    real_slug = book.get("slug", slug)
-    edition = book.get("editions", [{}])[0] if book.get("editions") else {}
-    cover = None
-    img = edition.get("image")
-    if isinstance(img, dict): cover = img.get("url")
-    elif isinstance(img, str): cover = img
-    author_name = ""
-    for c in book.get("contributions", []):
-        a = c.get("author", {})
-        if isinstance(a, dict) and a.get("name"):
-            author_name = a["name"]; break
-    series_name = None; series_index = None; series_options = []
-    # Collect all series from book_series relation
-    bs = book.get("book_series")
-    if bs and isinstance(bs, list):
-        for bse in bs:
-            if isinstance(bse, dict):
-                sr_obj = bse.get("series", {})
-                if isinstance(sr_obj, dict) and sr_obj.get("name"):
-                    series_options.append({"name": sr_obj["name"], "position": bse.get("position")})
-    # Also check cached_featured_series
-    series_data = book.get("series")
-    if series_data and isinstance(series_data, list):
-        for s in series_data:
-            if isinstance(s, dict) and s.get("name"):
-                if not any(so["name"] == s["name"] for so in series_options):
-                    series_options.append({"name": s["name"], "position": s.get("position")})
-    # Pick best series using same heuristic as scan
-    if series_options:
-        def _score(c):
-            s = 0
-            name = c["name"]
-            if ":" in name: s += 10
-            if c["position"] is not None: s += 5
-            if "(" in name: s -= 3
-            s += min(len(name.split()), 5)
-            return s
-        series_options.sort(key=_score, reverse=True)
-        series_name = series_options[0]["name"]
-        series_index = series_options[0]["position"]
-        logger.debug(f"  Hardcover import: {len(series_options)} series found: {[s['name'] for s in series_options]} → default '{series_name}'")
-    return {
-        "hardcover_id": str(book.get("id")), "source": "hardcover",
-        "source_url": json.dumps({"hardcover": f"https://hardcover.app/books/{real_slug}"}),
-        "title": book.get("title", ""), "author_name": author_name,
-        "description": (book.get("description") or "")[:1000],
-        "isbn": edition.get("isbn_13"), "pub_date": edition.get("release_date"),
-        "cover_url": cover, "series_name": series_name, "series_index": series_index,
-        "series_options": series_options if len(series_options) > 1 else None,
-    }
-
-
-@app.post("/api/books/search-url")
-async def search_by_url(data: dict = Body(...)):
-    """Fetch book details from a Goodreads or Hardcover URL."""
-    import re
-    url = data.get("url", "").strip()
-    if not url:
-        raise HTTPException(400, "URL is required")
-    try:
-        gr = re.search(r'goodreads\.com/book/show/(\d+)', url)
-        hc = re.search(r'hardcover\.app/books/([a-z0-9-]+)', url)
-        if gr:
-            return await _fetch_goodreads_book(gr.group(1))
-        elif hc:
-            return await _fetch_hardcover_book(hc.group(1))
-        else:
-            raise HTTPException(400, "Please provide a Goodreads or Hardcover book URL")
-    except HTTPException: raise
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Failed to fetch: {e}")
-    except Exception as e:
-        raise HTTPException(500, f"Error: {e}")
-
-
-@app.post("/api/books/import-preview")
-async def import_preview(data: dict = Body(...)):
-    """Parse multiple URLs, fetch each, and check against DB."""
-    import re
-    from difflib import SequenceMatcher
-    
-    def _norm(s):
-        """Normalize name for comparison: collapse spaces, strip punctuation."""
-        s = re.sub(r'\s+', ' ', s.lower().strip())
-        s = re.sub(r'\.\s*', '. ', s)  # "S.A." → "S. A."
-        return re.sub(r'\s+', ' ', s).strip()
-    
-    def _fuzzy(a, b):
-        return SequenceMatcher(None, _norm(a), _norm(b)).ratio() > 0.85
-    
-    urls = data.get("urls", [])
-    if not urls:
-        raise HTTPException(400, "No URLs provided")
-    
-    results = []
-    db = await get_db()
-    try:
-        # Pre-load all authors and books for fuzzy matching
-        all_authors = await (await db.execute("SELECT id, name FROM authors")).fetchall()
-        all_books = await (await db.execute(
-            f"SELECT b.id, b.title, b.owned, b.source_url, b.author_id, a.name as author_name "
-            f"FROM books b JOIN authors a ON b.author_id=a.id WHERE {HF}"
-        )).fetchall()
-        
-        for url in urls[:50]:
-            url = url.strip()
-            if not url: continue
-            entry = {"url": url, "status": "error", "error": None, "book": None}
-            try:
-                gr = re.search(r'goodreads\.com/book/show/(\d+)', url)
-                hc = re.search(r'hardcover\.app/books/([a-zA-Z0-9_-]+)', url)
-                if gr:
-                    book = await _fetch_goodreads_book(gr.group(1))
-                elif hc:
-                    book = await _fetch_hardcover_book(hc.group(1))
+    async def _mam_scheduler():
+        last_scan_at = 0.0
+        while True:
+            await asyncio.sleep(60)
+            s = load_settings()
+            interval = s.get("mam_scan_interval_minutes", 360)
+            if interval <= 0 or not s.get("mam_enabled") or not s.get("mam_session_id") or not s.get("mam_scanning_enabled", True):
+                continue
+            elapsed_min = (time.time() - last_scan_at) / 60
+            if elapsed_min < interval:
+                continue
+            if state._mam_scan_progress.get("running"):
+                continue
+            if state._lookup_progress.get("running"):
+                continue  # Author scan has priority
+            last_val = s.get("last_mam_validated_at") or 0
+            if time.time() - last_val > 86400:
+                logger.info("MAM daily validation check...")
+                vr = await mam_validate(s["mam_session_id"], True)
+                if vr["success"]:
+                    s["last_mam_validated_at"] = time.time()
+                    s["mam_validation_ok"] = True
                 else:
-                    entry["error"] = "Unrecognized URL format"
-                    results.append(entry); continue
-                
-                entry["book"] = book
-                title = book.get("title", "")
-                author = book.get("author_name", "")
-                
-                if title and author:
-                    # Fuzzy match against all books in DB
-                    matched = None
-                    for r in all_books:
-                        if _fuzzy(r["title"], title) and _fuzzy(r["author_name"], author):
-                            matched = r
-                            break
-                    if matched:
-                        entry["status"] = "owned" if matched["owned"] else "tracked"
-                        entry["existing_id"] = matched["id"]
-                        entry["has_url"] = bool(matched["source_url"] and matched["source_url"] != "{}")
-                    else:
-                        entry["status"] = "new"
-                else:
-                    entry["status"] = "new"
-            except Exception as e:
-                entry["error"] = str(e)[:200]
-            results.append(entry)
-            await asyncio.sleep(0.5)
-        return {"results": results}
-    finally: await db.close()
-
-
-@app.post("/api/books/import-add")
-async def import_add_books(data: dict = Body(...)):
-    """Add books from import preview. Expects {books: [{...book data...}]}."""
-    import re
-    from difflib import SequenceMatcher
-    
-    def _norm(s):
-        s = re.sub(r'\s+', ' ', s.lower().strip())
-        s = re.sub(r'\.\s*', '. ', s)
-        return re.sub(r'\s+', ' ', s).strip()
-    
-    def _fuzzy(a, b):
-        return SequenceMatcher(None, _norm(a), _norm(b)).ratio() > 0.85
-    
-    books = data.get("books", [])
-    if not books:
-        raise HTTPException(400, "No books to import")
-    added = 0; updated = 0
-    for book_data in books:
-        try:
-            title = book_data.get("title", "").strip()
-            author_name = book_data.get("author_name", "").strip()
-            if not title or not author_name: continue
-            
+                    s["mam_validation_ok"] = False
+                save_settings(s)
+                if not vr["success"]:
+                    logger.error(f"MAM validation failed — skipping scan: {vr['message']}")
+                    last_scan_at = time.time()
+                    continue
+            # Query total remaining for context
             db = await get_db()
             try:
-                # Fuzzy-match author
-                all_authors = await (await db.execute("SELECT id, name FROM authors")).fetchall()
-                aid = None
-                for a in all_authors:
-                    if _fuzzy(a["name"], author_name):
-                        aid = a["id"]; break
-                if not aid:
-                    cur = await db.execute("INSERT INTO authors (name, sort_name) VALUES (?, ?)", (author_name, author_name))
-                    aid = cur.lastrowid
-                
-                # Fuzzy-match existing book
-                existing_books = await (await db.execute("SELECT id, title, source_url FROM books WHERE author_id=?", (aid,))).fetchall()
-                existing = None
-                for eb in existing_books:
-                    if _fuzzy(eb["title"], title):
-                        existing = eb; break
-                
-                if existing:
-                    if book_data.get("source_url"):
-                        try:
-                            new_urls = json.loads(book_data["source_url"])
-                            old_urls = json.loads(existing["source_url"] or "{}")
-                            old_urls.update(new_urls)
-                            await db.execute("UPDATE books SET source_url=? WHERE id=?", (json.dumps(old_urls), existing["id"]))
-                            updated += 1
-                        except: pass
-                else:
-                    # Find/create series
-                    sid = None
-                    if book_data.get("series_name"):
-                        srow = await (await db.execute("SELECT id FROM series WHERE LOWER(name)=LOWER(?) AND author_id=?", (book_data["series_name"], aid))).fetchone()
-                        if srow: sid = srow["id"]
-                        else:
-                            cur = await db.execute("INSERT INTO series (name, author_id) VALUES (?, ?)", (book_data["series_name"], aid))
-                            sid = cur.lastrowid
-                    
-                    is_unreleased = 1 if book_data.get("is_unreleased") else 0
-                    src = book_data.get("source", "import")
-                    await db.execute(
-                        "INSERT INTO books (title, author_id, series_id, series_index, pub_date, expected_date, is_unreleased, description, isbn, cover_url, source, source_url, owned, is_new) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,1)",
-                        (title, aid, sid, book_data.get("series_index"), book_data.get("pub_date"),
-                         book_data.get("expected_date"), is_unreleased, book_data.get("description"),
-                         book_data.get("isbn"), book_data.get("cover_url"), src,
-                         book_data.get("source_url", "{}"))
-                    )
-                    added += 1
+                rem_row = await db.execute_fetchall(
+                    "SELECT COUNT(*) FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0"
+                )
+                total_remaining = rem_row[0][0] if rem_row else 0
+            finally:
+                await db.close()
+            if total_remaining == 0:
+                logger.info("MAM scheduled scan: no books need scanning")
+                last_scan_at = time.time()
+                continue
+            scan_limit = min(100, total_remaining)
+            logger.info(f"MAM scheduled scan starting ({scan_limit} books, {total_remaining} total remaining)")
+            state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_limit,
+                                  "found": 0, "possible": 0, "not_found": 0,
+                                  "errors": 0, "status": "scanning", "type": "scheduled",
+                                  "remaining": total_remaining}
+            def _sched_progress(stats):
+                state._mam_scan_progress.update({
+                    "scanned": stats["scanned"],
+                    "found": stats["found"],
+                    "possible": stats["possible"],
+                    "not_found": stats["not_found"],
+                    "errors": stats["errors"],
+                })
+            db = await get_db()
+            try:
+                result = await mam_scan_batch(
+                    db, session_id=s["mam_session_id"], limit=100,
+                    delay=s.get("rate_mam", 2), skip_ip_update=True,
+                    format_priority=s.get("mam_format_priority"),
+                    on_progress=_sched_progress,
+                    cancel_check=lambda: state._lookup_progress.get("running", False),
+                    lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
+                )
+                state._mam_scan_progress.update({
+                    "running": False,
+                    "status": "complete" if not result.get("error") else f"error: {result.get('error')}",
+                })
+                await db.execute(
+                    "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
+                    ("mam", time.time(), time.time(),
+                     "complete" if not result.get("error") else "error",
+                     result.get("scanned", 0), result.get("found", 0))
+                )
                 await db.commit()
-            finally: await db.close()
-        except Exception as e:
-            logger.error(f"Import error for '{book_data.get('title')}': {e}")
-    return {"status": "ok", "added": added, "updated": updated}
+                logger.info(f"MAM scheduled scan done: {result.get('scanned', 0)} scanned, {result.get('found', 0)} found")
+            except Exception as e:
+                logger.error(f"MAM scheduled scan error: {e}")
+                state._mam_scan_progress.update({"running": False, "status": f"error: {e}"})
+            finally:
+                await db.close()
+            last_scan_at = time.time()
 
-# ─── Sync ────────────────────────────────────────────────────
-@app.post("/api/sync/calibre")
-async def trigger_sync():
-    try: return {"status": "ok", **(await sync_calibre())}
-    except Exception as e: raise HTTPException(500, str(e))
+    asyncio.create_task(_mam_scheduler())
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+    # Tear down the MAM HTTP session (Phase 22B.2.5)
+    mam_close_session()
 
-@app.post("/api/sync")
-async def trigger_sync_alias():
-    return await trigger_sync()
 
-@app.post("/api/sync/lookup")
-async def trigger_lookup():
-    try: return {"status": "ok", **(await run_full_lookup())}
-    except Exception as e: raise HTTPException(500, str(e))
+# ─── App + Router Registration ───────────────────────────────
+app = FastAPI(title="AthenaScout", lifespan=lifespan)
 
-@app.post("/api/lookup")
-async def trigger_lookup_alias():
-    return await trigger_lookup()
+# All API routes live in app/routers/ — see individual files for endpoints.
+for r in (config, libraries, books, authors, series, covers, scan, mam, db_editor, import_export):
+    app.include_router(r.router)
 
-@app.post("/api/sync/full-rescan")
-async def trigger_full_rescan():
-    """Full re-scan: visits every book page to refresh all metadata."""
-    try: return {"status": "ok", **(await run_full_rescan())}
-    except Exception as e: raise HTTPException(500, str(e))
 
-@app.post("/api/authors/{aid}/lookup")
-async def trigger_author_lookup(aid: int):
-    db = await get_db()
-    try:
-        r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
-        if not r: raise HTTPException(404)
-    finally: await db.close()
-    return {"status": "ok", "new_books": await lookup_author(aid, dict(r)["name"])}
+# ─── Frontend Static File Serving ────────────────────────────
+# Support both source tree and PyInstaller bundle layouts.
+# PyInstaller sets sys._MEIPASS to its temp extraction directory.
+_pyinstaller_base = getattr(sys, '_MEIPASS', None)
+if _pyinstaller_base:
+    FD = Path(_pyinstaller_base) / "frontend" / "dist"
+else:
+    FD = Path(__file__).parent.parent / "frontend" / "dist"
 
-@app.post("/api/authors/{aid}/full-rescan")
-async def trigger_author_full_rescan(aid: int):
-    """Full re-scan for a single author."""
-    db = await get_db()
-    try:
-        r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
-        if not r: raise HTTPException(404)
-    finally: await db.close()
-    return {"status": "ok", "new_books": await lookup_author(aid, dict(r)["name"], full_scan=True)}
-
-# ─── Covers ──────────────────────────────────────────────────
-@app.get("/api/covers/{bid}")
-async def get_cover(bid: int):
-    db = await get_db()
-    try:
-        r = await (await db.execute("SELECT cover_path FROM books WHERE id=?", (bid,))).fetchone()
-        if not r or not r["cover_path"]: raise HTTPException(404)
-        p = Path(r["cover_path"])
-        if not p.exists(): raise HTTPException(404)
-        return FileResponse(p, media_type="image/jpeg")
-    finally: await db.close()
-
-# ─── Frontend ────────────────────────────────────────────────
-FD = Path(__file__).parent.parent / "frontend" / "dist"
 if FD.exists():
-    if (FD / "assets").exists(): app.mount("/assets", StaticFiles(directory=FD / "assets"), name="assets")
+    if (FD / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=FD / "assets"), name="assets")
+
     @app.get("/{path:path}")
     async def serve_fe(path: str):
         fp = FD / path
         return FileResponse(fp if fp.is_file() else FD / "index.html")
+elif IS_STANDALONE:
+    @app.get("/{path:path}")
+    async def serve_fe_missing(path: str):
+        return {"error": "Frontend not built. Run 'cd frontend && npm install && npm run build' first."}

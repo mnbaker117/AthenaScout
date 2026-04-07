@@ -11,17 +11,29 @@ services:
       # Host port : Container port — change left side to use a different host port
       - "8787:8787"
     volumes:
-      # Mount your Calibre library folder (read-only)
-      # Update the left side to match your Calibre library path
-      - /mnt/user/appdata/calibre/Calibre Library:/calibre:ro
+      # Mount your Calibre library root (read-only)
+      # All subdirectories containing metadata.db will be discovered as libraries
+      # Example: if /calibre contains /calibre/books/ and /calibre/Calibre Library/,
+      # both will appear as separate libraries in the app
+      - /mnt/user/appdata/calibre:/calibre:ro
       # Persistent data for the app's database and settings (survives restarts/updates)
       - ./data:/app/data
+      # Extra library locations (uncomment and update to match CALIBRE_EXTRA_PATHS):
+      # - /mnt/user/downloads:/downloads:ro
+      # - /mnt/user/other-libs:/extra-libs:ro
     environment:
       # ── Calibre Library ──────────────────────────────────────
-      # Path to metadata.db inside the container (matches volume mount above)
-      - CALIBRE_DB_PATH=/calibre/metadata.db
-      # Path to the Calibre library root (for cover images)
-      - CALIBRE_LIBRARY_PATH=/calibre
+      # Root path to scan for Calibre libraries (finds all metadata.db files)
+      # Each subdirectory with a metadata.db becomes a separate library
+      - CALIBRE_PATH=/calibre
+      # Additional mount points (comma-delimited, NOT auto-scanned at startup)
+      # These make extra filesystem locations visible to the container.
+      # Use the Settings UI to manually add library sources from these paths.
+      # Each path needs a matching volume mount below.
+      - CALIBRE_EXTRA_PATHS=
+      # Legacy single-library mode (uncomment to use instead of CALIBRE_PATH):
+      # - CALIBRE_DB_PATH=/calibre/metadata.db
+      # - CALIBRE_LIBRARY_PATH=/calibre
 
       # ── Calibre Web Integration (optional) ───────────────────
       # URL of your Calibre-Web instance (janeczku/calibre-web or calibre-web-automated)

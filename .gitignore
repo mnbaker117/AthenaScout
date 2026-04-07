@@ -35,3 +35,10 @@ settings.json
 # Environment
 .env
 .env.local
+
+# PyInstaller
+build/
+/dist/
+
+# Standalone data (user-specific)
+athenascout_data/

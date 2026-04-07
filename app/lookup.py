@@ -367,12 +367,13 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     return total
 
 
-async def run_full_lookup():
+async def run_full_lookup(on_progress=None):
     logger.info("Starting scheduled lookup...")
     reload_sources()
     start = time.time()
     settings = load_settings()
     cache_sec = settings.get("lookup_interval_days", 3) * 86400
+    sid = None
     db = await get_db()
     try:
         cur = await db.execute("INSERT INTO sync_log (sync_type, started_at) VALUES (?, ?)", ("lookup", start))
@@ -381,23 +382,36 @@ async def run_full_lookup():
         authors = list(rows)
         total = 0; checked = 0
         for a in authors:
+            if on_progress:
+                on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": total})
             try: total += await lookup_author(a["id"], a["name"]); checked += 1
             except Exception as e: logger.error(f"Error for {a['name']}: {e}")
+        if on_progress:
+            on_progress({"checked": checked, "total": len(authors), "current_author": "", "new_books": total})
         await db.execute("UPDATE sync_log SET finished_at=?,status='complete',books_found=?,books_new=? WHERE id=?", (time.time(), checked, total, sid))
         await db.commit()
         logger.info(f"Lookup done: {checked} authors, {total} new books")
         return {"authors_checked": checked, "new_books": total}
     except Exception as e:
-        await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid)); await db.commit(); raise
+        if sid:
+            try:
+                await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid))
+                await db.commit()
+            except Exception as cleanup_err:
+                # Don't mask the original error, but don't lose the cleanup
+                # failure either — log it so debugging is possible.
+                logger.warning(f"Failed to mark sync_log {sid} as errored: {cleanup_err}")
+        raise
     finally:
         await db.close()
 
 
-async def run_full_rescan():
+async def run_full_rescan(on_progress=None):
     """Full re-scan: visits every book page to refresh metadata, ignoring skip optimizations."""
     logger.info("Starting FULL RE-SCAN of all authors...")
     reload_sources()
     start = time.time()
+    sid = None
     db = await get_db()
     try:
         cur = await db.execute("INSERT INTO sync_log (sync_type, started_at) VALUES (?, ?)", ("full_rescan", start))
@@ -406,13 +420,25 @@ async def run_full_rescan():
         authors = list(rows)
         total = 0; checked = 0
         for a in authors:
+            if on_progress:
+                on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": total})
             try: total += await lookup_author(a["id"], a["name"], full_scan=True); checked += 1
             except Exception as e: logger.error(f"Full re-scan error for {a['name']}: {e}")
+        if on_progress:
+            on_progress({"checked": checked, "total": len(authors), "current_author": "", "new_books": total})
         await db.execute("UPDATE sync_log SET finished_at=?,status='complete',books_found=?,books_new=? WHERE id=?", (time.time(), checked, total, sid))
         await db.commit()
         logger.info(f"Full re-scan done: {checked} authors, {total} new books")
         return {"authors_checked": checked, "new_books": total}
     except Exception as e:
-        await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid)); await db.commit(); raise
+        if sid:
+            try:
+                await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid))
+                await db.commit()
+            except Exception as cleanup_err:
+                # Don't mask the original error, but don't lose the cleanup
+                # failure either — log it so debugging is possible.
+                logger.warning(f"Failed to mark sync_log {sid} as errored: {cleanup_err}")
+        raise
     finally:
         await db.close()

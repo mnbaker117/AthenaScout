@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=AthenaScout
+GenericName=Library Tracker
+Comment=Self-hosted book library completionist tracker
+Exec=athenascout
+Icon=athenascout
+Terminal=true
+Categories=Office;Database;Utility;
+StartupNotify=true
+Keywords=books;calibre;library;tracker;ebook;

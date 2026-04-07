@@ -1,0 +1,5 @@
+#!/bin/bash
+# AppImage entry point — locates the bundled athenascout binary and execs it.
+# AppImage extracts to a temp dir at runtime; HERE resolves to that location.
+HERE="$(dirname "$(readlink -f "${0}")")"
+exec "${HERE}/usr/bin/athenascout/athenascout" "$@"

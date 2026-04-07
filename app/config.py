@@ -1,12 +1,27 @@
 import os
+import re as _re
 import json
+import logging
 from pathlib import Path
+from app.runtime import IS_DOCKER, get_data_dir
 
-CALIBRE_DB_PATH = os.getenv("CALIBRE_DB_PATH", "/calibre/metadata.db")
-CALIBRE_LIBRARY_PATH = os.getenv("CALIBRE_LIBRARY_PATH", "/calibre")
+_cfg_logger = logging.getLogger("athenascout.config")
+
+CALIBRE_PATH = os.getenv("CALIBRE_PATH", "")
+CALIBRE_EXTRA_PATHS = os.getenv("CALIBRE_EXTRA_PATHS", "")
+# In Docker, default to container paths. In standalone, default to empty
+# (user configures via Settings UI or setup wizard).
+CALIBRE_DB_PATH = os.getenv("CALIBRE_DB_PATH", "/calibre/metadata.db" if IS_DOCKER else "")
+CALIBRE_LIBRARY_PATH = os.getenv("CALIBRE_LIBRARY_PATH", "/calibre" if IS_DOCKER else "")
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
 LOOKUP_INTERVAL_MINUTES = int(os.getenv("LOOKUP_INTERVAL_MINUTES", "4320"))
-DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+MAM_SESSION_ID = os.getenv("MAM_SESSION_ID", "")
+# MAM_SKIP_IP_UPDATE removed — always True (IP registration skipped)
+MAM_SCAN_INTERVAL_MINUTES = int(os.getenv("MAM_SCAN_INTERVAL_MINUTES", "360"))
+# DATA_DIR: use explicit env var if set, otherwise OS-appropriate default.
+# Docker sets DATA_DIR=/app/data in Dockerfile. Standalone gets OS standard location.
+_data_dir_env = os.getenv("DATA_DIR", "")
+DATA_DIR = Path(_data_dir_env) if _data_dir_env else get_data_dir()
 APP_DB_PATH = DATA_DIR / "athenascout.db"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
@@ -51,8 +66,23 @@ DEFAULT_SETTINGS = {
     "rate_fantasticfiction": 2,
     "rate_kobo": 3,
     "verbose_logging": False,
+    "author_scanning_enabled": True,
     "calibre_web_url": "",
     "calibre_url": "",
+    "mam_session_id": "",
+    "mam_enabled": False,
+    "mam_scanning_enabled": True,
+    "mam_skip_ip_update": True,
+    "mam_scan_interval_minutes": 360,
+    "mam_format_priority": ["epub", "azw", "azw3", "pdf", "djvu", "azw4"],
+    "rate_mam": 2,
+    "mam_full_scan_batch_delay_minutes": 60,
+    "last_mam_validated_at": None,
+    "mam_validation_ok": True,
+    "active_library": "",
+    "calibre_mtimes": {},
+    "library_sources": [],
+    "setup_complete": False,
 }
 
 
@@ -62,11 +92,128 @@ def apply_logging(verbose: bool = False):
     level = logging.DEBUG if verbose else logging.INFO
     # Set source loggers
     for name in ["athenascout", "athenascout.goodreads", "athenascout.hardcover", "athenascout.fantasticfiction",
-                 "athenascout.kobo", "athenascout.lookup", "athenascout.calibre_sync"]:
+                 "athenascout.kobo", "athenascout.lookup", "athenascout.calibre_sync", "athenascout.mam"]:
         logging.getLogger(name).setLevel(level)
     # Keep httpx at INFO always (too noisy at DEBUG)
     logging.getLogger("httpx").setLevel(logging.INFO)
     logging.getLogger("athenascout").info(f"Logging set to {'VERBOSE (DEBUG)' if verbose else 'NORMAL (INFO)'}")
+
+
+def slugify(name):
+    """Convert a folder name to a safe slug for DB filenames."""
+    s = name.lower().strip()
+    s = _re.sub(r'[^a-z0-9]+', '-', s)
+    s = s.strip('-')
+    return s or 'default'
+
+
+def get_extra_mount_paths():
+    """Collect extra mount paths from all registered library apps.
+
+    Each app can define its own EXTRA_PATHS env var. All valid paths
+    are merged into a single list for the Settings UI.
+    """
+    from app.library_apps import get_all_apps
+    all_paths = []
+    # Include paths from all registered apps
+    for app_type, app in get_all_apps().items():
+        for p in app.get_extra_paths():
+            if p not in all_paths:
+                all_paths.append(p)
+    # Also include legacy CALIBRE_EXTRA_PATHS for backward compat
+    if CALIBRE_EXTRA_PATHS:
+        for p in [x.strip() for x in CALIBRE_EXTRA_PATHS.split(",") if x.strip()]:
+            if Path(p).exists() and p not in all_paths:
+                all_paths.append(p)
+    return all_paths
+
+
+def discover_libraries(settings=None):
+    """Find all libraries from all registered source apps. Returns list of dicts.
+
+    Priority:
+    1. User-configured library_sources in settings
+    2. Registered library apps (each checks its own env var)
+    3. CALIBRE_DB_PATH env var (legacy single-library fallback)
+
+    Each library dict includes: name, slug, app_type, content_type,
+    display_name, source_db_path, library_path
+    """
+    from app.library_apps import get_all_apps
+
+    libraries = []
+    seen_slugs = set()
+
+    def _add_library(lib_dict):
+        """Add a library, deduplicating by slug."""
+        slug = lib_dict["slug"]
+        base_slug = slug
+        counter = 2
+        while slug in seen_slugs:
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        seen_slugs.add(slug)
+        lib_dict["slug"] = slug
+        libraries.append(lib_dict)
+
+    # Priority 1: User-configured library sources (from Settings UI)
+    if settings and settings.get("library_sources"):
+        for src in settings["library_sources"]:
+            src_path = src.get("path", "")
+            src_type = src.get("type", "root")
+            src_app = src.get("app_type", "calibre")
+            if not src_path:
+                continue
+            app = get_all_apps().get(src_app)
+            if not app:
+                _cfg_logger.warning(f"Unknown app type '{src_app}' in library_sources, skipping")
+                continue
+            if src_type == "root":
+                for lib in app.discover(src_path):
+                    _add_library(lib)
+            elif src_type == "direct":
+                mdb = Path(src_path)
+                if mdb.exists() and mdb.name == app.db_filename:
+                    _add_library({
+                        "name": mdb.parent.name,
+                        "slug": slugify(mdb.parent.name),
+                        "app_type": app.app_type,
+                        "content_type": app.content_type,
+                        "display_name": app.display_name,
+                        "source_db_path": str(mdb),
+                        "library_path": str(mdb.parent),
+                    })
+                else:
+                    _cfg_logger.warning(f"Direct library path not found or invalid: {src_path}")
+        if libraries:
+            return libraries
+
+    # Priority 2: Registered library apps (each checks its env var)
+    for app_type, app in get_all_apps().items():
+        root_path = app.get_root_path()
+        if root_path:
+            found = app.discover(root_path)
+            for lib in found:
+                _add_library(lib)
+
+    if libraries:
+        return libraries
+
+    # Priority 3: Legacy CALIBRE_DB_PATH (single direct path)
+    if CALIBRE_DB_PATH:
+        legacy_mdb = Path(CALIBRE_DB_PATH)
+        if legacy_mdb.exists():
+            _add_library({
+                "name": legacy_mdb.parent.name,
+                "slug": slugify(legacy_mdb.parent.name),
+                "app_type": "calibre",
+                "content_type": "ebook",
+                "display_name": "Calibre",
+                "source_db_path": str(legacy_mdb),
+                "library_path": str(legacy_mdb.parent),
+            })
+
+    return libraries
 
 
 def load_settings() -> dict:
@@ -82,8 +229,7 @@ def load_settings() -> dict:
                 merged["rate_hardcover"] = max(1, old_rate - 1)
                 merged["rate_fantasticfiction"] = old_rate
                 merged["rate_kobo"] = old_rate + 1
-            # Env vars always override when set (Docker-idiomatic)
-            _apply_env_overrides(merged)
+            # Env vars only seed on first run — settings.json is source of truth
             return merged
         except Exception:
             pass
@@ -95,7 +241,7 @@ def load_settings() -> dict:
 
 
 def _apply_env_overrides(settings: dict):
-    """Apply env vars only when the setting is empty/unset — never overwrite user customizations."""
+    """Seed settings from Docker env vars on first run only. After settings.json exists, this is never called."""
     if ENV_HARDCOVER_API_KEY and not settings.get("hardcover_api_key"):
         settings["hardcover_api_key"] = ENV_HARDCOVER_API_KEY
     if ENV_CALIBRE_WEB_URL and not settings.get("calibre_web_url"):
@@ -104,6 +250,10 @@ def _apply_env_overrides(settings: dict):
         settings["calibre_url"] = ENV_CALIBRE_URL
     if ENV_VERBOSE_LOGGING and not settings.get("verbose_logging"):
         settings["verbose_logging"] = True
+    if MAM_SESSION_ID and not settings.get("mam_session_id"):
+        settings["mam_session_id"] = MAM_SESSION_ID
+    # mam_skip_ip_update is always True — IP registration can
+    # interfere with seedbox sessions regardless of lock type
 
 
 def save_settings(settings: dict):

@@ -1,0 +1,55 @@
+Name:           athenascout
+Version:        {VERSION}
+Release:        1%{?dist}
+Summary:        Self-hosted book library completionist tracker
+License:        MIT
+URL:            https://github.com/mnbaker117/AthenaScout
+Source0:        athenascout-%{version}.tar.gz
+BuildArch:      x86_64
+
+# PyInstaller bundle is fully self-contained — disable RPM's automatic
+# dependency detection which would otherwise try to require system Python
+# libraries that we've already bundled.
+AutoReqProv:    no
+
+%description
+AthenaScout syncs Calibre libraries with metadata sources to identify
+missing books from collected authors and series. Supports Goodreads,
+Hardcover, Kobo, FantasticFiction, and MyAnonamouse integration.
+
+Web UI accessible at http://localhost:8787 after launching.
+
+%prep
+%setup -q
+
+%install
+# Install PyInstaller output to /opt/athenascout
+mkdir -p %{buildroot}/opt/athenascout
+cp -r * %{buildroot}/opt/athenascout/
+
+# Move desktop file and icon out of /opt to standard system locations
+mkdir -p %{buildroot}/usr/share/applications
+mv %{buildroot}/opt/athenascout/athenascout.desktop %{buildroot}/usr/share/applications/
+
+mkdir -p %{buildroot}/usr/share/icons/hicolor/256x256/apps
+mv %{buildroot}/opt/athenascout/athenascout.png %{buildroot}/usr/share/icons/hicolor/256x256/apps/
+
+# Create a wrapper script in /usr/bin so 'athenascout' works from anywhere.
+# A symlink would break the PyInstaller bundle (which expects to run from
+# its own directory next to _internal/).
+mkdir -p %{buildroot}/usr/bin
+cat > %{buildroot}/usr/bin/athenascout << 'EOF'
+#!/bin/bash
+exec /opt/athenascout/athenascout "$@"
+EOF
+chmod +x %{buildroot}/usr/bin/athenascout
+
+%files
+/opt/athenascout
+/usr/bin/athenascout
+/usr/share/applications/athenascout.desktop
+/usr/share/icons/hicolor/256x256/apps/athenascout.png
+
+%changelog
+* Mon Apr 06 2026 Mark Baker - {VERSION}-1
+- Release {VERSION}
