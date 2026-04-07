@@ -15,7 +15,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -345,20 +345,32 @@ class AuthMiddleware(BaseHTTPMiddleware):
     (HTML, JS, CSS, images) can always load. API requests in the public
     allowlist also pass through. Every other API request must carry a
     valid signed session cookie.
+
+    Also forces `Cache-Control: no-store` on every /api/* response. API
+    payloads are dynamic (scan progress, library state, etc.) and must
+    never be served from the browser HTTP cache. Without this header,
+    FileResponse heuristics or upstream caches can poison API URLs with
+    a stale `index.html` body — observed in the wild when an unauth'd
+    request fell through the SPA fallback once and the browser then
+    cached that HTML against the API URL, silently breaking polling.
     """
     async def dispatch(self, request, call_next):
         path = request.url.path
         if not path.startswith("/api/"):
             return await call_next(request)
         if path in _PUBLIC_API_PATHS:
-            return await call_next(request)
-        token = request.cookies.get(SESSION_COOKIE_NAME, "")
-        if verify_session_token(token) is None:
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Authentication required"},
-            )
-        return await call_next(request)
+            response = await call_next(request)
+        else:
+            token = request.cookies.get(SESSION_COOKIE_NAME, "")
+            if verify_session_token(token) is None:
+                response = JSONResponse(
+                    status_code=401,
+                    content={"detail": "Authentication required"},
+                )
+            else:
+                response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 app.add_middleware(AuthMiddleware)
@@ -408,6 +420,20 @@ if FD.exists():
         Anything else — including all client-side SPA routes — falls
         through to index.html so the React router can take over.
 
+        Two important guards:
+
+        1. Paths that look like API calls (`api/...`) get a real 404
+           instead of the SPA index. Without this, a request to a
+           non-existent or not-yet-registered API route would receive
+           `index.html`, and browsers happily cache that against the
+           API URL — silently breaking subsequent fetches to the same
+           URL even after the route exists. We hit this exact bug with
+           polling fetches to /api/lookup/status during scan progress.
+        2. The SPA index is served with `Cache-Control: no-cache` so
+           the browser must revalidate on every request. The hashed
+           assets under /assets/ are still cacheable (mounted via
+           StaticFiles, unaffected by this).
+
         Security: user input is ONLY used as a key into the
         `_SERVE_FE_FILES` dict, which is built from `FD.iterdir()` at
         startup. The path values served to FileResponse always come
@@ -416,10 +442,12 @@ if FD.exists():
         and is a pattern CodeQL's py/path-injection rule recognizes
         as a sanitizer.
         """
+        if path.startswith("api/") or path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
         safe_file = _SERVE_FE_FILES.get(path)
         if safe_file is not None:
             return FileResponse(safe_file)
-        return FileResponse(_INDEX_HTML)
+        return FileResponse(_INDEX_HTML, headers={"Cache-Control": "no-cache"})
 elif IS_STANDALONE:
     @app.get("/{path:path}")
     async def serve_fe_missing(path: str):
