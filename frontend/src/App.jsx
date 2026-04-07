@@ -1,112 +1,24 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { THEMES, TC, useTheme } from "./theme";
 import { api } from "./api";
-import { pct, fmtDate } from "./lib/format";
 import { Ic } from "./icons";
 import { usePersist } from "./hooks/usePersist";
 import { NAV } from "./lib/constants";
 import { Btn } from "./components/Btn";
 import { Spin } from "./components/Spin";
 import { Load } from "./components/Load";
-import { SBRow } from "./components/SBRow";
+import { PB } from "./components/PB";
+import { Section } from "./components/Section";
+import { BGrid, BList } from "./components/BookViews";
+import { BookSidebar } from "./components/BookSidebar";
 import { AddBookModal } from "./components/AddBookModal";
 import { UrlSearchModal } from "./components/UrlSearchModal";
 import { ExportModal } from "./components/ExportModal";
 import { SetupWizard } from "./components/SetupWizard";
 import Dashboard from "./pages/Dashboard";
 import ImportExportPage from "./pages/ImportExportPage";
-
-// ─── Shared Components ──────────────────────────────────────
-function PB({owned,total}){const t=useTheme();const p=pct(owned,total);return<div style={{height:5,borderRadius:3,background:t.bg4,overflow:"hidden"}}><div style={{width:`${p}%`,height:"100%",borderRadius:3,background:p===100?t.grn:p>50?t.ylw:t.red,transition:"width 0.3s"}}/></div>}
-function VT({mode,setMode}){const t=useTheme();return<div style={{display:"flex",borderRadius:6,border:`1px solid ${t.border}`,overflow:"hidden",height:34}}>{["grid","list"].map(m=><button key={m} onClick={()=>setMode(m)} style={{padding:"0 12px",fontSize:12,fontWeight:500,border:"none",cursor:"pointer",background:mode===m?t.bg4:"transparent",color:mode===m?t.accent:t.tg,textTransform:"capitalize",height:"100%"}}>{m==="grid"?"Grid":"List"}</button>)}</div>}
-
-// ─── Search Bar with Clear Button ───────────────────────────
-function SearchBar({value,onChange,placeholder="Search..."}){const t=useTheme();return<div style={{position:"relative",flex:1,maxWidth:340}}><input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={{width:"100%",padding:"8px 32px 8px 34px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:8,color:t.text2,fontSize:13}}/><span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:t.tg,pointerEvents:"none"}}>{Ic.search}</span>{value&&<button onClick={()=>onChange("")} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:t.tg,padding:2,display:"flex"}}>{Ic.x}</button>}</div>}
-
-// ─── Book Detail Sidebar ────────────────────────────────────
-function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}){const t=useTheme();const[editing,setEditing]=useState(false);const[ef,setEf]=useState({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");
-useEffect(()=>{api.get("/settings").then(s=>setCwUrl(s.calibre_web_url||"")).catch(()=>{})},[]);
-if(!book)return null;
-const startEdit=()=>{setEf({title:book.title||"",description:book.description||"",pub_date:book.pub_date||"",expected_date:book.expected_date||"",isbn:book.isbn||"",series_index:book.series_index||"",is_unreleased:!!book.is_unreleased,source_url:book.source_url||"",mam_url:book.mam_url||""});setEditing(true)};
-const saveEdit=async()=>{setSaving(true);try{await api.put(`/books/${book.id}`,ef);setEditing(false);onEdit&&onEdit()}catch{}setSaving(false)};
-const upE=(k,v)=>setEf(p=>({...p,[k]:v}));
-const ist={padding:"6px 8px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13,width:"100%"};
-
-return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{position:"fixed",top:0,right:0,width:420,maxWidth:"90vw",height:"100vh",background:t.bg2,borderLeft:`1px solid ${t.border}`,zIndex:100,overflowY:"auto",padding:24,display:"flex",flexDirection:"column",gap:16,boxShadow:"-4px 0 20px rgba(0,0,0,0.3)"}}>
-<div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
-<h2 style={{fontSize:18,fontWeight:700,color:t.text,margin:0,flex:1,lineHeight:1.3}}>{editing?<input value={ef.title} onChange={e=>upE("title",e.target.value)} style={{...ist,fontSize:16,fontWeight:700}}/>:book.title}</h2>
-<div className="sb-actions" style={{display:"flex",gap:8,flexShrink:0}}>{!editing&&<button onClick={startEdit} style={{background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",color:t.tg,padding:8,minWidth:36,minHeight:36,display:"flex",alignItems:"center",justifyContent:"center"}}>{Ic.edit}</button>}<button onClick={onClose} style={{background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",color:t.tg,padding:8,minWidth:36,minHeight:36,display:"flex",alignItems:"center",justifyContent:"center"}}>{Ic.x}</button></div></div>
-{(book.cover_url||book.cover_path)?<img src={book.cover_url||`/api/covers/${book.id}`} alt="" style={{width:"100%",maxHeight:300,objectFit:"contain",borderRadius:8,background:t.bg4}}/>:null}
-<div style={{display:"flex",flexDirection:"column",gap:10}}>
-<SBRow label="Author" value={book.author_name}/>
-{book.series_name?<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Series</span><span style={{fontSize:13,color:t.purt,textAlign:"right"}}>{book.series_name}{book.series_index?<span style={{color:t.td}}> (#{book.series_index}{book.series_total?` of ${book.series_total}`:""})</span>:null}</span></div>:null}
-{editing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
-<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Published</span><input type="date" value={ef.pub_date} onChange={e=>upE("pub_date",e.target.value)} style={ist}/></div>
-<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Expected Date</span><input type="date" value={ef.expected_date} onChange={e=>upE("expected_date",e.target.value)} style={ist}/></div>
-<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>ISBN</span><input value={ef.isbn} onChange={e=>upE("isbn",e.target.value)} style={ist}/></div>
-<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Series #</span><input type="number" value={ef.series_index} onChange={e=>upE("series_index",e.target.value)} style={ist}/></div>
-<div style={{display:"flex",alignItems:"center",gap:6}}><input type="checkbox" checked={ef.is_unreleased} onChange={e=>upE("is_unreleased",e.target.checked)}/><span style={{fontSize:12,color:t.text2}}>Unreleased</span></div>
-<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Source URL</span><input value={ef.source_url} onChange={e=>upE("source_url",e.target.value)} placeholder="https://www.goodreads.com/book/show/..." style={ist}/></div>
-<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM URL</span><input value={ef.mam_url} onChange={e=>upE("mam_url",e.target.value)} placeholder="https://www.myanonamouse.net/t/123456" style={ist}/><span style={{fontSize:10,color:t.tg,marginTop:2,display:"block"}}>Paste a MAM torrent URL to set status to Found. Clear to reset.</span></div>
-<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Description</span><textarea value={ef.description} onChange={e=>upE("description",e.target.value)} rows={4} style={{...ist,resize:"vertical"}}/></div>
-<div style={{display:"flex",gap:6}}><Btn size="sm" variant="accent" onClick={saveEdit} disabled={saving}>{saving?<Spin/>:"Save"}</Btn><Btn size="sm" variant="ghost" onClick={()=>setEditing(false)}>Cancel</Btn></div>
-</div>:<>
-<SBRow label="Published" value={book.pub_date?fmtDate(book.pub_date):book.expected_date?`Expected: ${fmtDate(book.expected_date)}`:"Unknown"}/>
-<SBRow label="Status" value={book.owned?"Owned":"Missing"} color={book.owned?t.grnt:t.ylwt}/>
-<SBRow label="Source" value={book.owned?"Calibre":"Unowned"} color={book.owned?t.td:t.tg}/>
-{cwUrl&&book.owned&&book.calibre_id?<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Calibre Web</span><a href={`${cwUrl.replace(/\/$/,"")}/book/${book.calibre_id}`} target="_blank" rel="noopener noreferrer" style={{fontSize:13,color:t.accent,textDecoration:"none",display:"flex",alignItems:"center",gap:4}}>Open in Calibre Web <span style={{fontSize:10}}>↗</span></a></div>:null}
-{(()=>{
-  const badgeColors={goodreads:{bg:"#553b1a",fg:"#e8c070",br:"#88642a"},hardcover:{bg:"#1a3355",fg:"#70a8e8",br:"#2a5588"},kobo:{bg:"#1a4533",fg:"#70e8a8",br:"#2a8855"},fantasticfiction:{bg:"#3a1a55",fg:"#c070e8",br:"#5a2a88"},manual:{bg:t.bg4,fg:t.td,br:t.border}};
-  const order=["goodreads","hardcover","kobo","fantasticfiction"];
-  let urls={};try{urls=JSON.parse(book.source_url||"{}")}catch{if(book.source_url&&book.source_url.startsWith("http"))urls={[book.source||"unknown"]:book.source_url}}
-  const entries=order.filter(k=>urls[k]).map(k=>({name:k,url:urls[k]}));
-  if(entries.length===0)return null;
-  return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:4}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Metadata</span><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{entries.map(e=>{const c=badgeColors[e.name]||badgeColors.manual;return<a key={e.name} href={e.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:c.bg,color:c.fg,border:`1px solid ${c.br}`}}>{e.name}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>})}</div></div>
-})()}
-{book.mam_status?<div>
-<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:4}}>
-<span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM</span>
-{book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",color:book.mam_status==="found"?t.grnt:t.ylwt,border:`1px solid ${book.mam_status==="found"?"#2a882a":"#88882a"}`}}>{book.mam_status==="found"?"Found":"Possible"}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>:book.mam_status==="not_found"?<span style={{fontSize:12,color:t.tg,fontStyle:"italic"}}>{book.owned?"Not on MAM (upload candidate)":"Not on MAM"}</span>:null}
-</div>
-{book.mam_url&&(book.mam_formats||book.mam_has_multiple)?<div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"flex-end",marginTop:3}}>
-{book.mam_formats?<span style={{fontSize:11,color:t.td,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.03em"}}>{book.mam_formats.split(",").join(" · ")}</span>:null}
-{book.mam_has_multiple?<span style={{fontSize:11,padding:"1px 6px",borderRadius:4,background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}33`}}>Multiple uploads</span>:null}
-</div>:null}
-</div>:null}
-{book.rating?<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Rating</span><span style={{fontSize:13,color:t.ylwt}}>{"★".repeat(Math.round(book.rating))}{"☆".repeat(5-Math.round(book.rating))} <span style={{fontSize:11,color:t.td}}>({book.rating})</span></span></div>:null}
-{book.isbn?<SBRow label="ISBN" value={book.isbn}/>:null}
-{book.page_count?<SBRow label="Pages" value={book.page_count}/>:null}
-{book.language?<SBRow label="Language" value={book.language}/>:null}
-{book.publisher?<SBRow label="Publisher" value={book.publisher}/>:null}
-{book.formats?<SBRow label="Formats" value={book.formats}/>:null}
-{book.tags?<div style={{marginTop:4}}><div style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase",marginBottom:4}}>Tags</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{book.tags.split(", ").map(tag=><span key={tag} style={{padding:"2px 8px",borderRadius:4,fontSize:11,background:t.purb,color:t.purt,border:`1px solid ${t.pur}33`}}>{tag}</span>)}</div></div>:null}
-{book.description?<div style={{marginTop:4}}><div style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase",marginBottom:4}}>Description</div><p style={{fontSize:13,color:t.td,lineHeight:1.5,margin:0,maxHeight:200,overflow:"auto"}}>{book.description}</p></div>:null}
-</>}
-</div>
-{!editing&&!book.owned?<div className="sb-actions" style={{display:"flex",gap:8,marginTop:"auto",paddingTop:12,borderTop:`1px solid ${t.borderL}`,flexWrap:"wrap"}}>
-<Btn size="sm" onClick={()=>{onAction("dismiss",book.id);onClose()}}>Dismiss</Btn>
-<Btn size="sm" onClick={()=>{onAction("hide",book.id);onClose()}}>{Ic.hide} Hide</Btn>
-<Btn size="sm" onClick={()=>{if(confirm(`Delete "${book.title}" permanently? This cannot be undone.`)){onAction("delete",book.id);onClose()}}} style={{background:"#6b2020",borderColor:"#8b3030",color:"#ff9090"}}>Delete</Btn>
-</div>:null}
-</div>}
-
-// ─── Book Card ──────────────────────────────────────────────
-function BCard({book,onAction,onClick,showAuthor,highlightAuthorId,showMamLink}){const t=useTheme();const isUp=!!book.is_unreleased;const hasCover=book.cover_url||book.cover_path;const isOtherAuthor=highlightAuthorId&&book.author_id&&book.author_id!==highlightAuthorId;
-return<div onClick={()=>onClick&&onClick(book)} style={{minWidth:160,maxWidth:200,flex:"1 1 160px",background:t.bg2,border:`1px solid ${isUp?t.cyan+"66":t.border}`,borderRadius:10,overflow:"hidden",cursor:"pointer",transition:"border-color 0.2s",position:"relative",opacity:isOtherAuthor?0.55:1}}>{isUp?<span style={{position:"absolute",top:6,left:6,fontSize:9,fontWeight:700,background:t.cyan,color:"#fff",padding:"2px 6px",borderRadius:4,zIndex:2}}>UPCOMING</span>:null}{book.is_new?<span style={{position:"absolute",top:6,right:6,fontSize:9,fontWeight:700,background:t.red,color:"#fff",padding:"2px 6px",borderRadius:4,zIndex:2}}>NEW</span>:null}{book.owned===1&&!book.is_new?<span style={{position:"absolute",top:6,right:6,fontSize:9,fontWeight:600,background:t.grn,color:"#fff",padding:"2px 6px",borderRadius:4,zIndex:2}}>OWNED</span>:null}
-<div style={{height:200,background:t.bg3,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",opacity:isUp?0.7:1}}>{hasCover?<img src={book.cover_url||`/api/covers/${book.id}`} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="flex"}}/>:null}<div style={{display:hasCover?"none":"flex",flexDirection:"column",alignItems:"center",gap:4,color:t.tg,fontSize:12,textAlign:"center",padding:12}}><span style={{fontSize:28}}>?</span><span>{book.title}</span></div></div>
-<div style={{padding:"8px 10px"}}><div style={{fontSize:13,fontWeight:600,color:t.text2,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{book.title}</div>{book.series_name&&book.series_index?<div style={{fontSize:10,color:t.purt,marginTop:1}}>#{book.series_index}{book.series_total?` of ${book.series_total}`:""}</div>:null}{showAuthor&&book.author_name?<div style={{fontSize:11,color:isOtherAuthor?t.ylwt:t.td,marginTop:2}}>{book.author_name}</div>:null}{isUp&&book.expected_date?<div style={{fontSize:11,color:t.cyant,marginTop:2}}>Expected: {fmtDate(book.expected_date)}</div>:null}{showMamLink&&book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{display:"inline-flex",alignItems:"center",gap:3,marginTop:3,fontSize:10,fontWeight:600,color:book.mam_status==="found"?t.grnt:t.ylwt,textDecoration:"none",padding:"2px 6px",borderRadius:4,background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",border:`1px solid ${book.mam_status==="found"?"#2a882a33":"#88882a33"}`}}>MAM ↗</a>:null}</div></div>}
-
-// ─── Book List Row ──────────────────────────────────────────
-function BListRow({book,onAction,onClick,showAuthor,highlightAuthorId,showMamLink}){const t=useTheme();const isOtherAuthor=highlightAuthorId&&book.author_id&&book.author_id!==highlightAuthorId;return<tr onClick={()=>onClick&&onClick(book)} style={{cursor:"pointer",borderBottom:`1px solid ${t.borderL}`,opacity:isOtherAuthor?0.55:1}}><td style={{padding:"8px 12px",fontSize:13,color:t.text2}}>{book.title}{book.is_new?<span style={{marginLeft:8,fontSize:9,fontWeight:700,background:t.red,color:"#fff",padding:"1px 5px",borderRadius:3}}>NEW</span>:null}{book.is_unreleased?<span style={{marginLeft:8,fontSize:9,fontWeight:700,background:t.cyan,color:"#fff",padding:"1px 5px",borderRadius:3}}>UPCOMING</span>:null}</td>{showAuthor?<td style={{padding:"8px 12px",fontSize:13,color:isOtherAuthor?t.ylwt:t.td}}>{book.author_name}</td>:null}<td style={{padding:"8px 12px",fontSize:13,color:t.td}}>{book.series_name?`${book.series_name}${book.series_index?` #${book.series_index}`:""}${book.series_total?` (${book.series_total})`:""}`:"—"}</td><td style={{padding:"8px 12px",fontSize:13,color:book.pub_date?t.td:book.expected_date?t.cyant:t.tg}}>{book.pub_date?fmtDate(book.pub_date):book.expected_date?fmtDate(book.expected_date):"Unknown"}</td><td style={{padding:"8px 12px",fontSize:11,color:t.tg}}>{book.source||"—"}</td>{showMamLink?<td style={{padding:"8px 12px"}}>{book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:11,fontWeight:600,color:book.mam_status==="found"?t.grnt:t.ylwt,textDecoration:"none",padding:"2px 8px",borderRadius:4,background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",border:`1px solid ${book.mam_status==="found"?"#2a882a33":"#88882a33"}`}}>MAM ↗</a>:<span style={{fontSize:11,color:t.tg}}>—</span>}</td>:null}</tr>}
-
-// ─── Book Grid + List Wrappers ──────────────────────────────
-function BGrid({books,onAction,onBookClick,showAuthor,highlightAuthorId,showMamLink}){return<div className="book-grid" style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"start"}}>{books.map(b=><BCard key={b.id} book={b} onAction={onAction} onClick={onBookClick} showAuthor={showAuthor} highlightAuthorId={highlightAuthorId} showMamLink={showMamLink}/>)}</div>}
-function BList({books,onAction,onBookClick,showAuthor=false,highlightAuthorId,showMamLink}){const t=useTheme();return<table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr style={{borderBottom:`2px solid ${t.border}`}}><th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Title</th>{showAuthor?<th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Author</th>:null}<th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Series</th><th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Date</th><th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Source</th>{showMamLink?<th style={{padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM</th>:null}</tr></thead><tbody>{books.map(b=><BListRow key={b.id} book={b} onAction={onAction} onClick={onBookClick} showAuthor={showAuthor} highlightAuthorId={highlightAuthorId} showMamLink={showMamLink}/>)}</tbody></table>}
-
-// ─── Collapsible Section ────────────────────────────────────
-function Section({title,count,children,defaultOpen=true,ownedCount,totalCount}){const t=useTheme();const[open,setOpen]=useState(defaultOpen);
-useEffect(()=>{setOpen(defaultOpen)},[defaultOpen]);
-return<div style={{marginBottom:12}}><div onClick={()=>setOpen(!open)} style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",padding:"8px 0"}}><span style={{color:t.tg,transform:open?"rotate(0)":"rotate(-90deg)",transition:"transform 0.2s",fontSize:12}}>▼</span><span style={{fontSize:14,fontWeight:600,color:t.tm,textTransform:"uppercase"}}>{title}</span><span style={{fontSize:11,color:t.tg}}>{count}</span>{totalCount!=null?<><span style={{fontSize:11,color:t.grnt}}>{ownedCount||0}/{totalCount}</span><div style={{width:60}}><PB owned={ownedCount||0} total={totalCount}/></div></>:null}</div>{open?children:null}</div>}
+import HiddenPage from "./pages/HiddenPage";
+import AuthorsPage from "./pages/AuthorsPage";
 
 // ─── Inline Series (for Author Detail) ─────────────────────
 function IS({series,vm,onAction,onBookClick,collapsed,authorId}){const t=useTheme();const[ld,setLd]=useState(false);const[bks,setBks]=useState(null);const load=()=>{if(bks)return;setLd(true);api.get(`/series/${series.id}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
@@ -159,29 +71,6 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 {showExp?<ExportModal onClose={()=>setShowExp(false)} defaultFilter={exportFilter}/>:null}
 </div>}
 
-// ─── Authors Page ───────────────────────────────────────────
-function AP({onNav}){const t=useTheme();const[aus,setAus]=useState([]);const[ld,setLd]=useState(true);const[q,setQ]=usePersist("ap_q","");const[sort,setSort]=usePersist("ap_sort","name");const[vm,setVm]=usePersist("ap_vm","list");
-const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState(new Set());const[clearing,setClearing]=useState(false);
-const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
-const clearData=async(type)=>{const labels={source:"source scan",mam:"MAM scan",both:"all scan"};if(!confirm(`Clear ${labels[type]} data for ${sel.size} author(s)? ${type==="source"||type==="both"?"This will DELETE all discovered (non-Calibre) books for these authors.":"MAM status will be reset and books will need re-scanning."}`))return;setClearing(true);try{await api.post("/authors/clear-scan-data",{author_ids:[...sel],clear_source:type==="source"||type==="both",clear_mam:type==="mam"||type==="both"});setSel(new Set());setSelMode(false);setLd(true);api.get(`/authors?search=${q}&sort=${sort}`).then(d=>{setAus(d.authors||[]);setLd(false)})}catch{alert("Error clearing data")}setClearing(false)};
-useEffect(()=>{setLd(true);api.get(`/authors?search=${q}&sort=${sort}`).then(d=>{setAus(d.authors||[]);setLd(false)}).catch(()=>setLd(false))},[q,sort]);
-const AuthorCard=({a})=><div onClick={()=>selMode?toggleSel(a.id):onNav("author",a.id)} style={{minWidth:150,maxWidth:180,flex:"1 1 150px",background:selMode&&sel.has(a.id)?t.accent+"15":t.bg2,border:`1px solid ${selMode&&sel.has(a.id)?t.accent:t.borderL}`,borderRadius:10,padding:16,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:8,textAlign:"center",transition:"background 0.15s, border-color 0.15s"}}>{a.image_url?<img src={a.image_url} alt="" style={{width:64,height:64,borderRadius:"50%",objectFit:"cover"}}/>:<div style={{width:64,height:64,borderRadius:"50%",background:t.bg4,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,fontWeight:700,color:t.tg}}>{a.name?.charAt(0)}</div>}<div style={{fontSize:13,fontWeight:600,color:t.text2}}>{a.name}</div><div style={{display:"flex",gap:8,fontSize:11}}><span style={{color:t.grnt}}>{a.owned_count||0}</span><span style={{color:t.tg}}>/</span><span style={{color:t.ylwt}}>{a.missing_count||0}</span></div><div style={{width:"100%"}}><PB owned={a.owned_count||0} total={a.total_books||0}/></div></div>;
-const AuthorRow=({a})=><div onClick={()=>selMode?toggleSel(a.id):onNav("author",a.id)} style={{display:"flex",alignItems:"center",gap:14,padding:"10px 14px",borderRadius:8,cursor:"pointer",background:selMode&&sel.has(a.id)?t.accent+"15":t.bg2,border:`1px solid ${selMode&&sel.has(a.id)?t.accent:t.borderL}`,transition:"background 0.15s, border-color 0.15s"}}>{a.image_url?<img src={a.image_url} alt="" style={{width:40,height:40,borderRadius:"50%",objectFit:"cover"}}/>:<div style={{width:40,height:40,borderRadius:"50%",background:t.bg4,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:700,color:t.tg}}>{a.name?.charAt(0)}</div>}<div style={{flex:1,minWidth:0}}><div style={{fontSize:14,fontWeight:600,color:t.text2}}>{a.name}</div><div style={{display:"flex",gap:12,fontSize:12,marginTop:2}}><span style={{color:t.grnt}}>{a.owned_count||0} owned</span><span style={{color:t.ylwt}}>{a.missing_count||0} missing</span><span style={{color:t.purt}}>{a.series_count||0} series</span></div></div><div style={{width:80}}><PB owned={a.owned_count||0} total={a.total_books||0}/></div></div>;
-return<div style={{display:"flex",flexDirection:"column",gap:16}}>
-<div className="bp-controls" style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,position:"sticky",top:56,zIndex:20,background:t.bg+"ee",backdropFilter:"blur(8px)",padding:"12px 0",marginTop:-12}}>
-<h1 style={{fontSize:22,fontWeight:700,color:t.text,margin:0}}>Authors <span style={{fontSize:14,fontWeight:400,color:t.tg}}>({aus.length})</span></h1>
-<div className="bp-right" style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}><SearchBar value={q} onChange={setQ}/><select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="name">Name</option><option value="books">Books</option><option value="missing">Missing</option></select><VT mode={vm} setMode={setVm}/><Btn size="sm" variant={selMode?"accent":"ghost"} onClick={()=>{setSelMode(!selMode);if(selMode)setSel(new Set())}}>{selMode?"Cancel Select":`Select`}</Btn></div></div>
-
-{selMode&&sel.size>0?<div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:t.bg2,border:`1px solid ${t.border}`,borderRadius:8,flexWrap:"wrap"}}>
-<span style={{fontSize:13,fontWeight:600,color:t.text2}}>{sel.size} author{sel.size>1?"s":""} selected</span>
-<Btn size="sm" onClick={()=>clearData("source")} disabled={clearing} style={{background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}44`}}>Clear Source Data</Btn>
-<Btn size="sm" onClick={()=>clearData("mam")} disabled={clearing} style={{background:t.cyan+"22",color:t.cyant,border:`1px solid ${t.cyan}44`}}>Clear MAM Data</Btn>
-<Btn size="sm" onClick={()=>clearData("both")} disabled={clearing} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Clear Both</Btn>
-<Btn size="sm" variant="ghost" onClick={()=>setSel(new Set())}>Deselect All</Btn>
-</div>:null}
-{ld?<Load/>:vm==="grid"?<div style={{display:"flex",flexWrap:"wrap",gap:12,alignItems:"start"}}>{aus.map(a=><AuthorCard key={a.id} a={a}/>)}</div>:<div style={{display:"flex",flexDirection:"column",gap:2}}>{aus.map(a=><AuthorRow key={a.id} a={a}/>)}</div>}
-</div>}
-
 // ─── Author Detail ──────────────────────────────────────────
 function ADP({authorId,onNav}){const t=useTheme();const[a,setA]=useState(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[vm,setVm]=usePersist("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
@@ -223,13 +112,6 @@ return<div ref={ref} style={{position:"relative",width:300}}>
 {open&&<div style={{position:"absolute",top:"100%",left:0,right:0,marginTop:4,background:t.bg2,border:`1px solid ${t.border}`,borderRadius:8,zIndex:50,maxHeight:240,overflow:"hidden",boxShadow:"0 4px 12px rgba(0,0,0,0.3)"}}>
 <div style={{padding:8,borderBottom:`1px solid ${t.borderL}`}}><input autoFocus value={q} onChange={e=>setQ(e.target.value)} placeholder="Search languages..." style={{width:"100%",padding:"6px 10px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:12}}/></div>
 <div style={{maxHeight:200,overflowY:"auto"}}>{filtered.map(l=><div key={l} onClick={()=>toggle(l)} style={{padding:"8px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:8,fontSize:13,color:selected.includes(l)?t.ylwt:t.text2,background:selected.includes(l)?t.abg:"transparent"}}><span style={{width:16,height:16,borderRadius:4,border:`2px solid ${selected.includes(l)?t.accent:t.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:t.accent}}>{selected.includes(l)?"✓":""}</span>{l}</div>)}</div></div>}
-</div>}
-
-// ─── Hidden Books Page ──────────────────────────────────────
-function HP({onNav}){const t=useTheme();const[bks,setBks]=useState([]);const[ld,setLd]=useState(true);const load=()=>{setLd(true);api.get("/books/hidden").then(d=>{setBks(d.books);setLd(false)}).catch(console.error)};useEffect(()=>{load()},[]);const unhide=async id=>{await api.post(`/books/${id}/unhide`);load()};
-return<div style={{display:"flex",flexDirection:"column",gap:20}}>
-<div style={{display:"flex",alignItems:"center",gap:12}}><Btn variant="ghost" onClick={()=>onNav("dashboard")}>← Dashboard</Btn><h1 style={{fontSize:22,fontWeight:700,color:t.text,margin:0}}>Hidden Books</h1><span style={{fontSize:13,color:t.tg}}>({bks.length})</span></div>
-{ld?<Load/>:bks.length===0?<div style={{textAlign:"center",padding:60,color:t.tg}}>No hidden books</div>:<BList books={bks} showAuthor onAction={(a,id)=>a==="unhide"&&unhide(id)}/>}
 </div>}
 
 // ─── Database Browser ───────────────────────────────────────
@@ -806,11 +688,11 @@ input,select{font-family:inherit}
 <div className="page-content" key={pg+(pa||"")+activeLib}>
 {pg==="dashboard"&&<Dashboard onNav={nav} libs={libs} activeLib={activeLib} switchLib={switchLib}/>}
 {pg==="library"&&<BP title="My Library" subtitle="books in your Calibre library" apiPath="/books" extraParams={{owned:true}} exportFilter="library"/>}
-{pg==="authors"&&<AP onNav={nav}/>}
+{pg==="authors"&&<AuthorsPage onNav={nav}/>}
 {pg==="author"&&<ADP authorId={pa} onNav={nav}/>}
 {pg==="missing"&&<BP title="Missing Books" subtitle="books to find" apiPath="/books" extraParams={{owned:false}} exportFilter="missing"/>}
 {pg==="upcoming"&&<BP title="Upcoming Books" subtitle="unreleased books" apiPath="/upcoming" exportFilter="missing"/>}
-{pg==="hidden"&&<HP onNav={nav}/>}
+{pg==="hidden"&&<HiddenPage onNav={nav}/>}
 {pg==="importexport"&&<ImportExportPage/>}
 {pg==="mam"&&<MP onNav={nav}/>}
 {pg==="database"&&<DBP/>}

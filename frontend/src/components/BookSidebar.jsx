@@ -1,0 +1,74 @@
+import { useState, useEffect } from "react";
+import { useTheme } from "../theme";
+import { api } from "../api";
+import { Ic } from "../icons";
+import { fmtDate } from "../lib/format";
+import { Btn } from "./Btn";
+import { Spin } from "./Spin";
+import { SBRow } from "./SBRow";
+
+export function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}){const t=useTheme();const[editing,setEditing]=useState(false);const[ef,setEf]=useState({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");
+useEffect(()=>{api.get("/settings").then(s=>setCwUrl(s.calibre_web_url||"")).catch(()=>{})},[]);
+if(!book)return null;
+const startEdit=()=>{setEf({title:book.title||"",description:book.description||"",pub_date:book.pub_date||"",expected_date:book.expected_date||"",isbn:book.isbn||"",series_index:book.series_index||"",is_unreleased:!!book.is_unreleased,source_url:book.source_url||"",mam_url:book.mam_url||""});setEditing(true)};
+const saveEdit=async()=>{setSaving(true);try{await api.put(`/books/${book.id}`,ef);setEditing(false);onEdit&&onEdit()}catch{}setSaving(false)};
+const upE=(k,v)=>setEf(p=>({...p,[k]:v}));
+const ist={padding:"6px 8px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13,width:"100%"};
+
+return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{position:"fixed",top:0,right:0,width:420,maxWidth:"90vw",height:"100vh",background:t.bg2,borderLeft:`1px solid ${t.border}`,zIndex:100,overflowY:"auto",padding:24,display:"flex",flexDirection:"column",gap:16,boxShadow:"-4px 0 20px rgba(0,0,0,0.3)"}}>
+<div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
+<h2 style={{fontSize:18,fontWeight:700,color:t.text,margin:0,flex:1,lineHeight:1.3}}>{editing?<input value={ef.title} onChange={e=>upE("title",e.target.value)} style={{...ist,fontSize:16,fontWeight:700}}/>:book.title}</h2>
+<div className="sb-actions" style={{display:"flex",gap:8,flexShrink:0}}>{!editing&&<button onClick={startEdit} style={{background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",color:t.tg,padding:8,minWidth:36,minHeight:36,display:"flex",alignItems:"center",justifyContent:"center"}}>{Ic.edit}</button>}<button onClick={onClose} style={{background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",color:t.tg,padding:8,minWidth:36,minHeight:36,display:"flex",alignItems:"center",justifyContent:"center"}}>{Ic.x}</button></div></div>
+{(book.cover_url||book.cover_path)?<img src={book.cover_url||`/api/covers/${book.id}`} alt="" style={{width:"100%",maxHeight:300,objectFit:"contain",borderRadius:8,background:t.bg4}}/>:null}
+<div style={{display:"flex",flexDirection:"column",gap:10}}>
+<SBRow label="Author" value={book.author_name}/>
+{book.series_name?<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Series</span><span style={{fontSize:13,color:t.purt,textAlign:"right"}}>{book.series_name}{book.series_index?<span style={{color:t.td}}> (#{book.series_index}{book.series_total?` of ${book.series_total}`:""})</span>:null}</span></div>:null}
+{editing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
+<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Published</span><input type="date" value={ef.pub_date} onChange={e=>upE("pub_date",e.target.value)} style={ist}/></div>
+<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Expected Date</span><input type="date" value={ef.expected_date} onChange={e=>upE("expected_date",e.target.value)} style={ist}/></div>
+<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>ISBN</span><input value={ef.isbn} onChange={e=>upE("isbn",e.target.value)} style={ist}/></div>
+<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Series #</span><input type="number" value={ef.series_index} onChange={e=>upE("series_index",e.target.value)} style={ist}/></div>
+<div style={{display:"flex",alignItems:"center",gap:6}}><input type="checkbox" checked={ef.is_unreleased} onChange={e=>upE("is_unreleased",e.target.checked)}/><span style={{fontSize:12,color:t.text2}}>Unreleased</span></div>
+<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Source URL</span><input value={ef.source_url} onChange={e=>upE("source_url",e.target.value)} placeholder="https://www.goodreads.com/book/show/..." style={ist}/></div>
+<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM URL</span><input value={ef.mam_url} onChange={e=>upE("mam_url",e.target.value)} placeholder="https://www.myanonamouse.net/t/123456" style={ist}/><span style={{fontSize:10,color:t.tg,marginTop:2,display:"block"}}>Paste a MAM torrent URL to set status to Found. Clear to reset.</span></div>
+<div><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Description</span><textarea value={ef.description} onChange={e=>upE("description",e.target.value)} rows={4} style={{...ist,resize:"vertical"}}/></div>
+<div style={{display:"flex",gap:6}}><Btn size="sm" variant="accent" onClick={saveEdit} disabled={saving}>{saving?<Spin/>:"Save"}</Btn><Btn size="sm" variant="ghost" onClick={()=>setEditing(false)}>Cancel</Btn></div>
+</div>:<>
+<SBRow label="Published" value={book.pub_date?fmtDate(book.pub_date):book.expected_date?`Expected: ${fmtDate(book.expected_date)}`:"Unknown"}/>
+<SBRow label="Status" value={book.owned?"Owned":"Missing"} color={book.owned?t.grnt:t.ylwt}/>
+<SBRow label="Source" value={book.owned?"Calibre":"Unowned"} color={book.owned?t.td:t.tg}/>
+{cwUrl&&book.owned&&book.calibre_id?<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Calibre Web</span><a href={`${cwUrl.replace(/\/$/,"")}/book/${book.calibre_id}`} target="_blank" rel="noopener noreferrer" style={{fontSize:13,color:t.accent,textDecoration:"none",display:"flex",alignItems:"center",gap:4}}>Open in Calibre Web <span style={{fontSize:10}}>↗</span></a></div>:null}
+{(()=>{
+  const badgeColors={goodreads:{bg:"#553b1a",fg:"#e8c070",br:"#88642a"},hardcover:{bg:"#1a3355",fg:"#70a8e8",br:"#2a5588"},kobo:{bg:"#1a4533",fg:"#70e8a8",br:"#2a8855"},fantasticfiction:{bg:"#3a1a55",fg:"#c070e8",br:"#5a2a88"},manual:{bg:t.bg4,fg:t.td,br:t.border}};
+  const order=["goodreads","hardcover","kobo","fantasticfiction"];
+  let urls={};try{urls=JSON.parse(book.source_url||"{}")}catch{if(book.source_url&&book.source_url.startsWith("http"))urls={[book.source||"unknown"]:book.source_url}}
+  const entries=order.filter(k=>urls[k]).map(k=>({name:k,url:urls[k]}));
+  if(entries.length===0)return null;
+  return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:4}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Metadata</span><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{entries.map(e=>{const c=badgeColors[e.name]||badgeColors.manual;return<a key={e.name} href={e.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:c.bg,color:c.fg,border:`1px solid ${c.br}`}}>{e.name}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>})}</div></div>
+})()}
+{book.mam_status?<div>
+<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:4}}>
+<span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM</span>
+{book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",color:book.mam_status==="found"?t.grnt:t.ylwt,border:`1px solid ${book.mam_status==="found"?"#2a882a":"#88882a"}`}}>{book.mam_status==="found"?"Found":"Possible"}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>:book.mam_status==="not_found"?<span style={{fontSize:12,color:t.tg,fontStyle:"italic"}}>{book.owned?"Not on MAM (upload candidate)":"Not on MAM"}</span>:null}
+</div>
+{book.mam_url&&(book.mam_formats||book.mam_has_multiple)?<div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"flex-end",marginTop:3}}>
+{book.mam_formats?<span style={{fontSize:11,color:t.td,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.03em"}}>{book.mam_formats.split(",").join(" · ")}</span>:null}
+{book.mam_has_multiple?<span style={{fontSize:11,padding:"1px 6px",borderRadius:4,background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}33`}}>Multiple uploads</span>:null}
+</div>:null}
+</div>:null}
+{book.rating?<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Rating</span><span style={{fontSize:13,color:t.ylwt}}>{"★".repeat(Math.round(book.rating))}{"☆".repeat(5-Math.round(book.rating))} <span style={{fontSize:11,color:t.td}}>({book.rating})</span></span></div>:null}
+{book.isbn?<SBRow label="ISBN" value={book.isbn}/>:null}
+{book.page_count?<SBRow label="Pages" value={book.page_count}/>:null}
+{book.language?<SBRow label="Language" value={book.language}/>:null}
+{book.publisher?<SBRow label="Publisher" value={book.publisher}/>:null}
+{book.formats?<SBRow label="Formats" value={book.formats}/>:null}
+{book.tags?<div style={{marginTop:4}}><div style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase",marginBottom:4}}>Tags</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{book.tags.split(", ").map(tag=><span key={tag} style={{padding:"2px 8px",borderRadius:4,fontSize:11,background:t.purb,color:t.purt,border:`1px solid ${t.pur}33`}}>{tag}</span>)}</div></div>:null}
+{book.description?<div style={{marginTop:4}}><div style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase",marginBottom:4}}>Description</div><p style={{fontSize:13,color:t.td,lineHeight:1.5,margin:0,maxHeight:200,overflow:"auto"}}>{book.description}</p></div>:null}
+</>}
+</div>
+{!editing&&!book.owned?<div className="sb-actions" style={{display:"flex",gap:8,marginTop:"auto",paddingTop:12,borderTop:`1px solid ${t.borderL}`,flexWrap:"wrap"}}>
+<Btn size="sm" onClick={()=>{onAction("dismiss",book.id);onClose()}}>Dismiss</Btn>
+<Btn size="sm" onClick={()=>{onAction("hide",book.id);onClose()}}>{Ic.hide} Hide</Btn>
+<Btn size="sm" onClick={()=>{if(confirm(`Delete "${book.title}" permanently? This cannot be undone.`)){onAction("delete",book.id);onClose()}}} style={{background:"#6b2020",borderColor:"#8b3030",color:"#ff9090"}}>Delete</Btn>
+</div>:null}
+</div>}
