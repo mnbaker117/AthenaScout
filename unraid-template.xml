@@ -12,9 +12,9 @@
   <Support/>
   <Project>https://github.com/mnbaker117/AthenaScout</Project>
   <Overview>
-    AthenaScout is a self-hosted book library completionist tracker. It syncs with your Calibre library and cross-references metadata sources like Goodreads, Hardcover, and Kobo to find books you're missing from authors and series you already collect.
+    AthenaScout is a self-hosted book library completionist tracker. Point it at one or more Calibre libraries and it will cross-reference your collection against metadata sources like Goodreads, Hardcover, Kobo, and FantasticFiction to find books you're missing from authors and series you already collect.
 
-    Features include multi-source discovery, smart scanning, import/export, series intelligence, Calibre-Web deep linking, and a responsive web UI with dark/dim/light themes.
+    Features include multi-library discovery, multi-source scanning, MyAnonamouse cross-referencing, import/export, series intelligence, Calibre-Web deep linking, single-admin authentication, and a responsive web UI with dark/dim/light themes. Built on a library-app framework so additional source applications (audiobookshelf, etc.) can be added in future releases.
   </Overview>
   <Category>MediaApp:Books</Category>
   <WebUI>http://[IP]:[PORT:8787]</WebUI>
@@ -26,141 +26,194 @@
   <DonateLink/>
   <DonateImg/>
   <Description>
-    A self-hosted book library completionist tracker that syncs with Calibre and finds missing books via Goodreads, Hardcover, and Kobo.
+    Self-hosted book library completionist tracker. Discovers Calibre libraries automatically, finds missing books via Goodreads/Hardcover/Kobo/FantasticFiction, and cross-references against MyAnonamouse availability. Single-admin auth, multi-library, multi-theme, responsive UI.
   </Description>
 
-  <!-- Web UI Port -->
+  <!-- ─── Web UI ────────────────────────────────────────────── -->
   <Config
     Name="Web UI Port"
     Target="8787"
     Default="8787"
     Mode="tcp"
-    Description="Port for the AthenaScout web interface"
+    Description="Host port for the AthenaScout web interface"
     Type="Port"
     Display="always"
     Required="true"
     Mask="false">8787</Config>
 
-  <!-- Calibre Library Mount -->
+  <!-- ─── Volume Mounts ─────────────────────────────────────── -->
+  <!-- Calibre Library Root (read-only) -->
   <Config
-    Name="Calibre Library Path"
+    Name="Calibre Library Root"
     Target="/calibre"
-    Default="/mnt/user/appdata/calibre/Calibre Library"
+    Default="/mnt/user/appdata/calibre"
     Mode="ro"
-    Description="Path to your Calibre library folder containing metadata.db (mounted read-only)"
+    Description="Path to your Calibre library (or a parent folder containing multiple Calibre libraries). AthenaScout scans this path AND its immediate subdirectories for any folder containing a metadata.db, registering each as a separate library. Mounted read-only — AthenaScout never modifies your Calibre data."
     Type="Path"
     Display="always"
     Required="true"
-    Mask="false">/mnt/user/appdata/calibre/Calibre Library</Config>
+    Mask="false">/mnt/user/appdata/calibre</Config>
 
-  <!-- App Data -->
+  <!-- App Data (read/write) -->
   <Config
     Name="App Data"
     Target="/app/data"
     Default="/mnt/user/appdata/athena-scout"
     Mode="rw"
-    Description="Persistent storage for database and settings"
+    Description="Persistent storage for AthenaScout's databases (one SQLite file per discovered library), settings, auth credentials, and the auth signing secret. Survives container restarts and image updates."
     Type="Path"
     Display="always"
     Required="true"
     Mask="false">/mnt/user/appdata/athena-scout</Config>
 
-  <!-- Calibre DB Path -->
+  <!-- ─── Library Discovery (NEW multi-library) ─────────────── -->
   <Config
-    Name="CALIBRE_DB_PATH"
-    Target="CALIBRE_DB_PATH"
-    Default="/calibre/metadata.db"
-    Description="Path to metadata.db inside the container"
-    Type="Variable"
-    Display="advanced"
-    Required="false"
-    Mask="false">/calibre/metadata.db</Config>
-
-  <!-- Calibre Library Path (internal) -->
-  <Config
-    Name="CALIBRE_LIBRARY_PATH"
-    Target="CALIBRE_LIBRARY_PATH"
+    Name="CALIBRE_PATH"
+    Target="CALIBRE_PATH"
     Default="/calibre"
-    Description="Path to the Calibre library root inside the container"
+    Description="Primary discovery root for the Calibre library app. AthenaScout's library-app framework scans this path for libraries on startup. Leave at /calibre to use the volume mount above. Future ebook/audiobook source apps will use their own *_PATH variables."
     Type="Variable"
     Display="advanced"
     Required="false"
     Mask="false">/calibre</Config>
 
-  <!-- Hardcover API Key -->
+  <Config
+    Name="CALIBRE_EXTRA_PATHS"
+    Target="CALIBRE_EXTRA_PATHS"
+    Default=""
+    Description="Comma-separated list of additional library locations the Settings UI can browse. NOT auto-scanned at startup — use this when you want to manually add a library from a path other than the primary mount. Each path listed here must also have its own volume mount."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false"></Config>
+
+  <!-- ─── Calibre Integrations (optional) ───────────────────── -->
+  <Config
+    Name="Calibre-Web URL"
+    Target="CALIBRE_WEB_URL"
+    Default=""
+    Description="URL of your Calibre-Web instance (janeczku/calibre-web or calibre-web-automated). Enables deep 'Open in Calibre Web' links from individual books in the sidebar. Example: http://192.168.1.100:8083"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false"></Config>
+
+  <Config
+    Name="Calibre Library URL"
+    Target="CALIBRE_URL"
+    Default=""
+    Description="URL of your Calibre content server or main library UI. Shown as a quick-access button on the AthenaScout dashboard. Example: http://192.168.1.100:8181"
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false"></Config>
+
+  <!-- ─── Metadata Source Credentials ───────────────────────── -->
   <Config
     Name="Hardcover API Key"
     Target="HARDCOVER_API_KEY"
     Default=""
-    Description="API key from hardcover.app (include 'Bearer ' prefix). Leave empty to configure in web UI."
+    Description="API key from hardcover.app (Account → API). Must include the 'Bearer ' prefix. Leave empty to configure via the Settings UI after first run."
     Type="Variable"
     Display="always"
     Required="false"
     Mask="true"></Config>
 
-  <!-- Calibre-Web URL -->
+  <!-- ─── MyAnonamouse (optional) ───────────────────────────── -->
   <Config
-    Name="Calibre-Web URL"
-    Target="CALIBRE_WEB_URL"
+    Name="MAM Session ID"
+    Target="MAM_SESSION_ID"
     Default=""
-    Description="URL of your Calibre-Web instance for deep book links (e.g. http://192.168.1.100:8083)"
+    Description="MyAnonamouse mam_id session cookie for cross-referencing book availability. Optional — recommended to configure via the Settings UI instead so you can complete the IP-locking flow correctly."
     Type="Variable"
-    Display="always"
+    Display="advanced"
     Required="false"
-    Mask="false"></Config>
+    Mask="true"></Config>
 
-  <!-- Calibre Library URL -->
   <Config
-    Name="Calibre Library URL"
-    Target="CALIBRE_URL"
-    Default=""
-    Description="URL of your Calibre content server for dashboard quick-access button"
+    Name="MAM Scan Interval"
+    Target="MAM_SCAN_INTERVAL_MINUTES"
+    Default="360"
+    Description="Minutes between scheduled MAM scans of books missing MAM data (default 360 = 6 hours, 0 = disable scheduled scans, manual scans always work)"
     Type="Variable"
-    Display="always"
+    Display="advanced"
     Required="false"
-    Mask="false"></Config>
+    Mask="false">360</Config>
 
-  <!-- Sync Interval -->
+  <!-- ─── Sync / Scan Intervals ─────────────────────────────── -->
   <Config
     Name="Calibre Sync Interval"
     Target="SYNC_INTERVAL_MINUTES"
     Default="60"
-    Description="Minutes between Calibre library re-syncs (0 to disable)"
+    Description="Minutes between automatic Calibre library re-syncs (0 to disable scheduled syncs)"
     Type="Variable"
     Display="always"
     Required="false"
     Mask="false">60</Config>
 
-  <!-- Lookup Interval -->
   <Config
     Name="Source Scan Interval"
     Target="LOOKUP_INTERVAL_MINUTES"
     Default="4320"
-    Description="Minutes between metadata source scans (4320 = 3 days, 0 to disable)"
+    Description="Minutes between automatic metadata source scans (default 4320 = 3 days, 0 to disable scheduled scans, manual scans always work)"
     Type="Variable"
     Display="always"
     Required="false"
     Mask="false">4320</Config>
 
-  <!-- Verbose Logging -->
+  <!-- ─── Authentication (optional) ─────────────────────────── -->
+  <Config
+    Name="Auth Signing Secret"
+    Target="ATHENASCOUT_AUTH_SECRET"
+    Default=""
+    Description="Optional: signing secret for session cookies (≥32 characters of high-entropy randomness). When set, AthenaScout uses this instead of writing a secret file to the data directory. Leave empty to use the default file-based fallback. See SECURITY.md for details."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="true"></Config>
+
+  <!-- ─── Logging / Runtime ─────────────────────────────────── -->
   <Config
     Name="Verbose Logging"
     Target="VERBOSE_LOGGING"
     Default="false"
-    Description="Enable detailed debug logging (true/false)"
+    Description="Enable detailed debug logging on startup (true/false). Can also be toggled at runtime in the Settings UI."
     Type="Variable"
     Display="advanced"
     Required="false"
     Mask="false">false</Config>
 
-  <!-- Web UI Port (env) -->
   <Config
     Name="WEBUI_PORT"
     Target="WEBUI_PORT"
     Default="8787"
-    Description="Internal web UI port (must match the port mapping above)"
+    Description="Internal web UI port. Must match the container port in the Web UI Port mapping above."
     Type="Variable"
     Display="advanced"
     Required="false"
     Mask="false">8787</Config>
+
+  <!-- ─── Legacy Single-Library Mode (deprecated, advanced) ──── -->
+  <!-- These two variables predate the multi-library discovery system. -->
+  <!-- Leave them empty unless you specifically need to bypass discovery -->
+  <!-- and point at a single metadata.db file. -->
+  <Config
+    Name="CALIBRE_DB_PATH (legacy)"
+    Target="CALIBRE_DB_PATH"
+    Default=""
+    Description="LEGACY single-library mode. Direct path to a single metadata.db inside the container. Leave empty to use the multi-library discovery via CALIBRE_PATH (recommended)."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false"></Config>
+
+  <Config
+    Name="CALIBRE_LIBRARY_PATH (legacy)"
+    Target="CALIBRE_LIBRARY_PATH"
+    Default=""
+    Description="LEGACY single-library mode. Path to the Calibre library root that owns the CALIBRE_DB_PATH file. Leave empty unless you set CALIBRE_DB_PATH above."
+    Type="Variable"
+    Display="advanced"
+    Required="false"
+    Mask="false"></Config>
 </Container>

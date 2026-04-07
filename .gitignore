@@ -7,6 +7,12 @@ dist/
 .venv/
 venv/
 env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
 
 # Node
 node_modules/
@@ -36,9 +42,12 @@ settings.json
 .env
 .env.local
 
-# PyInstaller
+# PyInstaller / native packaging build outputs
 build/
 /dist/
+dist-mac/
+packages/
+Output/
 
 # Standalone data (user-specific)
 athenascout_data/
