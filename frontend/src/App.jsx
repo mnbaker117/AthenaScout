@@ -1,19 +1,22 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { THEMES, TC, useTheme } from "./theme";
 import { api } from "./api";
-import { pct, timeAgo, fmtDate } from "./lib/format";
+import { pct, fmtDate } from "./lib/format";
 import { Ic } from "./icons";
 import { usePersist } from "./hooks/usePersist";
 import { NAV } from "./lib/constants";
 import { Btn } from "./components/Btn";
 import { Spin } from "./components/Spin";
+import { Load } from "./components/Load";
 import { SBRow } from "./components/SBRow";
 import { AddBookModal } from "./components/AddBookModal";
 import { UrlSearchModal } from "./components/UrlSearchModal";
+import { ExportModal } from "./components/ExportModal";
 import { SetupWizard } from "./components/SetupWizard";
+import Dashboard from "./pages/Dashboard";
+import ImportExportPage from "./pages/ImportExportPage";
 
 // ─── Shared Components ──────────────────────────────────────
-function Load(){const t=useTheme();return<div style={{display:"flex",justifyContent:"center",padding:60}}><Spin/><span style={{marginLeft:10,color:t.td}}>Loading...</span></div>}
 function PB({owned,total}){const t=useTheme();const p=pct(owned,total);return<div style={{height:5,borderRadius:3,background:t.bg4,overflow:"hidden"}}><div style={{width:`${p}%`,height:"100%",borderRadius:3,background:p===100?t.grn:p>50?t.ylw:t.red,transition:"width 0.3s"}}/></div>}
 function VT({mode,setMode}){const t=useTheme();return<div style={{display:"flex",borderRadius:6,border:`1px solid ${t.border}`,overflow:"hidden",height:34}}>{["grid","list"].map(m=><button key={m} onClick={()=>setMode(m)} style={{padding:"0 12px",fontSize:12,fontWeight:500,border:"none",cursor:"pointer",background:mode===m?t.bg4:"transparent",color:mode===m?t.accent:t.tg,textTransform:"capitalize",height:"100%"}}>{m==="grid"?"Grid":"List"}</button>)}</div>}
 
@@ -114,94 +117,6 @@ return<Section title={header} count={countStr} ownedCount={series.owned_count} t
 
 // ─── Standalone Section ─────────────────────────────────────
 function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
-
-// ─── Dashboard ──────────────────────────────────────────────
-function Dash({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
-useEffect(()=>{api.get("/lookup/status").then(r=>{if(r.running)setLookupScan(r)}).catch(()=>{});api.get("/mam/scan/status").then(r=>{if(r.running||r.status==="complete")setMamScan(r)}).catch(()=>{})},[]);
-useEffect(()=>{if(!lookupScan?.running)return;const iv=setInterval(()=>{api.get("/lookup/status").then(r=>{setLookupScan(r);if(!r.running){clearInterval(iv);api.get("/stats").then(setD)}}).catch(()=>{})},3000);return()=>clearInterval(iv)},[lookupScan?.running]);
-useEffect(()=>{if(!mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running)clearInterval(iv)}).catch(()=>{})},5000);return()=>clearInterval(iv)},[mamScan?.running]);
-useEffect(()=>{if(mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{})},30000);return()=>clearInterval(iv)},[mamScan?.running]);
-if(!d)return<Load/>;
-const p=pct(d.owned_books,d.total_books);
-return<div style={{display:"flex",flexDirection:"column",gap:24}}>
-
-{libs.length>1?<div style={{marginBottom:16,display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:13,fontWeight:500,color:t.tf}}>Library:</span><select value={activeLib} onChange={e=>switchLib(e.target.value)} style={{padding:"7px 28px 7px 12px",borderRadius:8,border:`1px solid ${t.border}`,background:t.bg2,color:t.accent,fontSize:14,fontWeight:600,cursor:"pointer",appearance:"none",WebkitAppearance:"none",backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 10px center"}}>{libs.map(l=><option key={l.slug} value={l.slug}>{l.content_type==="audiobook"?"🎧 ":"📖 "}{l.name}</option>)}</select></div>:null}
-{/* Hero */}
-<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:16,padding:28}}>
-<div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
-<div><h1 style={{fontSize:26,fontWeight:700,color:t.text,margin:0}}>Your Library</h1>
-<p style={{fontSize:14,color:t.td,marginTop:4}}>{d.owned_books} of {d.total_books} books owned</p></div>
-<div style={{textAlign:"right"}}><span style={{fontSize:32,fontWeight:700,color:p===100?t.grnt:p>75?t.ylwt:t.text}}>{p}%</span>
-<div style={{fontSize:11,color:t.tg}}>complete</div></div></div>
-<div style={{height:8,borderRadius:4,background:t.bg4,overflow:"hidden"}}><div style={{width:`${p}%`,height:"100%",borderRadius:4,background:p===100?t.grn:p>50?`linear-gradient(90deg,${t.grn},${t.ylw})`:t.ylw,transition:"width 0.5s"}}/></div>
-</div>
-
-{/* Stat cards */}
-<div className="dash-stats" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:12}}>
-{[
-  {label:"Owned",value:d.owned_books,color:t.grnt,icon:"📚",nav:()=>onNav("library")},
-  {label:"Missing",value:d.missing_books,color:t.ylwt,icon:"🔍",nav:()=>onNav("missing")},
-  {label:"New Finds",value:d.new_books,color:t.redt,icon:"✨"},
-  {label:"Authors",value:d.authors,color:t.purt,icon:"✍",nav:()=>onNav("authors")},
-  {label:"Series",value:d.total_series,color:t.cyant,icon:"📖"},
-  {label:"Upcoming",value:d.upcoming_books||0,color:t.cyant,icon:"📅",nav:()=>onNav("upcoming")},
-].map(c=><div key={c.label} onClick={c.nav} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"16px 18px",cursor:c.nav?"pointer":"default",transition:"border-color 0.2s"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:20}}>{c.icon}</span><span style={{fontSize:24,fontWeight:700,color:c.color}}>{c.value}</span></div><div style={{fontSize:12,color:t.td,marginTop:6}}>{c.label}</div></div>)}
-</div>
-
-{d.mam_enabled&&d.mam?<div onClick={()=>onNav("mam")} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"14px 20px",cursor:"pointer",display:"flex",alignItems:"center",gap:20,flexWrap:"wrap",transition:"border-color 0.2s"}}>
-<span style={{fontSize:13,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.04em"}}>MAM</span>
-<div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16,color:t.grnt}}>↑</span><span style={{fontSize:20,fontWeight:700,color:t.grnt}}>{d.mam.upload_candidates||0}</span><span style={{fontSize:12,color:t.td}}>Upload Candidates</span></div>
-<div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16,color:t.cyant}}>↓</span><span style={{fontSize:20,fontWeight:700,color:t.cyant}}>{d.mam.available_to_download||0}</span><span style={{fontSize:12,color:t.td}}>Available on MAM</span></div>
-<div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16,color:t.tg}}>∅</span><span style={{fontSize:20,fontWeight:700,color:t.tg}}>{d.mam.missing_everywhere||0}</span><span style={{fontSize:12,color:t.td}}>Missing Everywhere</span></div>
-{d.mam.total_unscanned>0?<div style={{marginLeft:"auto",fontSize:12,color:t.ylwt,fontStyle:"italic"}}>{d.mam.total_unscanned} unscanned</div>:null}
-</div>:null}
-
-{/* Actions */}
-<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:20,display:"flex",gap:20,flexWrap:"wrap"}}>
-<div style={{flex:"1 1 320px"}}>
-<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>Actions</div>
-<div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
-<Btn variant="accent" onClick={async()=>{setSy(true);try{await api.post("/sync/calibre")}catch{}setSy(false);api.get("/stats").then(setD)}} disabled={sy}>{sy?<Spin/>:Ic.sync} Sync Library</Btn>
-<Btn onClick={async()=>{try{const r=await api.post("/sync/lookup");if(r.error){alert(r.error)}else{setLookupScan({running:true,checked:0,total:0,current_author:"",new_books:0,status:"scanning",type:"lookup"})}}catch{}}} disabled={lookupScan?.running}>{lookupScan?.running&&lookupScan?.type==="lookup"?<Spin/>:Ic.search} Scan Sources</Btn>
-<Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;try{const r=await api.post("/sync/full-rescan");if(r.error){alert(r.error)}else{setLookupScan({running:true,checked:0,total:0,current_author:"",new_books:0,status:"scanning",type:"full_rescan"})}}catch{}}} disabled={lookupScan?.running}>{lookupScan?.running&&lookupScan?.type==="full_rescan"?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
-{d.mam_enabled&&d.mam_scanning_enabled!==false?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error){alert(r.error)}else{setMamScan({running:true,scanned:0,total:r.total||0,found:0,possible:0,not_found:0,errors:0,status:"scanning",type:"manual"})}}catch{}}} disabled={mamScan?.running}>{mamScan?.running?<Spin/>:Ic.search} MAM Scan</Btn>:null}
-</div>
-<div style={{display:"flex",gap:16,marginTop:12,fontSize:12,color:t.tg}}>
-<span>{d.last_calibre_check?.at?`Last checked: ${timeAgo(d.last_calibre_check.at)}${d.last_calibre_check.synced?" (synced)":" (no changes)"}`:`Last sync: ${timeAgo(d.last_calibre_sync?.finished_at)}`}</span>
-<span>Last lookup: {timeAgo(d.last_lookup?.finished_at)}</span>
-</div>
-
-{/* ── Scan Progress ── */}
-{lookupScan&&lookupScan.status!=="idle"?<div style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{lookupScan.running?<div>
-<div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}>
-<span>{lookupScan.type==="full_rescan"?"Full Re-Scan":"Scanning sources..."} {lookupScan.current_author?`— ${lookupScan.current_author}`:""}</span>
-<span style={{fontSize:11,color:t.tg}}>{lookupScan.checked} of {lookupScan.total} authors</span></div>
-<div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${lookupScan.total>0?Math.round(lookupScan.checked/lookupScan.total*100):0}%`,height:"100%",borderRadius:3,background:t.accent,transition:"width 0.5s"}}/></div>
-<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,color:t.tg}}>New books found: <b style={{color:t.grnt}}>{lookupScan.new_books}</b></span><Btn size="sm" onClick={async()=>{try{await api.post("/lookup/cancel");const r=await api.get("/lookup/status");setLookupScan(r)}catch{}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
-</div>:<div style={{fontSize:13,color:lookupScan.status==="complete"?t.grnt:t.redt}}>{lookupScan.status==="complete"?`${lookupScan.type==="full_rescan"?"Full Re-Scan":"Source Scan"} Complete — ${lookupScan.checked} authors checked, ${lookupScan.new_books} new books found`:`Source Scan: ${lookupScan.status}`}</div>}</div>:null}
-
-{mamScan&&mamScan.status!=="idle"?<div style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{mamScan.running?<div>
-<div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}>
-<span>{mamScan.status==="paused"?"Paused — resuming in 5 min":mamScan.status==="waiting (author scan running)"?"Waiting for author scan...":mamScan.type==="scheduled"?"Scheduled scan running...":"Scanning MAM..."}{" "}{mamScan.scanned} of {mamScan.total} books{mamScan.remaining?(()=>{const rem=mamScan.remaining-(mamScan.scanned||0);return rem>0?` (${rem.toLocaleString()} total remaining)`:""})():""}</span>
-<span style={{fontSize:11,textTransform:"capitalize",color:t.tg}}>{mamScan.type||"scan"}</span></div>
-<div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${mamScan.total>0?Math.round(mamScan.scanned/mamScan.total*100):0}%`,height:"100%",borderRadius:3,background:mamScan.status==="paused"?t.ylw:t.accent,transition:"width 0.5s"}}/></div>
-<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",gap:12,fontSize:11,color:t.tg}}><span style={{color:t.grnt}}>Found: {mamScan.found}</span><span style={{color:t.ylwt}}>Possible: {mamScan.possible}</span><span style={{color:t.redt}}>Not found: {mamScan.not_found}</span>{mamScan.errors>0?<span style={{color:t.red}}>Errors: {mamScan.errors}</span>:null}</div><Btn size="sm" onClick={async()=>{try{await api.post("/mam/scan/cancel");const r=await api.get("/mam/scan/status");setMamScan(r)}catch{}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
-</div>:<div style={{fontSize:13}}><span style={{color:mamScan.status==="complete"?t.grnt:t.redt}}>{mamScan.status==="complete"?(()=>{const rem=mamScan.remaining!=null?mamScan.remaining-(mamScan.scanned||0):(mamScan.total||0)-(mamScan.scanned||0);return`MAM Scan Complete — ${mamScan.scanned} scanned: ${mamScan.found} found, ${mamScan.possible} possible, ${mamScan.not_found} not found${mamScan.errors>0?`, ${mamScan.errors} errors`:""}${rem>0?` · ${rem.toLocaleString()} unscanned`:""}`})():`MAM Scan: ${mamScan.status}`}</span></div>}</div>:null}
-
-{d.mam_enabled?<div style={{fontSize:11,color:t.tg,marginTop:6,fontStyle:"italic"}}>MAM Scan checks all books missing MAM data (100 per batch, 5-min pauses between batches).</div>:null}
-</div>
-<div style={{flex:"0 0 auto",display:"flex",flexDirection:"column",gap:6,borderLeft:`1px solid ${t.borderL}`,paddingLeft:20,justifyContent:"center"}}>
-{d.calibre_web_url?<button onClick={()=>window.open(d.calibre_web_url,"_blank")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.accent+"18",border:`1px solid ${t.accent}33`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.accent,whiteSpace:"nowrap"}}>📖 Calibre Web <span style={{fontSize:10,opacity:0.6}}>↗</span></button>:null}
-{d.calibre_url?<button onClick={()=>window.open(d.calibre_url,"_blank")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.pur+"18",border:`1px solid ${t.pur}33`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.purt,whiteSpace:"nowrap"}}>📚 Calibre Library <span style={{fontSize:10,opacity:0.6}}>↗</span></button>:null}
-<button onClick={()=>onNav("hidden")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.td,whiteSpace:"nowrap"}}>{Ic.hide} Hidden ({d.hidden_books||0})</button>
-</div>
-</div>
-
-{/* Quick nav */}
-<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:10}}>
-{[{label:"Library",icon:"📖",pg:"library"},{label:"Authors",icon:"◉",pg:"authors"},{label:"Missing",icon:"◌",pg:"missing"},{label:"Upcoming",icon:"📅",pg:"upcoming"},{label:"Settings",icon:"⚙",pg:"settings"}].map(n=><button key={n.pg} onClick={()=>onNav(n.pg)} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:10,padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:10,fontSize:14,fontWeight:500,color:t.text2}}><span style={{fontSize:18}}>{n.icon}</span>{n.label}</button>)}
-</div>
-</div>}
 
 // ─── Books Page (Library/Missing/Upcoming) ──────────────────
 function BP({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}){const t=useTheme();const[bks,setBks]=useState([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist(`bp_${title}_q`,"");const[vm,setVm]=usePersist(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist(`bp_${title}_sort`,"title");const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
@@ -310,103 +225,11 @@ return<div ref={ref} style={{position:"relative",width:300}}>
 <div style={{maxHeight:200,overflowY:"auto"}}>{filtered.map(l=><div key={l} onClick={()=>toggle(l)} style={{padding:"8px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:8,fontSize:13,color:selected.includes(l)?t.ylwt:t.text2,background:selected.includes(l)?t.abg:"transparent"}}><span style={{width:16,height:16,borderRadius:4,border:`2px solid ${selected.includes(l)?t.accent:t.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:t.accent}}>{selected.includes(l)?"✓":""}</span>{l}</div>)}</div></div>}
 </div>}
 
-// ─── Add Book Modal ─────────────────────────────────────────
-// ─── Export Modal ────────────────────────────────────────────
-function ExportModal({onClose,defaultFilter="missing"}){const t=useTheme();const[filter,setFilter]=useState(defaultFilter);const[fmt,setFmt]=useState("csv");const[content,setContent]=useState(null);const[ld,setLd]=useState(false);const[copied,setCopied]=useState(false);const[downloaded,setDownloaded]=useState(false);const taRef=useRef(null);
-const generate=async()=>{setLd(true);setCopied(false);setDownloaded(false);try{const r=await fetch(`/api/export?filter=${filter}&format=${fmt}`);const text=await r.text();setContent(text)}catch{setContent("Error generating export")}setLd(false)};
-const download=()=>{if(!content)return;const blob=new Blob([content],{type:fmt==="csv"?"text/csv":"text/plain"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`books_${filter}.${fmt==="csv"?"csv":"txt"}`;a.click();URL.revokeObjectURL(url);setDownloaded(true);setTimeout(()=>setDownloaded(false),2000)};
-const copy=async()=>{if(!content)return;try{await navigator.clipboard.writeText(content);setCopied(true);setTimeout(()=>setCopied(false),2000)}catch{try{if(taRef.current){taRef.current.select();document.execCommand("copy");setCopied(true);setTimeout(()=>setCopied(false),2000)}}catch{}}};
-const sel={padding:"7px 12px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:13};
-return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeOverlay 0.2s ease-out"}} onClick={onClose}><div onClick={e=>e.stopPropagation()} className="modal-panel" style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:24,animation:"fadeIn 0.2s ease-out",width:600,maxWidth:"90vw",maxHeight:"85vh",display:"flex",flexDirection:"column",gap:16}}>
-<h2 style={{fontSize:18,fontWeight:700,color:t.text,margin:0}}>Export Books</h2>
-<div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-<div style={{display:"flex",flexDirection:"column",gap:4}}><label style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Filter</label><select value={filter} onChange={e=>{setFilter(e.target.value);setContent(null)}} style={sel}><option value="missing">Missing Only</option><option value="library">Library Only</option><option value="all">All Books</option></select></div>
-<div style={{display:"flex",flexDirection:"column",gap:4}}><label style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Format</label><select value={fmt} onChange={e=>{setFmt(e.target.value);setContent(null)}} style={sel}><option value="csv">CSV</option><option value="text">Text</option></select></div>
-<div style={{marginTop:18}}><Btn variant="accent" onClick={generate} disabled={ld}>{ld?<Spin/>:"Generate"}</Btn></div>
-</div>
-{content?<>
-<div style={{position:"relative"}}>
-<textarea ref={taRef} readOnly value={content} style={{width:"100%",height:240,padding:12,background:t.bg3,border:`1px solid ${t.borderL}`,borderRadius:8,color:t.text2,fontSize:12,fontFamily:"monospace",resize:"vertical"}}/>
-<div style={{position:"absolute",top:8,right:8,display:"flex",gap:4}}>
-<Btn size="sm" onClick={copy} style={copied?{background:t.grn,borderColor:t.grn,color:"#fff"}:{}}>{copied?"✓ Copied":"Copy"}</Btn>
-</div>
-</div>
-<div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-<Btn size="sm" onClick={download} style={downloaded?{background:t.grn,borderColor:t.grn,color:"#fff"}:{}}>{downloaded?"✓ Downloaded":<>↓ Download .{fmt==="csv"?"csv":"txt"}</>}</Btn>
-<Btn size="sm" onClick={onClose} style={{background:"#6b2020",borderColor:"#8b3030",color:"#ff9090"}}>Close</Btn>
-</div>
-</>:null}
-{!content&&!ld?<p style={{fontSize:12,color:t.tg,textAlign:"center",padding:20}}>Select filter and format, then click Generate to preview the export</p>:null}
-</div></div>}
-
 // ─── Hidden Books Page ──────────────────────────────────────
 function HP({onNav}){const t=useTheme();const[bks,setBks]=useState([]);const[ld,setLd]=useState(true);const load=()=>{setLd(true);api.get("/books/hidden").then(d=>{setBks(d.books);setLd(false)}).catch(console.error)};useEffect(()=>{load()},[]);const unhide=async id=>{await api.post(`/books/${id}/unhide`);load()};
 return<div style={{display:"flex",flexDirection:"column",gap:20}}>
 <div style={{display:"flex",alignItems:"center",gap:12}}><Btn variant="ghost" onClick={()=>onNav("dashboard")}>← Dashboard</Btn><h1 style={{fontSize:22,fontWeight:700,color:t.text,margin:0}}>Hidden Books</h1><span style={{fontSize:13,color:t.tg}}>({bks.length})</span></div>
 {ld?<Load/>:bks.length===0?<div style={{textAlign:"center",padding:60,color:t.tg}}>No hidden books</div>:<BList books={bks} showAuthor onAction={(a,id)=>a==="unhide"&&unhide(id)}/>}
-</div>}
-
-// ─── Import/Export Page ─────────────────────────────────────
-function IEP(){const t=useTheme();
-const[urls,setUrls]=useState("");const[results,setResults]=useState(null);const[fetching,setFetching]=useState(false);const[progress,setProgress]=useState("");
-const[adding,setAdding]=useState(false);const[addResult,setAddResult]=useState(null);
-const[showExp,setShowExp]=useState(false);
-
-const fetchPreview=async()=>{const lines=urls.split("\n").map(u=>u.trim()).filter(u=>u.startsWith("http"));if(!lines.length){return}
-setFetching(true);setResults(null);setAddResult(null);setProgress(`Fetching ${lines.length} book(s)...`);
-try{const d=await api.post("/books/import-preview",{urls:lines});setResults(d.results||[]);setProgress("")}catch(e){setProgress("Error fetching books")}setFetching(false)};
-
-const addBooks=async(books)=>{setAdding(true);setAddResult(null);
-try{const d=await api.post("/books/import-add",{books});setAddResult(d);
-// Re-check: mark added ones in results
-if(results){setResults(prev=>prev.map(r=>{if(r.status==="new"&&books.some(b=>b.title===r.book?.title))return{...r,status:"added"};return r}))}}catch{setAddResult({error:true})}setAdding(false)};
-
-const newBooks=results?results.filter(r=>r.status==="new"&&r.book):[];
-const statusColors={new:t.grnt,owned:t.cyant,tracked:t.ylwt,error:t.redt,added:t.grnt};
-const statusLabels={new:"New — will be added",owned:"Already in Calibre",tracked:"Already tracked (missing)",error:"Error",added:"✓ Added"};
-
-return<div style={{display:"flex",flexDirection:"column",gap:24}}>
-<h1 style={{fontSize:24,fontWeight:700,color:t.text,margin:0}}>Import / Export</h1>
-
-{/* Import Section */}
-<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:24}}>
-<h2 style={{fontSize:18,fontWeight:600,color:t.text,margin:"0 0 4px"}}>Import Books</h2>
-<p style={{fontSize:13,color:t.td,margin:"0 0 16px"}}>Paste Goodreads or Hardcover book URLs below, one per line. Books will be checked against your library before adding.</p>
-<textarea value={urls} onChange={e=>setUrls(e.target.value)} placeholder={"https://www.goodreads.com/book/show/12345\nhttps://hardcover.app/books/some-book\nhttps://www.goodreads.com/book/show/67890"} rows={6} style={{width:"100%",padding:12,background:t.bg3,border:`1px solid ${t.borderL}`,borderRadius:8,color:t.text2,fontSize:13,fontFamily:"monospace",resize:"vertical"}}/>
-<div style={{display:"flex",gap:10,alignItems:"center",marginTop:12}}>
-<Btn variant="accent" onClick={fetchPreview} disabled={fetching||!urls.trim()}>{fetching?<><Spin/> Fetching...</>:"Fetch & Preview"}</Btn>
-{progress?<span style={{fontSize:12,color:t.td}}>{progress}</span>:null}
-</div>
-</div>
-
-{/* Preview Results */}
-{results?<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:24}}>
-<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-<h2 style={{fontSize:18,fontWeight:600,color:t.text,margin:0}}>Preview ({results.length} books)</h2>
-{newBooks.length>0?<Btn variant="accent" onClick={()=>addBooks(newBooks.map(r=>r.book))} disabled={adding}>{adding?<><Spin/> Adding...</>:`Add ${newBooks.length} New Book${newBooks.length>1?"s":""}`}</Btn>:null}
-</div>
-{addResult?<div style={{padding:10,borderRadius:8,background:addResult.error?t.bg4:t.grn+"22",border:`1px solid ${addResult.error?t.redt:t.grn}`,marginBottom:12,fontSize:13,color:addResult.error?t.redt:t.grnt}}>{addResult.error?"Error adding books":`Added ${addResult.added} new, updated ${addResult.updated} existing`}</div>:null}
-<div style={{display:"flex",flexDirection:"column",gap:8}}>
-{results.map((r,i)=><div key={i} style={{display:"flex",gap:12,alignItems:"center",padding:"10px 14px",background:t.bg3,border:`1px solid ${t.borderL}`,borderRadius:8}}>
-{r.book?.cover_url?<img src={r.book.cover_url} alt="" style={{width:40,height:60,objectFit:"cover",borderRadius:4,flexShrink:0}}/>:<div style={{width:40,height:60,background:t.bg4,borderRadius:4,flexShrink:0}}/>}
-<div style={{flex:1,minWidth:0}}>
-<div style={{fontSize:14,fontWeight:600,color:t.text2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.book?.title||"Unknown"}</div>
-<div style={{fontSize:12,color:t.td}}>{r.book?.author_name||""}{r.book?.series_options?<span style={{marginLeft:6}}><select value={r.book.series_name||""} onChange={e=>{const picked=r.book.series_options.find(o=>o.name===e.target.value);setResults(prev=>prev.map((p,j)=>j===i?{...p,book:{...p.book,series_name:picked?.name||"",series_index:picked?.position||""}}:p))}} style={{padding:"1px 4px",borderRadius:3,border:`1px solid ${t.border}`,background:t.inp,color:t.purt,fontSize:11}}>{r.book.series_options.map(o=><option key={o.name} value={o.name}>{o.name}{o.position?` #${o.position}`:""}</option>)}<option value="">None</option></select></span>:r.book?.series_name?<span style={{color:t.purt}}> · {r.book.series_name}{r.book.series_index?` #${r.book.series_index}`:""}</span>:null}</div>
-{r.book?.pub_date?<div style={{fontSize:11,color:t.tg}}>{r.book.pub_date}</div>:null}
-{r.error?<div style={{fontSize:11,color:t.redt}}>{r.error}</div>:null}
-</div>
-<span style={{fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:5,flexShrink:0,background:(statusColors[r.status]||t.tg)+"22",color:statusColors[r.status]||t.tg,border:`1px solid ${(statusColors[r.status]||t.tg)}44`}}>{statusLabels[r.status]||r.status}</span>
-</div>)}
-</div>
-</div>:null}
-
-{/* Export Section */}
-<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:24}}>
-<h2 style={{fontSize:18,fontWeight:600,color:t.text,margin:"0 0 4px"}}>Export Books</h2>
-<p style={{fontSize:13,color:t.td,margin:"0 0 16px"}}>Export your book list as CSV or text file with title, author, dates, and source URLs.</p>
-<Btn onClick={()=>setShowExp(true)}>Open Export Tool</Btn>
-</div>
-{showExp?<ExportModal onClose={()=>setShowExp(false)} defaultFilter="missing"/>:null}
 </div>}
 
 // ─── Database Browser ───────────────────────────────────────
@@ -981,14 +804,14 @@ input,select{font-family:inherit}
 {/* ── Main Content ── */}
 <main className="main-content" style={{maxWidth:1120,margin:"0 auto",padding:"28px 20px"}}>
 <div className="page-content" key={pg+(pa||"")+activeLib}>
-{pg==="dashboard"&&<Dash onNav={nav} libs={libs} activeLib={activeLib} switchLib={switchLib}/>}
+{pg==="dashboard"&&<Dashboard onNav={nav} libs={libs} activeLib={activeLib} switchLib={switchLib}/>}
 {pg==="library"&&<BP title="My Library" subtitle="books in your Calibre library" apiPath="/books" extraParams={{owned:true}} exportFilter="library"/>}
 {pg==="authors"&&<AP onNav={nav}/>}
 {pg==="author"&&<ADP authorId={pa} onNav={nav}/>}
 {pg==="missing"&&<BP title="Missing Books" subtitle="books to find" apiPath="/books" extraParams={{owned:false}} exportFilter="missing"/>}
 {pg==="upcoming"&&<BP title="Upcoming Books" subtitle="unreleased books" apiPath="/upcoming" exportFilter="missing"/>}
 {pg==="hidden"&&<HP onNav={nav}/>}
-{pg==="importexport"&&<IEP/>}
+{pg==="importexport"&&<ImportExportPage/>}
 {pg==="mam"&&<MP onNav={nav}/>}
 {pg==="database"&&<DBP/>}
 {pg==="settings"&&<SP/>}
