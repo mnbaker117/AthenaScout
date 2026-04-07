@@ -139,8 +139,17 @@ async def _validate_author(author_name: str, our_titles: list[str], result: Auth
     return False
 
 
-async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False):
-    """Merge an AuthorResult, filtering by language. In full_scan mode, updates metadata on existing books."""
+async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False):
+    """Merge an AuthorResult, filtering by language. In full_scan mode, updates metadata on existing books.
+
+    When owned_only=True (the "Library-only source scan" setting), the
+    function still UPDATEs existing books with new URLs, series links, and
+    (in full_scan mode) refreshed metadata, but it skips the INSERT branches
+    entirely. The result: source scans become a metadata-enrichment pass
+    over the user's owned library without ever discovering new missing or
+    upcoming books. Useful for getting an existing library polished before
+    turning the discovery firehose on.
+    """
     db = await get_db()
     try:
         new_books = 0; updated_books = 0
@@ -217,6 +226,12 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                     sql, vals = _update_existing(matched_row, bk, series_id=sid)
                     await db.execute(sql, vals)
                     continue
+                if owned_only:
+                    # Library-only scan: don't add discovered series books that
+                    # we don't already own. The series row itself was upserted
+                    # above so existing owned books in this series still get
+                    # linked correctly via _update_existing.
+                    continue
                 if norm in existing:
                     logger.debug(f"    SKIP (norm dup): '{bk.title}'")
                     continue
@@ -241,6 +256,9 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 sql, vals = _update_existing(matched_row, bk)
                 await db.execute(sql, vals)
                 continue
+            if owned_only:
+                # Library-only scan: skip discovered standalone books we don't own.
+                continue
             if norm in existing:
                 logger.debug(f"    SKIP (norm dup): '{bk.title}'")
                 continue
@@ -256,7 +274,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         await db.close()
 
 
-async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False):
+async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False):
     """Try a single source with validation and detailed logging."""
     try:
         logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
@@ -306,7 +324,7 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
             logger.info(f"  [{source_name}] Author validation failed — skipping (likely wrong author)")
             return 0
 
-        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan)
+        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only)
         parts = []
         if n > 0: parts.append(f"{n} new")
         if u > 0: parts.append(f"{u} updated")
@@ -325,6 +343,9 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     total = 0
     settings = load_settings()
     languages = settings.get("languages", ["English"])
+    owned_only = bool(settings.get("author_scan_owned_only", False))
+    if owned_only:
+        logger.info(f"  Library-only mode: only enriching owned books for '{author_name}', no new discoveries")
 
     db = await get_db()
     try:
@@ -340,21 +361,21 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         await db.close()
 
     # 1. Goodreads (PRIMARY)
-    total += await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan)
+    total += await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
 
     # 2. Hardcover
     if settings.get("hardcover_api_key"):
         hardcover.update_api_key(settings["hardcover_api_key"])
         hardcover._owned_titles = our_titles
-        total += await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan)
+        total += await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
 
     # 3. FantasticFiction
     if settings.get("fantasticfiction_enabled", False):
-        total += await _try_source(fantasticfiction, author_name, author_id, our_titles, languages, "fantasticfiction", existing_titles=existing_titles, full_scan=full_scan)
+        total += await _try_source(fantasticfiction, author_name, author_id, our_titles, languages, "fantasticfiction", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
 
     # 4. Kobo
     if settings.get("kobo_enabled", True):
-        total += await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan)
+        total += await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
 
     db2 = await get_db()
     try:

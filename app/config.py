@@ -67,6 +67,11 @@ DEFAULT_SETTINGS = {
     "rate_kobo": 3,
     "verbose_logging": False,
     "author_scanning_enabled": True,
+    # When True, source scans only enrich metadata on books the user already
+    # owns in Calibre — no new "missing" / "upcoming" book rows are created.
+    # Lets the user fully populate metadata on their existing library before
+    # turning the discovery firehose on. Default off preserves existing behavior.
+    "author_scan_owned_only": False,
     "calibre_web_url": "",
     "calibre_url": "",
     "mam_session_id": "",
