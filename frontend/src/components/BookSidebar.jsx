@@ -66,7 +66,9 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
 {book.description?<div style={{marginTop:4}}><div style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase",marginBottom:4}}>Description</div><p style={{fontSize:13,color:t.td,lineHeight:1.5,margin:0,maxHeight:200,overflow:"auto"}}>{book.description}</p></div>:null}
 </>}
 </div>
-{!editing&&!book.owned?<div className="sb-actions" style={{display:"flex",gap:8,marginTop:"auto",paddingTop:12,borderTop:`1px solid ${t.borderL}`,flexWrap:"wrap"}}>
+{!editing&&book.hidden?<div className="sb-actions" style={{display:"flex",gap:8,marginTop:"auto",paddingTop:12,borderTop:`1px solid ${t.borderL}`,flexWrap:"wrap"}}>
+<Btn size="sm" variant="accent" onClick={()=>{onAction("unhide",book.id);onClose()}}>Unhide</Btn>
+</div>:!editing&&!book.owned?<div className="sb-actions" style={{display:"flex",gap:8,marginTop:"auto",paddingTop:12,borderTop:`1px solid ${t.borderL}`,flexWrap:"wrap"}}>
 <Btn size="sm" onClick={()=>{onAction("dismiss",book.id);onClose()}}>Dismiss</Btn>
 <Btn size="sm" onClick={()=>{onAction("hide",book.id);onClose()}}>{Ic.hide} Hide</Btn>
 <Btn size="sm" onClick={()=>{if(confirm(`Delete "${book.title}" permanently? This cannot be undone.`)){onAction("delete",book.id);onClose()}}} style={{background:"#6b2020",borderColor:"#8b3030",color:"#ff9090"}}>Delete</Btn>
