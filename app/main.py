@@ -6,7 +6,7 @@ from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from app.config import (SYNC_INTERVAL_MINUTES, load_settings, save_settings, LANGUAGE_OPTIONS, apply_logging, discover_libraries, get_extra_mount_paths)
+from app.config import (SYNC_INTERVAL_MINUTES, load_settings, save_settings, apply_logging, discover_libraries)
 from app.library_apps import get_app
 from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library, HF
 from app import state
@@ -298,55 +298,6 @@ app.include_router(_r_mam.router)
 app.include_router(_r_db_editor.router)
 app.include_router(_r_import_export.router)
 
-# ─── Settings ────────────────────────────────────────────────
-@app.get("/api/settings")
-async def get_settings():
-    s = load_settings()
-    d = dict(s)
-    if d.get("hardcover_api_key"): d["hardcover_api_key_set"] = True; d["hardcover_api_key"] = d["hardcover_api_key"][:8] + "..."
-    else: d["hardcover_api_key_set"] = False
-    if d.get("mam_session_id"):
-        sid = d["mam_session_id"]
-        d["mam_session_id"] = sid[:8] + "..." + sid[-4:] if len(sid) > 12 else "***"
-    d["language_options"] = LANGUAGE_OPTIONS
-    d["_extra_mount_paths"] = get_extra_mount_paths()
-    d["state._discovered_libraries"] = [
-        {"name": l["name"], "slug": l["slug"],
-         "app_type": l.get("app_type", "calibre"),
-         "content_type": l.get("content_type", "ebook"),
-         "source_db_path": l["source_db_path"],
-         "active": l["slug"] == get_active_library()}
-        for l in state._discovered_libraries
-    ]
-    return d
-
-@app.post("/api/settings")
-async def update_settings(body: dict = Body(...)):
-    cur = load_settings()
-    for k, v in body.items():
-        if k not in cur:
-            continue
-        # Don't overwrite real API key with masked/truncated value
-        if k == "hardcover_api_key" and isinstance(v, str) and (v.endswith("...") or v == ""):
-            continue
-        if k == "mam_session_id" and isinstance(v, str) and ("..." in v or v == "***"):
-            continue
-        cur[k] = v
-    save_settings(cur); reload_sources()
-    apply_logging(cur.get("verbose_logging", False))
-    return {"status": "ok"}
-
-@app.post("/api/settings/reset")
-async def reset_settings():
-    """Reset all settings to factory defaults."""
-    from app.config import DEFAULT_SETTINGS
-    fresh = dict(DEFAULT_SETTINGS)
-    save_settings(fresh)
-    reload_sources()
-    apply_logging(False)
-    logger.info("All settings reset to defaults")
-    return {"status": "ok"}
-
 # ─── Libraries ───────────────────────────────────────────────
 @app.get("/api/libraries")
 async def list_libraries():
@@ -508,56 +459,6 @@ async def rescan_libraries():
     }
 
 
-# ─── Health & Stats ──────────────────────────────────────────
-@app.get("/api/health")
-async def health(): return {"status": "ok", "time": time.time()}
-
-@app.get("/api/platform")
-async def platform_info():
-    """Return platform/runtime info for the frontend.
-
-    Used by the setup wizard to detect first-run state, suggest
-    library paths, and adapt UI to the runtime environment.
-    """
-    from app.runtime import get_platform_info
-    info = get_platform_info()
-    s = load_settings()
-    # First run: no libraries discovered AND no user-configured sources AND setup not completed
-    info["first_run"] = (
-        not state._discovered_libraries
-        and not s.get("library_sources")
-        and not s.get("setup_complete")
-    )
-    # Check which suggested default paths actually exist on this system
-    info["existing_default_paths"] = [
-        p for p in info["default_library_paths"]
-        if Path(p["path"]).exists()
-    ]
-    return info
-
-@app.get("/api/stats")
-async def get_stats():
-    db = await get_db()
-    try:
-        g = lambda sql: db.execute(sql)
-        authors = (await (await g("SELECT COUNT(*) c FROM authors")).fetchone())["c"]
-        total = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE {HF}")).fetchone())["c"]
-        owned = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE owned=1 AND {HF}")).fetchone())["c"]
-        missing = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE owned=0 AND {HF}")).fetchone())["c"]
-        new = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE is_new=1 AND owned=0 AND {HF}")).fetchone())["c"]
-        upcoming = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE is_unreleased=1 AND owned=0 AND {HF}")).fetchone())["c"]
-        series = (await (await g("SELECT COUNT(*) c FROM series")).fetchone())["c"]
-        hidden = (await (await g("SELECT COUNT(*) c FROM books WHERE hidden=1")).fetchone())["c"]
-        ls = await (await g("SELECT * FROM sync_log WHERE sync_type='calibre' ORDER BY started_at DESC LIMIT 1")).fetchone()
-        ll = await (await g("SELECT * FROM sync_log WHERE sync_type='lookup' ORDER BY started_at DESC LIMIT 1")).fetchone()
-        s = load_settings()
-        mam_stats = None
-        if s.get("mam_enabled") and s.get("mam_session_id"):
-            mam_stats = await get_mam_stats(db)
-        active_lib = get_active_library()
-        lib_info = next((l for l in state._discovered_libraries if l["slug"] == active_lib), None)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(state._discovered_libraries), "active_content_type": lib_info.get("content_type", "ebook") if lib_info else "ebook", "active_app_type": lib_info.get("app_type", "calibre") if lib_info else "calibre", "last_calibre_check": state._last_calibre_check}
-    finally: await db.close()
 
 # ─── Authors ─────────────────────────────────────────────────
 @app.get("/api/authors")
