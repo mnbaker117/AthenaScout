@@ -61,7 +61,7 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
 {book.mam_my_snatched?<span title="You've already snatched this torrent on MAM" style={{fontSize:11,padding:"1px 6px",borderRadius:4,background:t.grn+"22",color:t.grnt,border:`1px solid ${t.grn}44`}}>Already snatched</span>:null}
 {book.mam_has_multiple?<span style={{fontSize:11,padding:"1px 6px",borderRadius:4,background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}33`}}>Multiple uploads</span>:null}
 </div>:null}
-</div>}
+</div>:null}
 {book.rating?<div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Rating</span><span style={{fontSize:13,color:t.ylwt}}>{"★".repeat(Math.round(book.rating))}{"☆".repeat(5-Math.round(book.rating))} <span style={{fontSize:11,color:t.td}}>({book.rating})</span></span></div>:null}
 {book.isbn?<SBRow label="ISBN" value={book.isbn}/>:null}
 {book.page_count?<SBRow label="Pages" value={book.page_count}/>:null}
