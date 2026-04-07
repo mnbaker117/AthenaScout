@@ -102,6 +102,20 @@ async def switch_library(body: dict = Body(...)):
 async def validate_library_path(body: dict = Body(...)):
     """Validate a filesystem path for use as a library source.
 
+    SECURITY: This endpoint takes user-supplied filesystem paths and
+    performs read-only filesystem operations on them. It is INTENTIONALLY
+    a filesystem browser for the library setup wizard — that's the whole
+    feature. Access is gated by AuthMiddleware (see app/main.py) so only
+    authenticated admins can call it. The admin is trusted by definition
+    in AthenaScout's threat model — see SECURITY.md.
+
+    Defense in depth: the input sanitization below rejects obviously
+    malformed paths (empty, excessively long, containing null bytes)
+    before any filesystem call is made. CodeQL flags the os.path / Path
+    calls below as "uncontrolled data used in path expression"; those
+    findings are documented as intentional via the comments above each
+    flagged site and the SECURITY.md threat model.
+
     Supports any registered library app type — uses the app's db_filename
     to look for the correct database file (e.g., metadata.db for Calibre).
     """
@@ -109,8 +123,17 @@ async def validate_library_path(body: dict = Body(...)):
     path_type = body.get("type", "root")
     app_type = body.get("app_type", "calibre")
 
+    # ─── Input sanitization (defense in depth) ──────────────────
     if not path:
         return {"valid": False, "error": "No path provided"}
+    if len(path) > 4096:
+        return {"valid": False, "error": "Path is too long (max 4096 characters)"}
+    if "\x00" in path:
+        return {"valid": False, "error": "Path contains null bytes"}
+
+    # codeql[py/path-injection] -- Intentional filesystem browser for the
+    # library setup wizard. Endpoint is auth-gated; admin is trusted.
+    # See validate_library_path() docstring and SECURITY.md.
     if not os.path.exists(path):
         return {"valid": False, "error": f"Path does not exist: {path}"}
 
@@ -126,6 +149,7 @@ async def validate_library_path(body: dict = Body(...)):
                 db_file = child / db_filename
                 if db_file.exists():
                     found.append({"name": child.name, "path": str(db_file)})
+        # codeql[py/path-injection] -- see validate_library_path() docstring
         root_db = root / db_filename
         if root_db.exists():
             found.append({"name": root.name, "path": str(root_db)})
@@ -134,9 +158,11 @@ async def validate_library_path(body: dict = Body(...)):
         return {"valid": True, "libraries_found": len(found), "details": found}
 
     elif path_type == "direct":
+        # codeql[py/path-injection] -- see validate_library_path() docstring
         p = Path(path)
         if p.name == db_filename and p.exists():
             return {"valid": True, "libraries_found": 1, "details": [{"name": p.parent.name, "path": str(p)}]}
+        # codeql[py/path-injection] -- see validate_library_path() docstring
         elif (p / db_filename).exists():
             return {"valid": True, "libraries_found": 1, "details": [{"name": p.name, "path": str(p / db_filename)}]}
         else:

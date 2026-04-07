@@ -567,8 +567,16 @@ async def register_ip(session_id: str, skip_ip_update: bool = True) -> dict:
         return {"success": False, "message": msg or f"Unexpected response: {body[:200]}"}
     except asyncio.TimeoutError:
         return {"success": False, "message": "Timeout connecting to MAM"}
-    except Exception as e:
-        return {"success": False, "message": f"Network error: {str(e)}"}
+    except Exception:
+        # Phase 22B.3 Stage 2C: log full traceback server-side, return a
+        # generic message to the API caller. The full exception details
+        # might contain library versions, internal hostnames, or stack
+        # frame paths that we don't want leaking via the response body.
+        logger.exception("MAM IP-registration network error")
+        return {
+            "success": False,
+            "message": "Network error connecting to MAM dynamic seedbox endpoint",
+        }
 
 
 async def verify_search_auth(session_id: str) -> dict:
@@ -601,8 +609,14 @@ async def verify_search_auth(session_id: str) -> dict:
                     "message": "HTTP 403 — session rejected. Check token is valid for this server's IP/ASN."}
         else:
             return {"success": False, "message": f"Unexpected HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"success": False, "message": f"Network error: {str(e)}"}
+    except Exception:
+        # Phase 22B.3 Stage 2C: see register_ip's matching handler. The
+        # full traceback goes to logs; the API response stays generic.
+        logger.exception("MAM search-auth network error")
+        return {
+            "success": False,
+            "message": "Network error verifying MAM search access",
+        }
 
 
 async def validate_connection(session_id: str, skip_ip_update: bool = True) -> dict:

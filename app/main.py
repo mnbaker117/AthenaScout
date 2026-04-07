@@ -17,9 +17,12 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app.auth_db import init_auth_db
+from app.auth_sessions import SESSION_COOKIE_NAME, verify_session_token
 from app.calibre_sync import sync_calibre
 from app.config import (
     SYNC_INTERVAL_MINUTES,
@@ -39,6 +42,7 @@ from app.database import (
 from app.library_apps import get_app
 from app.lookup import reload_sources, run_full_lookup
 from app.routers import (
+    auth,
     authors,
     books,
     config,
@@ -83,6 +87,11 @@ async def lifespan(app: FastAPI):
     s = load_settings()
     apply_logging(s.get("verbose_logging", False))
     reload_sources()
+
+    # ─── Auth database ────────────────────────────────────
+    # The auth DB is global to the deployment (NOT per-library) so the
+    # admin login persists across library switches. See app/auth_db.py.
+    await init_auth_db()
 
     # ─── Library Discovery ────────────────────────────────
     state._discovered_libraries = discover_libraries(s)
@@ -314,8 +323,50 @@ async def lifespan(app: FastAPI):
 # ─── App + Router Registration ───────────────────────────────
 app = FastAPI(title="AthenaScout", lifespan=lifespan)
 
+
+# ─── Authentication Middleware ───────────────────────────────
+# Routes that don't require authentication. Everything else under /api/
+# requires a valid session cookie. The frontend SPA bundle (anything not
+# under /api/) is always public so the login page can render.
+_PUBLIC_API_PATHS = frozenset({
+    "/api/health",
+    "/api/platform",
+    "/api/auth/setup",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/check",
+})
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """Enforce authentication on protected /api/* routes.
+
+    Requests outside /api/ pass through unchanged so the frontend bundle
+    (HTML, JS, CSS, images) can always load. API requests in the public
+    allowlist also pass through. Every other API request must carry a
+    valid signed session cookie.
+    """
+    async def dispatch(self, request, call_next):
+        path = request.url.path
+        if not path.startswith("/api/"):
+            return await call_next(request)
+        if path in _PUBLIC_API_PATHS:
+            return await call_next(request)
+        token = request.cookies.get(SESSION_COOKIE_NAME, "")
+        if verify_session_token(token) is None:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Authentication required"},
+            )
+        return await call_next(request)
+
+
+app.add_middleware(AuthMiddleware)
+
+
 # All API routes live in app/routers/ — see individual files for endpoints.
-for r in (config, libraries, books, authors, series, covers, scan, mam, db_editor, import_export):
+# `auth` is registered first by convention since it gates everything else.
+for r in (auth, config, libraries, books, authors, series, covers, scan, mam, db_editor, import_export):
     app.include_router(r.router)
 
 
@@ -334,7 +385,23 @@ if FD.exists():
 
     @app.get("/{path:path}")
     async def serve_fe(path: str):
-        fp = FD / path
+        """SPA fallback handler — serves the requested static file if it
+        exists inside the frontend dist directory, falls back to index.html
+        for client-side routing.
+
+        Path traversal protection: the requested path is resolved and
+        verified to stay within FD before serving. Any attempt to escape
+        (via .., symlinks, absolute paths, encoded traversal sequences)
+        falls through to index.html instead of touching the host filesystem.
+        Phase 22B.3 Stage 2B fix for the CodeQL high-severity finding.
+        """
+        try:
+            fp = (FD / path).resolve()
+            fd_resolved = FD.resolve()
+            if not fp.is_relative_to(fd_resolved):
+                return FileResponse(FD / "index.html")
+        except (ValueError, OSError):
+            return FileResponse(FD / "index.html")
         return FileResponse(fp if fp.is_file() else FD / "index.html")
 elif IS_STANDALONE:
     @app.get("/{path:path}")

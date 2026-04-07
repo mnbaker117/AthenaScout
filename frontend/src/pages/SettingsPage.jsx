@@ -38,6 +38,9 @@ const cancelFullScan=async()=>{try{await api.post("/mam/full-scan/cancel");const
 const resetMam=async()=>{if(!confirm("Reset all MAM scan data? This clears mam_url and mam_status on every book. You will need to re-scan."))return;try{await api.post("/mam/reset");setFsStatus(null);setMsg("MAM data cleared!");setTimeout(()=>setMsg(""),2000)}catch{}};
 const reorderFmt=(from,to)=>{if(from===to)return;const arr=[...(s.mam_format_priority||[])];const[item]=arr.splice(from,1);arr.splice(to,0,item);upd("mam_format_priority",arr)};
 const doTestScan=async()=>{setTestRun(true);setTestRes(null);try{const r=await api.post("/mam/test-scan");setTestRes(r)}catch(e){setTestRes({error:"Network error"})}setTestRun(false)};
+// Phase 22B.3 Stage 2A — logout. Best-effort POST to clear the cookie
+// then hard-reload to reset all in-memory state and re-enter the auth flow.
+const doLogout=async()=>{if(!confirm("Sign out of AthenaScout?"))return;try{await api.post("/auth/logout")}catch{}window.location.reload()};
 // Local timeAgo with different return semantics from lib/format.js — returns null
 // for falsy ts and lowercase strings ("just now", "5m ago"). DO NOT merge with shared one.
 const timeAgo=ts=>{if(!ts)return null;const s=Math.floor(Date.now()/1000-ts);if(s<60)return"just now";if(s<3600)return`${Math.floor(s/60)}m ago`;if(s<86400)return`${Math.floor(s/3600)}h ago`;return`${Math.floor(s/86400)}d ago`};
@@ -51,6 +54,7 @@ return<div style={{paddingBottom:40}}>
 <h1 style={{fontSize:24,fontWeight:700,color:t.text,margin:0}}>Settings</h1>
 <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
 <Btn variant="accent" onClick={save} disabled={sv}>{sv?<Spin/>:"Save settings"}</Btn>
+<Btn onClick={doLogout} title="Sign out of AthenaScout">Sign Out</Btn>
 {msg&&<span style={{fontSize:13,color:msg==="Saved!"||msg==="Settings reset!"||msg==="MAM data cleared!"||msg==="Token saved!"||msg==="Key saved!"||msg==="Source data cleared!"||msg==="MAM data cleared!"||msg==="All data cleared!"?t.grnt:t.redt}}>{msg}</span>}
 </div></div>
 

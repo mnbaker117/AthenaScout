@@ -9,6 +9,7 @@ import { Spin } from "./components/Spin";
 import { AddBookModal } from "./components/AddBookModal";
 import { UrlSearchModal } from "./components/UrlSearchModal";
 import { SetupWizard } from "./components/SetupWizard";
+import LoginPage from "./pages/LoginPage";
 import Dashboard from "./pages/Dashboard";
 import ImportExportPage from "./pages/ImportExportPage";
 import HiddenPage from "./pages/HiddenPage";
@@ -26,15 +27,23 @@ export default function App(){
   const[pa,setPa]=usePersist("page_arg",null);
   const[tn,setTn]=useState(()=>{try{return localStorage.getItem("cl_theme")||"dark"}catch{return"dark"}});
   const[showAdd,setShowAdd]=useState(null);
+// Phase 22B.3 Stage 2A — auth state. Three meaningful values:
+//   {loading:true}                  → render loading spinner (initial check in flight)
+//   {authenticated:false,firstRun:true|false} → render LoginPage (setup or sign-in)
+//   {authenticated:true,...}        → render the rest of the app
+const[authState,setAuthState]=useState({loading:true,authenticated:false,firstRun:false});
+const checkAuth=async()=>{try{const r=await api.get("/auth/check");setAuthState({loading:false,authenticated:!!r.authenticated,firstRun:!!r.first_run})}catch{setAuthState({loading:false,authenticated:false,firstRun:false})}};
+useEffect(()=>{checkAuth();const onAuthRequired=()=>setAuthState(s=>s.authenticated?{loading:false,authenticated:false,firstRun:false}:s);window.addEventListener("athenascout:auth-required",onAuthRequired);return()=>window.removeEventListener("athenascout:auth-required",onAuthRequired)},[]);
+const onLoginSuccess=()=>{setAuthState({loading:false,authenticated:true,firstRun:false})};
 const[firstRun,setFirstRun]=useState(null);
 const[mamWarn,setMamWarn]=useState(false);
 const[mamOn,setMamOn]=useState(false);
 const[libs,setLibs]=useState([]);
 const[activeLib,setActiveLib]=useState(()=>{try{return localStorage.getItem("cl_active_lib")||""}catch{return""}});
-useEffect(()=>{api.get("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{})},[]);
-// Check if this is a first-run scenario (setup wizard needed)
-useEffect(()=>{api.get("/platform").then(r=>setFirstRun(r.first_run===true)).catch(()=>setFirstRun(false))},[]);
-useEffect(()=>{api.get("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{})},[pg]); // null, "manual", "url", "choose"
+useEffect(()=>{if(!authState.authenticated)return;api.get("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{})},[authState.authenticated]);
+// Check if this is a first-run scenario (setup wizard needed). Skipped until authenticated.
+useEffect(()=>{if(!authState.authenticated)return;api.get("/platform").then(r=>setFirstRun(r.first_run===true)).catch(()=>setFirstRun(false))},[authState.authenticated]);
+useEffect(()=>{if(!authState.authenticated)return;api.get("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{})},[pg,authState.authenticated]); // null, "manual", "url", "choose"
   const theme=THEMES[tn]||THEMES.dark;
   const nav=(p,a=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
   useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);
@@ -43,6 +52,10 @@ useEffect(()=>{api.get("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enable
 
   // Setup wizard completion — refresh libraries and show dashboard
   const onWizardComplete=()=>{setFirstRun(false);api.get("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{});setPg("dashboard")};
+
+// Auth gate — render login or loading before the main shell.
+if(authState.loading)return<TC.Provider value={theme}><div style={{display:"flex",justifyContent:"center",alignItems:"center",minHeight:"100vh",background:theme.bg}}><Spin/></div></TC.Provider>;
+if(!authState.authenticated)return<TC.Provider value={theme}><LoginPage onLoginSuccess={onLoginSuccess} isFirstRun={authState.firstRun}/></TC.Provider>;
 
 return<TC.Provider value={theme}>
 <style>{`*{box-sizing:border-box;margin:0}html{height:100%;background:${theme.bg}}body{background:${theme.bg};color:${theme.text2};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;min-height:100%;min-height:100dvh;min-height:-webkit-fill-available}::selection{background:${theme.accent}44}::-webkit-scrollbar{width:8px}::-webkit-scrollbar-track{background:${theme.bg}}::-webkit-scrollbar-thumb{background:${theme.border};border-radius:4px}
