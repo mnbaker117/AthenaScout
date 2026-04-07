@@ -9,6 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import (SYNC_INTERVAL_MINUTES, load_settings, save_settings, LANGUAGE_OPTIONS, apply_logging, discover_libraries, get_extra_mount_paths)
 from app.library_apps import get_app
 from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library
+from app import state
 
 
 # Filter out noisy health check and cover/series access logs
@@ -38,17 +39,9 @@ logger = logging.getLogger("athenascout")
 scheduler = AsyncIOScheduler()
 HF = "b.hidden = 0"
 DB_TABLES = {"books", "authors", "series", "sync_log", "mam_scan_log"}
-_discovered_libraries = []
-_last_calibre_check = {"at": None, "synced": False}
-_mam_scan_task: asyncio.Task | None = None
-_mam_full_scan_task: asyncio.Task | None = None
-_mam_scan_progress: dict = {"running": False, "scanned": 0, "total": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0, "status": "idle", "type": "none"}
-_lookup_task: asyncio.Task | None = None
-_lookup_progress: dict = {"running": False, "checked": 0, "total": 0, "current_author": "", "new_books": 0, "status": "idle", "type": "none"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _discovered_libraries
     import os as _os
 
     s = load_settings()
@@ -56,8 +49,8 @@ async def lifespan(app: FastAPI):
     reload_sources()
 
     # ─── Library Discovery ────────────────────────────────
-    _discovered_libraries = discover_libraries(s)
-    if not _discovered_libraries:
+    state._discovered_libraries = discover_libraries(s)
+    if not state._discovered_libraries:
         from app.runtime import IS_DOCKER
         if IS_DOCKER:
             logger.warning("No libraries found. Check CALIBRE_PATH env var and volume mounts, or use the setup wizard.")
@@ -68,28 +61,28 @@ async def lifespan(app: FastAPI):
     else:
         # Group discovered libraries by app type for logging
         by_app = {}
-        for l in _discovered_libraries:
+        for l in state._discovered_libraries:
             at = l.get("display_name", "Unknown")
             by_app.setdefault(at, []).append(l["name"])
         lib_summary = "; ".join(f'{len(v)} {k} ({", ".join(v)})' for k, v in by_app.items())
-        logger.info(f"Discovered {len(_discovered_libraries)} libraries: {lib_summary}")
+        logger.info(f"Discovered {len(state._discovered_libraries)} libraries: {lib_summary}")
 
         # Migration: rename legacy athenascout.db → best-matching library's DB file
-        first_slug = _discovered_libraries[0]["slug"]
-        migration_slug = match_legacy_db_to_library(_discovered_libraries)
+        first_slug = state._discovered_libraries[0]["slug"]
+        migration_slug = match_legacy_db_to_library(state._discovered_libraries)
         migrated_to = migrate_legacy_db(migration_slug)
         if migrated_to:
             logger.info(f"Legacy database migrated to library '{migrated_to}'")
             first_slug = migrated_to  # use migrated library as default active
 
         # Initialize all library databases
-        for lib in _discovered_libraries:
+        for lib in state._discovered_libraries:
             await init_db(lib["slug"])
             logger.debug(f"Initialized database for library '{lib['name']}'")
 
         # Set active library (from settings or first discovered)
         active = s.get("active_library") or first_slug
-        valid_slugs = [l["slug"] for l in _discovered_libraries]
+        valid_slugs = [l["slug"] for l in state._discovered_libraries]
         if active not in valid_slugs:
             active = first_slug
         set_active_library(active)
@@ -99,7 +92,7 @@ async def lifespan(app: FastAPI):
 
         # Sync each library (with mtime optimization)
         mtimes = s.get("calibre_mtimes", {})
-        for lib in _discovered_libraries:
+        for lib in state._discovered_libraries:
             set_active_library(lib["slug"])
             try:
                 current_mtime = _os.path.getmtime(lib["source_db_path"])
@@ -122,8 +115,8 @@ async def lifespan(app: FastAPI):
 
         # Restore active library after syncing all
         set_active_library(active)
-        _last_calibre_check["at"] = time.time()
-        _last_calibre_check["synced"] = True
+        state._last_calibre_check["at"] = time.time()
+        state._last_calibre_check["synced"] = True
 
     # ─── Scheduled Calibre Sync (all libraries) ───────────
     s = load_settings()
@@ -137,7 +130,7 @@ async def lifespan(app: FastAPI):
         st = load_settings()
         mtimes = st.get("calibre_mtimes", {})
         any_synced = False
-        for lib in _discovered_libraries:
+        for lib in state._discovered_libraries:
             try:
                 set_active_library(lib["slug"])
                 current_mtime = _os2.path.getmtime(lib["source_db_path"])
@@ -159,41 +152,39 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"Scheduled sync failed for '{lib['name']}': {e}")
         set_active_library(current_active)
-        _last_calibre_check["at"] = time.time()
-        _last_calibre_check["synced"] = any_synced
+        state._last_calibre_check["at"] = time.time()
+        state._last_calibre_check["synced"] = any_synced
 
     if sync_min and sync_min > 0:
-        if _discovered_libraries:
+        if state._discovered_libraries:
             scheduler.add_job(_sync_all_libraries, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
         else:
             logger.info("Calibre auto-sync skipped - no libraries configured")
     else:
         logger.info("Calibre auto-sync disabled (interval = 0)")
     async def _scheduled_lookup():
-        global _lookup_progress
         s = load_settings()
         if not s.get("author_scanning_enabled", True):
             return
-        if _lookup_progress.get("running"):
+        if state._lookup_progress.get("running"):
             return
-        _lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+        state._lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
                             "new_books": 0, "status": "scanning", "type": "scheduled_lookup"}
         def _progress(data):
-            _lookup_progress.update({"checked": data["checked"], "total": data["total"],
+            state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
                                      "current_author": data["current_author"], "new_books": data["new_books"]})
         try:
             await run_full_lookup(on_progress=_progress)
-            _lookup_progress.update({"running": False, "status": "complete"})
+            state._lookup_progress.update({"running": False, "status": "complete"})
         except Exception as e:
             logger.error(f"Scheduled lookup error: {e}")
-            _lookup_progress.update({"running": False, "status": f"error: {e}"})
+            state._lookup_progress.update({"running": False, "status": f"error: {e}"})
 
     if lookup_days and lookup_days > 0:
         scheduler.add_job(_scheduled_lookup, "interval", minutes=lookup_days*1440, id="author_lookup", replace_existing=True)
     else:
         logger.info("Auto-lookup disabled (interval = 0)")
     async def _mam_scheduler():
-        global _mam_scan_progress
         last_scan_at = 0.0
         while True:
             await asyncio.sleep(60)
@@ -204,9 +195,9 @@ async def lifespan(app: FastAPI):
             elapsed_min = (time.time() - last_scan_at) / 60
             if elapsed_min < interval:
                 continue
-            if _mam_scan_progress.get("running"):
+            if state._mam_scan_progress.get("running"):
                 continue
-            if _lookup_progress.get("running"):
+            if state._lookup_progress.get("running"):
                 continue  # Author scan has priority
             last_val = s.get("last_mam_validated_at") or 0
             if time.time() - last_val > 86400:
@@ -237,12 +228,12 @@ async def lifespan(app: FastAPI):
                 continue
             scan_limit = min(100, total_remaining)
             logger.info(f"MAM scheduled scan starting ({scan_limit} books, {total_remaining} total remaining)")
-            _mam_scan_progress = {"running": True, "scanned": 0, "total": scan_limit,
+            state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_limit,
                                   "found": 0, "possible": 0, "not_found": 0,
                                   "errors": 0, "status": "scanning", "type": "scheduled",
                                   "remaining": total_remaining}
             def _sched_progress(stats):
-                _mam_scan_progress.update({
+                state._mam_scan_progress.update({
                     "scanned": stats["scanned"],
                     "found": stats["found"],
                     "possible": stats["possible"],
@@ -256,9 +247,9 @@ async def lifespan(app: FastAPI):
                     delay=s.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=s.get("mam_format_priority"),
                     on_progress=_sched_progress,
-                    cancel_check=lambda: _lookup_progress.get("running", False),
+                    cancel_check=lambda: state._lookup_progress.get("running", False),
                 )
-                _mam_scan_progress.update({
+                state._mam_scan_progress.update({
                     "running": False,
                     "status": "complete" if not result.get("error") else f"error: {result.get('error')}",
                 })
@@ -272,7 +263,7 @@ async def lifespan(app: FastAPI):
                 logger.info(f"MAM scheduled scan done: {result.get('scanned', 0)} scanned, {result.get('found', 0)} found")
             except Exception as e:
                 logger.error(f"MAM scheduled scan error: {e}")
-                _mam_scan_progress.update({"running": False, "status": f"error: {e}"})
+                state._mam_scan_progress.update({"running": False, "status": f"error: {e}"})
             finally:
                 await db.close()
             last_scan_at = time.time()
@@ -294,13 +285,13 @@ async def get_settings():
         d["mam_session_id"] = sid[:8] + "..." + sid[-4:] if len(sid) > 12 else "***"
     d["language_options"] = LANGUAGE_OPTIONS
     d["_extra_mount_paths"] = get_extra_mount_paths()
-    d["_discovered_libraries"] = [
+    d["state._discovered_libraries"] = [
         {"name": l["name"], "slug": l["slug"],
          "app_type": l.get("app_type", "calibre"),
          "content_type": l.get("content_type", "ebook"),
          "source_db_path": l["source_db_path"],
          "active": l["slug"] == get_active_library()}
-        for l in _discovered_libraries
+        for l in state._discovered_libraries
     ]
     return d
 
@@ -348,16 +339,15 @@ async def list_libraries():
                 "library_path": lib["library_path"],
                 "active": lib["slug"] == active,
             }
-            for lib in _discovered_libraries
+            for lib in state._discovered_libraries
         ]
     }
 
 @app.post("/api/libraries/active")
 async def switch_library(body: dict = Body(...)):
     """Switch the active library. Cancels any running scans first."""
-    global _lookup_task, _lookup_progress, _mam_scan_task, _mam_scan_progress, _mam_full_scan_task
     slug = body.get("slug", "")
-    valid_slugs = [l["slug"] for l in _discovered_libraries]
+    valid_slugs = [l["slug"] for l in state._discovered_libraries]
     if slug not in valid_slugs:
         raise HTTPException(400, f"Unknown library slug: {slug}. Valid: {valid_slugs}")
 
@@ -369,20 +359,20 @@ async def switch_library(body: dict = Body(...)):
     cancelled = []
 
     # Cancel author lookup
-    if _lookup_task and not _lookup_task.done():
-        _lookup_task.cancel()
-        _lookup_progress.update({"running": False, "status": "cancelled (library switch)"})
+    if state._lookup_task and not state._lookup_task.done():
+        state._lookup_task.cancel()
+        state._lookup_progress.update({"running": False, "status": "cancelled (library switch)"})
         cancelled.append("author scan")
 
     # Cancel MAM scan (manual or scheduled)
-    if _mam_scan_task and not _mam_scan_task.done():
-        _mam_scan_task.cancel()
-        _mam_scan_progress.update({"running": False, "status": "cancelled (library switch)"})
+    if state._mam_scan_task and not state._mam_scan_task.done():
+        state._mam_scan_task.cancel()
+        state._mam_scan_progress.update({"running": False, "status": "cancelled (library switch)"})
         cancelled.append("MAM scan")
 
     # Cancel MAM full scan
-    if _mam_full_scan_task and not _mam_full_scan_task.done():
-        _mam_full_scan_task.cancel()
+    if state._mam_full_scan_task and not state._mam_full_scan_task.done():
+        state._mam_full_scan_task.cancel()
         try:
             db = await get_db()
             try:
@@ -455,20 +445,19 @@ async def validate_library_path(body: dict = Body(...)):
 @app.post("/api/libraries/rescan")
 async def rescan_libraries():
     """Re-run library discovery from current settings. Initializes new databases."""
-    global _discovered_libraries
     s = load_settings()
     new_libs = discover_libraries(s)
     if not new_libs:
         return {"status": "error", "error": "No libraries found after rescan"}
 
     # Initialize any new library databases
-    existing_slugs = {l["slug"] for l in _discovered_libraries}
+    existing_slugs = {l["slug"] for l in state._discovered_libraries}
     for lib in new_libs:
         if lib["slug"] not in existing_slugs:
             await init_db(lib["slug"])
             logger.info(f"Initialized new library database: {lib['slug']}")
 
-    _discovered_libraries = new_libs
+    state._discovered_libraries = new_libs
     lib_names = [f'"{l["name"]}" ({l["slug"]})' for l in new_libs]
     logger.info(f"Library rescan complete: {len(new_libs)} libraries found: {', '.join(lib_names)}")
 
@@ -510,7 +499,7 @@ async def platform_info():
     s = load_settings()
     # First run: no libraries discovered AND no user-configured sources AND setup not completed
     info["first_run"] = (
-        not _discovered_libraries
+        not state._discovered_libraries
         and not s.get("library_sources")
         and not s.get("setup_complete")
     )
@@ -541,8 +530,8 @@ async def get_stats():
         if s.get("mam_enabled") and s.get("mam_session_id"):
             mam_stats = await get_mam_stats(db)
         active_lib = get_active_library()
-        lib_info = next((l for l in _discovered_libraries if l["slug"] == active_lib), None)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(_discovered_libraries), "active_content_type": lib_info.get("content_type", "ebook") if lib_info else "ebook", "active_app_type": lib_info.get("app_type", "calibre") if lib_info else "calibre", "last_calibre_check": _last_calibre_check}
+        lib_info = next((l for l in state._discovered_libraries if l["slug"] == active_lib), None)
+        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(state._discovered_libraries), "active_content_type": lib_info.get("content_type", "ebook") if lib_info else "ebook", "active_app_type": lib_info.get("app_type", "calibre") if lib_info else "calibre", "last_calibre_check": state._last_calibre_check}
     finally: await db.close()
 
 # ─── Authors ─────────────────────────────────────────────────
@@ -1228,7 +1217,7 @@ async def import_add_books(data: dict = Body(...)):
 async def trigger_sync():
     import os as _os
     active_slug = get_active_library()
-    lib = next((l for l in _discovered_libraries if l["slug"] == active_slug), None)
+    lib = next((l for l in state._discovered_libraries if l["slug"] == active_slug), None)
     try:
         if lib:
             app = get_app(lib.get("app_type", "calibre"))
@@ -1245,8 +1234,8 @@ async def trigger_sync():
             save_settings(s)
         else:
             result = await sync_calibre()
-        _last_calibre_check["at"] = time.time()
-        _last_calibre_check["synced"] = True
+        state._last_calibre_check["at"] = time.time()
+        state._last_calibre_check["synced"] = True
         return {"status": "ok", **result}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -1257,26 +1246,24 @@ async def trigger_sync_alias():
 
 @app.post("/api/sync/lookup")
 async def trigger_lookup():
-    global _lookup_task, _lookup_progress
     s = load_settings()
     if not s.get("author_scanning_enabled", True):
         return {"error": "Author scanning is disabled — enable it in Settings"}
-    if _lookup_task and not _lookup_task.done():
+    if state._lookup_task and not state._lookup_task.done():
         return {"error": "An author scan is already running"}
-    _lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+    state._lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
                         "new_books": 0, "status": "scanning", "type": "lookup"}
     def _progress(data):
-        _lookup_progress.update({"checked": data["checked"], "total": data["total"],
+        state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
                                  "current_author": data["current_author"], "new_books": data["new_books"]})
     async def _do():
-        global _lookup_progress
         try:
             await run_full_lookup(on_progress=_progress)
-            _lookup_progress.update({"running": False, "status": "complete"})
+            state._lookup_progress.update({"running": False, "status": "complete"})
         except Exception as e:
             logger.error(f"Author scan error: {e}")
-            _lookup_progress.update({"running": False, "status": f"error: {e}"})
-    _lookup_task = asyncio.create_task(_do())
+            state._lookup_progress.update({"running": False, "status": f"error: {e}"})
+    state._lookup_task = asyncio.create_task(_do())
     return {"status": "started"}
 
 @app.post("/api/lookup")
@@ -1286,10 +1273,9 @@ async def trigger_lookup_alias():
 @app.post("/api/lookup/cancel")
 async def lookup_cancel():
     """Cancel the currently running author scan."""
-    global _lookup_task, _lookup_progress
-    if _lookup_task and not _lookup_task.done():
-        _lookup_task.cancel()
-        _lookup_progress.update({"running": False, "status": "cancelled"})
+    if state._lookup_task and not state._lookup_task.done():
+        state._lookup_task.cancel()
+        state._lookup_progress.update({"running": False, "status": "cancelled"})
         logger.info("Author scan cancelled by user")
         return {"status": "ok", "message": "Author scan cancelled"}
     return {"status": "ok", "message": "No author scan running"}
@@ -1298,30 +1284,28 @@ async def lookup_cancel():
 @app.get("/api/lookup/status")
 async def lookup_status():
     """Get progress of the current/most recent author scan."""
-    return dict(_lookup_progress)
+    return dict(state._lookup_progress)
 
 @app.post("/api/sync/full-rescan")
 async def trigger_full_rescan():
-    global _lookup_task, _lookup_progress
     s = load_settings()
     if not s.get("author_scanning_enabled", True):
         return {"error": "Author scanning is disabled — enable it in Settings"}
-    if _lookup_task and not _lookup_task.done():
+    if state._lookup_task and not state._lookup_task.done():
         return {"error": "An author scan is already running"}
-    _lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+    state._lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
                         "new_books": 0, "status": "scanning", "type": "full_rescan"}
     def _progress(data):
-        _lookup_progress.update({"checked": data["checked"], "total": data["total"],
+        state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
                                  "current_author": data["current_author"], "new_books": data["new_books"]})
     async def _do():
-        global _lookup_progress
         try:
             await run_full_rescan(on_progress=_progress)
-            _lookup_progress.update({"running": False, "status": "complete"})
+            state._lookup_progress.update({"running": False, "status": "complete"})
         except Exception as e:
             logger.error(f"Full re-scan error: {e}")
-            _lookup_progress.update({"running": False, "status": f"error: {e}"})
-    _lookup_task = asyncio.create_task(_do())
+            state._lookup_progress.update({"running": False, "status": f"error: {e}"})
+    state._lookup_task = asyncio.create_task(_do())
     return {"status": "started"}
 
 @app.post("/api/authors/{aid}/lookup")
@@ -1438,15 +1422,14 @@ async def mam_status_endpoint():
 async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
     """Scan books missing MAM data. Batches of 100 with 5-min pauses.
     If limit is provided, scan at most that many books total."""
-    global _mam_scan_task, _mam_scan_progress
     s = load_settings()
     if not s.get("mam_enabled") or not s.get("mam_session_id"):
         return {"error": "MAM not configured or not enabled"}
     if not s.get("mam_scanning_enabled", True):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
-    if _mam_scan_progress.get("running"):
+    if state._mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
-    if _lookup_progress.get("running"):
+    if state._lookup_progress.get("running"):
         return {"error": "An author scan is running — MAM scan will wait until it finishes"}
 
     db = await get_db()
@@ -1462,45 +1445,44 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
         return {"status": "complete", "message": "No books need scanning — all already have MAM data"}
 
     scan_total = min(total, limit) if limit else total
-    _mam_scan_progress = {"running": True, "scanned": 0, "total": scan_total,
+    state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_total,
                           "found": 0, "possible": 0, "not_found": 0, "errors": 0,
                           "status": "scanning", "type": "manual"}
 
     async def _do_scan():
-        global _mam_scan_progress
         batch_num = 0
         while True:
             # Wait for any author scan before starting next batch
-            if _lookup_progress.get("running"):
-                _mam_scan_progress["status"] = "waiting (author scan running)"
+            if state._lookup_progress.get("running"):
+                state._mam_scan_progress["status"] = "waiting (author scan running)"
                 logger.info("MAM scan waiting for author scan to finish...")
-                while _lookup_progress.get("running"):
+                while state._lookup_progress.get("running"):
                     await asyncio.sleep(30)
                 logger.info("Author scan finished — MAM scan resuming")
-                _mam_scan_progress["status"] = "scanning"
+                state._mam_scan_progress["status"] = "scanning"
             cs = load_settings()
             if not cs.get("mam_enabled") or not cs.get("mam_session_id"):
-                _mam_scan_progress.update({"status": "stopped (MAM disabled)", "running": False})
+                state._mam_scan_progress.update({"status": "stopped (MAM disabled)", "running": False})
                 return
             db = await get_db()
             try:
                 def _progress(stats):
-                    _mam_scan_progress.update({
+                    state._mam_scan_progress.update({
                         "scanned": base_scanned + stats["scanned"],
                         "found": base_found + stats["found"],
                         "possible": base_possible + stats["possible"],
                         "not_found": base_not_found + stats["not_found"],
                         "errors": base_errors + stats["errors"],
                     })
-                base_scanned = _mam_scan_progress["scanned"]
-                base_found = _mam_scan_progress["found"]
-                base_possible = _mam_scan_progress["possible"]
-                base_not_found = _mam_scan_progress["not_found"]
-                base_errors = _mam_scan_progress["errors"]
-                batch_limit = min(100, scan_total - _mam_scan_progress["scanned"])
+                base_scanned = state._mam_scan_progress["scanned"]
+                base_found = state._mam_scan_progress["found"]
+                base_possible = state._mam_scan_progress["possible"]
+                base_not_found = state._mam_scan_progress["not_found"]
+                base_errors = state._mam_scan_progress["errors"]
+                batch_limit = min(100, scan_total - state._mam_scan_progress["scanned"])
                 if batch_limit <= 0:
-                    _mam_scan_progress.update({"status": "complete", "running": False})
-                    logger.info(f"MAM scan reached limit ({scan_total}): {_mam_scan_progress['scanned']} scanned, {_mam_scan_progress['found']} found")
+                    state._mam_scan_progress.update({"status": "complete", "running": False})
+                    logger.info(f"MAM scan reached limit ({scan_total}): {state._mam_scan_progress['scanned']} scanned, {state._mam_scan_progress['found']} found")
                     await db.close()
                     return
                 result = await mam_scan_batch(
@@ -1508,17 +1490,17 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                     delay=cs.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=cs.get("mam_format_priority"),
                     on_progress=_progress,
-                    cancel_check=lambda: _lookup_progress.get("running", False),
+                    cancel_check=lambda: state._lookup_progress.get("running", False),
                 )
                 # Progress already updated per-book via on_progress callback
                 if result.get("error"):
-                    _mam_scan_progress.update({"status": f"error: {result['error']}", "running": False})
+                    state._mam_scan_progress.update({"status": f"error: {result['error']}", "running": False})
                     return
                 remaining = await db.execute_fetchall(
                     "SELECT COUNT(*) FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0"
                 )
                 left = remaining[0][0] if remaining else 0
-                _mam_scan_progress["total"] = _mam_scan_progress["scanned"] + left
+                state._mam_scan_progress["total"] = state._mam_scan_progress["scanned"] + left
                 await db.execute(
                     "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
                     ("mam", time.time(), time.time(), "complete",
@@ -1527,38 +1509,37 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                 await db.commit()
             except Exception as e:
                 logger.error(f"MAM scan batch error: {e}")
-                _mam_scan_progress.update({"status": f"error: {e}", "running": False})
+                state._mam_scan_progress.update({"status": f"error: {e}", "running": False})
                 return
             finally:
                 await db.close()
-            if left == 0 or result.get("scanned", 0) == 0 or _mam_scan_progress["scanned"] >= scan_total:
-                _mam_scan_progress.update({"status": "complete", "running": False})
-                logger.info(f"MAM scan complete: {_mam_scan_progress['scanned']} scanned, {_mam_scan_progress['found']} found")
+            if left == 0 or result.get("scanned", 0) == 0 or state._mam_scan_progress["scanned"] >= scan_total:
+                state._mam_scan_progress.update({"status": "complete", "running": False})
+                logger.info(f"MAM scan complete: {state._mam_scan_progress['scanned']} scanned, {state._mam_scan_progress['found']} found")
                 return
             batch_num += 1
-            _mam_scan_progress["status"] = "paused"
-            logger.info(f"MAM scan batch {batch_num} done ({_mam_scan_progress['scanned']}/{_mam_scan_progress['total']}), pausing 5 min")
+            state._mam_scan_progress["status"] = "paused"
+            logger.info(f"MAM scan batch {batch_num} done ({state._mam_scan_progress['scanned']}/{state._mam_scan_progress['total']}), pausing 5 min")
             await asyncio.sleep(300)
             # Wait for any author scan to finish before resuming
-            if _lookup_progress.get("running"):
-                _mam_scan_progress["status"] = "waiting (author scan running)"
+            if state._lookup_progress.get("running"):
+                state._mam_scan_progress["status"] = "waiting (author scan running)"
                 logger.info("MAM scan waiting for author scan to finish...")
-                while _lookup_progress.get("running"):
+                while state._lookup_progress.get("running"):
                     await asyncio.sleep(30)
                 logger.info("Author scan finished — MAM scan resuming")
-            _mam_scan_progress["status"] = "scanning"
+            state._mam_scan_progress["status"] = "scanning"
 
-    _mam_scan_task = asyncio.create_task(_do_scan())
+    state._mam_scan_task = asyncio.create_task(_do_scan())
     return {"status": "started", "total": total}
 
 
 @app.post("/api/mam/scan/cancel")
 async def mam_scan_cancel():
     """Cancel the currently running MAM scan."""
-    global _mam_scan_task, _mam_scan_progress
-    if _mam_scan_task and not _mam_scan_task.done():
-        _mam_scan_task.cancel()
-        _mam_scan_progress.update({"running": False, "status": "cancelled"})
+    if state._mam_scan_task and not state._mam_scan_task.done():
+        state._mam_scan_task.cancel()
+        state._mam_scan_progress.update({"running": False, "status": "cancelled"})
         logger.info("MAM scan cancelled by user")
         return {"status": "ok", "message": "MAM scan cancelled"}
     return {"status": "ok", "message": "No MAM scan running"}
@@ -1567,10 +1548,9 @@ async def mam_scan_cancel():
 @app.get("/api/mam/scan/status")
 async def mam_scan_status_endpoint():
     """Get progress of any active MAM scan (manual, scheduled, or full)."""
-    global _mam_scan_progress
-    if _mam_scan_progress.get("running"):
-        return dict(_mam_scan_progress)
-    if _mam_full_scan_task and not _mam_full_scan_task.done():
+    if state._mam_scan_progress.get("running"):
+        return dict(state._mam_scan_progress)
+    if state._mam_full_scan_task and not state._mam_full_scan_task.done():
         db = await get_db()
         try:
             fs = await mam_get_full_scan_status(db)
@@ -1582,7 +1562,7 @@ async def mam_scan_status_endpoint():
                         "progress_pct": fs.get("progress_pct", 0)}
         finally:
             await db.close()
-    return dict(_mam_scan_progress)
+    return dict(state._mam_scan_progress)
 
 
 @app.post("/api/mam/test-scan")
@@ -1593,7 +1573,7 @@ async def mam_test_scan():
         return {"error": "MAM not configured or not enabled"}
     if not s.get("mam_scanning_enabled", True):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
-    if _mam_scan_task and not _mam_scan_task.done():
+    if state._mam_scan_task and not state._mam_scan_task.done():
         return {"error": "A MAM scan is already running — wait for it to finish"}
     db = await get_db()
     try:
@@ -1602,7 +1582,7 @@ async def mam_test_scan():
             delay=s.get("rate_mam", 2),
             skip_ip_update=True,
             format_priority=s.get("mam_format_priority"),
-            cancel_check=lambda: _lookup_progress.get("running", False),
+            cancel_check=lambda: state._lookup_progress.get("running", False),
         )
         return result
     finally:
@@ -1612,17 +1592,16 @@ async def mam_test_scan():
 @app.post("/api/mam/full-scan")
 async def mam_full_scan_start():
     """Start a full MAM library scan (250 books/batch, 1hr between batches)."""
-    global _mam_full_scan_task
     s = load_settings()
     if not s.get("mam_enabled") or not s.get("mam_session_id"):
         return {"error": "MAM not configured or not enabled"}
     if not s.get("mam_scanning_enabled", True):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
-    if _mam_full_scan_task and not _mam_full_scan_task.done():
+    if state._mam_full_scan_task and not state._mam_full_scan_task.done():
         return {"error": "A full MAM scan is already running"}
-    if _mam_scan_progress.get("running"):
+    if state._mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running — wait for it to finish"}
-    if _lookup_progress.get("running"):
+    if state._lookup_progress.get("running"):
         return {"error": "An author scan is running — MAM scan will wait until it finishes"}
 
     db = await get_db()
@@ -1634,8 +1613,7 @@ async def mam_full_scan_start():
         await db.close()
 
     async def _full_scan_loop():
-        global _mam_scan_progress
-        _mam_scan_progress = {"running": True, "scanned": 0,
+        state._mam_scan_progress = {"running": True, "scanned": 0,
                               "total": start_result.get("total_books", 0),
                               "found": 0, "possible": 0, "not_found": 0,
                               "errors": 0, "status": "scanning", "type": "full_scan"}
@@ -1650,31 +1628,31 @@ async def mam_full_scan_start():
                     format_priority=cs.get("mam_format_priority"),
                 )
                 fs = await mam_get_full_scan_status(db)
-                _mam_scan_progress.update({
+                state._mam_scan_progress.update({
                     "scanned": fs.get("scanned", 0),
-                    "total": fs.get("total_books", _mam_scan_progress["total"]),
+                    "total": fs.get("total_books", state._mam_scan_progress["total"]),
                     "status": "scanning" if result["status"] == "batch_complete" else result["status"],
                 })
             finally:
                 await db.close()
             if result["status"] in ("scan_complete", "error", "no_scan"):
-                _mam_scan_progress.update({"running": False, "status": result["status"]})
+                state._mam_scan_progress.update({"running": False, "status": result["status"]})
                 break
             elif result["status"] == "batch_complete":
                 wait = cs.get("mam_full_scan_batch_delay_minutes", 60) * 60
-                _mam_scan_progress["status"] = "paused"
+                state._mam_scan_progress["status"] = "paused"
                 logger.info(f"Full MAM scan: batch done, waiting {wait//60} min")
                 await asyncio.sleep(wait)
                 # Wait for any author scan to finish before resuming
-                if _lookup_progress.get("running"):
-                    _mam_scan_progress["status"] = "waiting (author scan running)"
+                if state._lookup_progress.get("running"):
+                    state._mam_scan_progress["status"] = "waiting (author scan running)"
                     logger.info("Full MAM scan waiting for author scan to finish...")
-                    while _lookup_progress.get("running"):
+                    while state._lookup_progress.get("running"):
                         await asyncio.sleep(30)
                     logger.info("Author scan finished — full MAM scan resuming")
-                _mam_scan_progress["status"] = "scanning"
+                state._mam_scan_progress["status"] = "scanning"
 
-    _mam_full_scan_task = asyncio.create_task(_full_scan_loop())
+    state._mam_full_scan_task = asyncio.create_task(_full_scan_loop())
     return {"status": "started", "scan_id": start_result["id"],
             "total_books": start_result["total_books"]}
 
@@ -1692,28 +1670,26 @@ async def mam_full_scan_status():
 @app.post("/api/mam/full-scan/cancel")
 async def mam_full_scan_cancel():
     """Cancel a running full MAM scan."""
-    global _mam_full_scan_task
     db = await get_db()
     try:
         result = await mam_cancel_full_scan(db)
     finally:
         await db.close()
-    if _mam_full_scan_task and not _mam_full_scan_task.done():
-        _mam_full_scan_task.cancel()
+    if state._mam_full_scan_task and not state._mam_full_scan_task.done():
+        state._mam_full_scan_task.cancel()
     return result
 
 
 @app.post("/api/scanning/author/toggle")
 async def toggle_author_scanning():
     """Toggle author scanning on/off. Cancels running scan when disabled."""
-    global _lookup_task, _lookup_progress
     s = load_settings()
     new_val = not s.get("author_scanning_enabled", True)
     s["author_scanning_enabled"] = new_val
     save_settings(s)
-    if not new_val and _lookup_task and not _lookup_task.done():
-        _lookup_task.cancel()
-        _lookup_progress.update({"running": False, "status": "cancelled"})
+    if not new_val and state._lookup_task and not state._lookup_task.done():
+        state._lookup_task.cancel()
+        state._lookup_progress.update({"running": False, "status": "cancelled"})
         logger.info("Author scanning disabled — cancelled running scan")
     return {"enabled": new_val}
 
@@ -1721,18 +1697,17 @@ async def toggle_author_scanning():
 @app.post("/api/scanning/mam/toggle")
 async def toggle_mam_scanning():
     """Toggle MAM scanning on/off without affecting MAM feature visibility."""
-    global _mam_scan_task, _mam_full_scan_task, _mam_scan_progress
     s = load_settings()
     new_val = not s.get("mam_scanning_enabled", True)
     s["mam_scanning_enabled"] = new_val
     save_settings(s)
     if not new_val:
-        if _mam_scan_task and not _mam_scan_task.done():
-            _mam_scan_task.cancel()
-            _mam_scan_progress.update({"running": False, "status": "cancelled"})
-        if _mam_full_scan_task and not _mam_full_scan_task.done():
-            _mam_full_scan_task.cancel()
-            _mam_scan_progress.update({"running": False, "status": "cancelled"})
+        if state._mam_scan_task and not state._mam_scan_task.done():
+            state._mam_scan_task.cancel()
+            state._mam_scan_progress.update({"running": False, "status": "cancelled"})
+        if state._mam_full_scan_task and not state._mam_full_scan_task.done():
+            state._mam_full_scan_task.cancel()
+            state._mam_scan_progress.update({"running": False, "status": "cancelled"})
         logger.info("MAM scanning disabled — cancelled running scans")
     return {"enabled": new_val}
 
