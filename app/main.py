@@ -23,7 +23,7 @@ class QuietAccessFilter(logging.Filter):
 uv_access = logging.getLogger("uvicorn.access")
 uv_access.addFilter(QuietAccessFilter())
 from app.calibre_sync import sync_calibre
-from app.lookup import run_full_lookup, run_full_rescan, reload_sources
+from app.lookup import run_full_lookup, reload_sources
 from app.sources.mam import (
     validate_connection as mam_validate,
     scan_books_batch as mam_scan_batch,
@@ -296,103 +296,6 @@ app.include_router(_r_scan.router)
 app.include_router(_r_mam.router)
 app.include_router(_r_db_editor.router)
 app.include_router(_r_import_export.router)
-
-
-# ─── Sync ────────────────────────────────────────────────────
-@app.post("/api/sync/calibre")
-async def trigger_sync():
-    import os as _os
-    active_slug = get_active_library()
-    lib = next((l for l in state._discovered_libraries if l["slug"] == active_slug), None)
-    try:
-        if lib:
-            app = get_app(lib.get("app_type", "calibre"))
-            if app:
-                result = await app.sync(lib["source_db_path"], lib["library_path"])
-            else:
-                from app.calibre_sync import sync_calibre
-                result = await sync_calibre(lib["source_db_path"], lib["library_path"])
-            # Update mtime after successful manual sync
-            s = load_settings()
-            mtimes = s.get("calibre_mtimes", {})
-            mtimes[active_slug] = _os.path.getmtime(lib["source_db_path"])
-            s["calibre_mtimes"] = mtimes
-            save_settings(s)
-        else:
-            result = await sync_calibre()
-        state._last_calibre_check["at"] = time.time()
-        state._last_calibre_check["synced"] = True
-        return {"status": "ok", **result}
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-@app.post("/api/sync")
-async def trigger_sync_alias():
-    return await trigger_sync()
-
-@app.post("/api/sync/lookup")
-async def trigger_lookup():
-    s = load_settings()
-    if not s.get("author_scanning_enabled", True):
-        return {"error": "Author scanning is disabled — enable it in Settings"}
-    if state._lookup_task and not state._lookup_task.done():
-        return {"error": "An author scan is already running"}
-    state._lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
-                        "new_books": 0, "status": "scanning", "type": "lookup"}
-    def _progress(data):
-        state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
-                                 "current_author": data["current_author"], "new_books": data["new_books"]})
-    async def _do():
-        try:
-            await run_full_lookup(on_progress=_progress)
-            state._lookup_progress.update({"running": False, "status": "complete"})
-        except Exception as e:
-            logger.error(f"Author scan error: {e}")
-            state._lookup_progress.update({"running": False, "status": f"error: {e}"})
-    state._lookup_task = asyncio.create_task(_do())
-    return {"status": "started"}
-
-@app.post("/api/lookup")
-async def trigger_lookup_alias():
-    return await trigger_lookup()
-
-@app.post("/api/lookup/cancel")
-async def lookup_cancel():
-    """Cancel the currently running author scan."""
-    if state._lookup_task and not state._lookup_task.done():
-        state._lookup_task.cancel()
-        state._lookup_progress.update({"running": False, "status": "cancelled"})
-        logger.info("Author scan cancelled by user")
-        return {"status": "ok", "message": "Author scan cancelled"}
-    return {"status": "ok", "message": "No author scan running"}
-
-
-@app.get("/api/lookup/status")
-async def lookup_status():
-    """Get progress of the current/most recent author scan."""
-    return dict(state._lookup_progress)
-
-@app.post("/api/sync/full-rescan")
-async def trigger_full_rescan():
-    s = load_settings()
-    if not s.get("author_scanning_enabled", True):
-        return {"error": "Author scanning is disabled — enable it in Settings"}
-    if state._lookup_task and not state._lookup_task.done():
-        return {"error": "An author scan is already running"}
-    state._lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
-                        "new_books": 0, "status": "scanning", "type": "full_rescan"}
-    def _progress(data):
-        state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
-                                 "current_author": data["current_author"], "new_books": data["new_books"]})
-    async def _do():
-        try:
-            await run_full_rescan(on_progress=_progress)
-            state._lookup_progress.update({"running": False, "status": "complete"})
-        except Exception as e:
-            logger.error(f"Full re-scan error: {e}")
-            state._lookup_progress.update({"running": False, "status": f"error: {e}"})
-    state._lookup_task = asyncio.create_task(_do())
-    return {"status": "started"}
 
 
 # ─── MAM Integration ─────────────────────────────────────────
@@ -694,38 +597,6 @@ async def mam_full_scan_cancel():
     if state._mam_full_scan_task and not state._mam_full_scan_task.done():
         state._mam_full_scan_task.cancel()
     return result
-
-
-@app.post("/api/scanning/author/toggle")
-async def toggle_author_scanning():
-    """Toggle author scanning on/off. Cancels running scan when disabled."""
-    s = load_settings()
-    new_val = not s.get("author_scanning_enabled", True)
-    s["author_scanning_enabled"] = new_val
-    save_settings(s)
-    if not new_val and state._lookup_task and not state._lookup_task.done():
-        state._lookup_task.cancel()
-        state._lookup_progress.update({"running": False, "status": "cancelled"})
-        logger.info("Author scanning disabled — cancelled running scan")
-    return {"enabled": new_val}
-
-
-@app.post("/api/scanning/mam/toggle")
-async def toggle_mam_scanning():
-    """Toggle MAM scanning on/off without affecting MAM feature visibility."""
-    s = load_settings()
-    new_val = not s.get("mam_scanning_enabled", True)
-    s["mam_scanning_enabled"] = new_val
-    save_settings(s)
-    if not new_val:
-        if state._mam_scan_task and not state._mam_scan_task.done():
-            state._mam_scan_task.cancel()
-            state._mam_scan_progress.update({"running": False, "status": "cancelled"})
-        if state._mam_full_scan_task and not state._mam_full_scan_task.done():
-            state._mam_full_scan_task.cancel()
-            state._mam_scan_progress.update({"running": False, "status": "cancelled"})
-        logger.info("MAM scanning disabled — cancelled running scans")
-    return {"enabled": new_val}
 
 
 @app.post("/api/mam/toggle")
