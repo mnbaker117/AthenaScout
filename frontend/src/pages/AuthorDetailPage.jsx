@@ -26,7 +26,8 @@ return<Section title={header} count={countStr} ownedCount={series.owned_count} t
 function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
 
 // ─── Author Detail ──────────────────────────────────────────
-export default function AuthorDetailPage({authorId,onNav}){const t=useTheme();const[a,setA]=useState(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[mamRef,setMamRef]=useState(false);const[vm,setVm]=usePersist("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);
+export default function AuthorDetailPage({authorId,onNav}){const t=useTheme();const[a,setA]=useState(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[mamRef,setMamRef]=useState(false);const[vm,setVm]=usePersist("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);const[mamOn,setMamOn]=useState(false);
+useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const loadA=useCallback(()=>{setLd(true);api.get(`/authors/${authorId}`).then(d=>{setA(d);setLd(false)}).catch(console.error)},[authorId]);useEffect(()=>{loadA()},[loadA]);
@@ -51,7 +52,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <VT mode={vm} setMode={setVm}/>
 <Btn size="sm" onClick={()=>refresh(false)} disabled={ref} style={{height:34}}>{ref?<Spin/>:Ic.sync} Re-sync</Btn>
 <Btn size="sm" variant="ghost" onClick={()=>{if(confirm("Full Re-Scan visits every book page to refresh metadata. This may take a few minutes. Continue?"))refresh(true)}} disabled={ref} style={{height:34}}>{Ic.refresh} Full</Btn>
-<Btn size="sm" variant="ghost" onClick={scanMam} disabled={mamRef} title="Scan all un-scanned books for this author against MAM" style={{height:34}}>{mamRef?<Spin/>:null} Scan MAM</Btn>
+{mamOn?<Btn size="sm" onClick={scanMam} disabled={mamRef} title="Scan all un-scanned books for this author against MAM" style={{height:34}}>{mamRef?<Spin/>:null} Scan MAM</Btn>:null}
 </div></div></div>
 {(a.series||[]).map(s=><IS key={`${s.id}_${rk}`} series={s} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol} authorId={authorId}/>)}
 {(a.standalone_books||[]).length>0?<SA books={a.standalone_books} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol}/>:null}

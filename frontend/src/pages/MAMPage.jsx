@@ -26,6 +26,10 @@ const[scanStarting,setScanStarting]=useState(false);
 const[mamScan,setMamScan]=useState(null);
 // Sidebar
 const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);
+// Multi-select
+const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState(new Set());const[busy,setBusy]=useState(false);
+const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
+const selectAllVisible=()=>setSel(new Set(books.map(b=>b.id)));
 
 // Load counts + check running scan on mount
 useEffect(()=>{
@@ -47,6 +51,9 @@ const cancelScan=async()=>{try{await api.post("/mam/scan/cancel")}catch{}};
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const onAction=async(act,id)=>{if(act==="hide")await api.post(`/books/${id}/hide`);if(act==="dismiss")await api.post(`/books/${id}/dismiss`);load(pg)};
+const clearData=async(type)=>{const labels={source:"source scan",mam:"MAM scan",both:"all scan"};if(!confirm(`Clear ${labels[type]} data for ${sel.size} book(s)? ${type==="source"||type==="both"?"Discovered (non-Calibre) selected books will be DELETED.":"MAM status will be reset and books will need re-scanning."}`))return;setBusy(true);try{const r=await api.post("/books/clear-scan-data",{book_ids:[...sel],clear_source:type==="source"||type==="both",clear_mam:type==="mam"||type==="both"});if(r.error){alert(`Error: ${r.error}`)}else{setSel(new Set());setSelMode(false);load(pg);api.get("/mam/status").then(r2=>{if(r2.stats)setCounts({upload:r2.stats.upload_candidates||0,download:r2.stats.available_to_download||0,missing:r2.stats.missing_everywhere||0,unscanned:r2.stats.total_unscanned||0})}).catch(()=>{})}}catch(e){alert(`Error: ${e.message||e}`)}setBusy(false)};
+const scanSelected=async()=>{if(!confirm(`Run a MAM scan against ${sel.size} selected book(s)? This will re-scan even already-scanned books.`))return;setBusy(true);try{const r=await api.post("/books/scan-mam",{book_ids:[...sel]});if(r.error){alert(`MAM scan failed: ${r.error}`)}else{alert(`MAM scan complete: ${r.scanned||0} scanned, ${r.found||0} found, ${r.possible||0} possible, ${r.not_found||0} not on MAM`+(r.errors?`, ${r.errors} errors`:""));setSel(new Set());setSelMode(false);load(pg);api.get("/mam/status").then(r2=>{if(r2.stats)setCounts({upload:r2.stats.upload_candidates||0,download:r2.stats.available_to_download||0,missing:r2.stats.missing_everywhere||0,unscanned:r2.stats.total_unscanned||0})}).catch(()=>{})}}catch(e){alert(`MAM scan failed: ${e.message||e}`)}setBusy(false)};
+const scanSelectedSources=async()=>{if(!confirm(`Run a source-plugin scan for the unique authors of ${sel.size} selected book(s)?\n\nNote: source plugins look up by author, so this will scan the WHOLE author for each unique author in your selection — not just the selected books.`))return;setBusy(true);try{const r=await api.post("/books/scan-sources",{book_ids:[...sel]});if(r.error){alert(`Source scan failed: ${r.error}`)}else{alert(`Source scan complete: ${r.authors_scanned||0} author(s) scanned, ${r.new_books||0} new books found`+(r.errors?`, ${r.errors} errors`:""));setSel(new Set());setSelMode(false);load(pg)}}catch(e){alert(`Source scan failed: ${e.message||e}`)}setBusy(false)};
 
 const tabDefs=[{id:"upload",label:"Upload Candidates",color:t.grnt,icon:"↑",desc:"Books you own that aren't on MAM — potential uploads"},{id:"download",label:"Available on MAM",color:t.cyant||t.cyan,icon:"↓",desc:"Missing books found on MAM — ready to grab"},{id:"missing_everywhere",label:"Missing Everywhere",color:t.tg,icon:"∅",desc:"Neither you nor MAM have these books"}];
 const activeTab=tabDefs.find(x=>x.id===tab)||tabDefs[0];
@@ -118,10 +125,26 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 <SearchBar value={q} onChange={v=>{setQ(v);setPg(1)}}/>
 <select value={sort} onChange={e=>{setSort(e.target.value);setPg(1)}} style={{padding:"7px 10px",borderRadius:6,border:`1px solid ${t.border}`,background:t.inp,color:t.text2,fontSize:12}}><option value="title">Sort: Title</option><option value="author">Sort: Author</option><option value="date">Sort: Date</option><option value="series">Sort: Series</option></select>
 <VT mode={vm} setMode={setVm}/>
+<Btn size="sm" variant={selMode?"accent":"default"} onClick={()=>{setSelMode(!selMode);if(selMode)setSel(new Set())}}>{selMode?"Cancel Select":"Select"}</Btn>
 </div></div>
 
+{selMode?<div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:t.bg2,border:`1px solid ${t.border}`,borderRadius:8,flexWrap:"wrap"}}>
+<span style={{fontSize:13,fontWeight:600,color:t.text2}}>{sel.size} book{sel.size===1?"":"s"} selected</span>
+{sel.size>0?<>
+<Btn size="sm" onClick={scanSelectedSources} disabled={busy} title="Scans the unique authors of the selected books — note that source plugins lookup by author, not by individual book" style={{background:t.grn+"22",color:t.grnt,border:`1px solid ${t.grn}44`}}>{busy?"…":""} Scan Sources</Btn>
+<Btn size="sm" onClick={scanSelected} disabled={busy} style={{background:t.accent+"22",color:t.accent,border:`1px solid ${t.accent}44`}}>{busy?"…":""} Scan MAM</Btn>
+<span style={{width:1,height:20,background:t.border,margin:"0 4px"}}/>
+<Btn size="sm" onClick={()=>clearData("source")} disabled={busy} style={{background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}44`}}>Clear Source Data</Btn>
+<Btn size="sm" onClick={()=>clearData("mam")} disabled={busy} style={{background:t.cyan+"22",color:t.cyant,border:`1px solid ${t.cyan}44`}}>Clear MAM Data</Btn>
+<Btn size="sm" onClick={()=>clearData("both")} disabled={busy} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Clear Both</Btn>
+<span style={{width:1,height:20,background:t.border,margin:"0 4px"}}/>
+</>:null}
+<Btn size="sm" onClick={selectAllVisible} disabled={busy}>Select All on Page</Btn>
+{sel.size>0?<Btn size="sm" onClick={()=>setSel(new Set())} disabled={busy}>Deselect All</Btn>:null}
+</div>:null}
+
 {/* Book list */}
-{ld?<Load/>:books.length===0?<div style={{textAlign:"center",padding:40,color:t.tg}}>No books in this section</div>:vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"}/>}
+{ld?<Load/>:books.length===0?<div style={{textAlign:"center",padding:40,color:t.tg}}>No books in this section</div>:vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"} selMode={selMode} sel={sel} onToggleSel={toggleSel}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"} selMode={selMode} sel={sel} onToggleSel={toggleSel}/>}
 
 {/* Pagination */}
 {totalPages>1&&!ld?<div style={{display:"flex",justifyContent:"center",gap:6,paddingTop:8}}>

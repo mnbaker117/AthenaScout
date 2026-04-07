@@ -192,6 +192,175 @@ async def dismiss_all():
         await db.close()
 
 
+@router.post("/books/clear-scan-data")
+async def clear_book_scan_data(data: dict = Body(...)):
+    """Clear source and/or MAM scan data for a list of books.
+
+    Used by the multi-select bar on Library/Missing/Upcoming/MAM pages.
+
+    - clear_source: deletes the book if it was discovered (owned=0 and
+      calibre_id IS NULL); for owned books, just clears source_url.
+    - clear_mam: resets all mam_* columns on the book.
+    """
+    book_ids = data.get("book_ids", [])
+    clear_source = data.get("clear_source", False)
+    clear_mam = data.get("clear_mam", False)
+    if not book_ids:
+        return {"error": "No books specified"}
+    if not clear_source and not clear_mam:
+        return {"error": "Nothing to clear — specify clear_source and/or clear_mam"}
+
+    db = await get_db()
+    try:
+        placeholders = ",".join(["?" for _ in book_ids])
+        deleted = 0
+        if clear_source:
+            count_row = await (await db.execute(
+                f"SELECT COUNT(*) c FROM books WHERE id IN ({placeholders}) AND owned=0 AND calibre_id IS NULL",
+                book_ids,
+            )).fetchone()
+            deleted = count_row["c"] if count_row else 0
+            await db.execute(
+                f"DELETE FROM books WHERE id IN ({placeholders}) AND owned=0 AND calibre_id IS NULL",
+                book_ids,
+            )
+            await db.execute(
+                f"UPDATE books SET source_url=NULL WHERE id IN ({placeholders}) AND owned=1",
+                book_ids,
+            )
+        if clear_mam:
+            await db.execute(
+                f"UPDATE books SET mam_url=NULL, mam_status=NULL, mam_formats=NULL, "
+                f"mam_torrent_id=NULL, mam_has_multiple=0, mam_my_snatched=0 "
+                f"WHERE id IN ({placeholders})",
+                book_ids,
+            )
+        await db.commit()
+        logger.info(f"Cleared scan data for {len(book_ids)} books (source={clear_source}, mam={clear_mam}), {deleted} deleted")
+        return {"status": "ok", "books_cleared": len(book_ids), "books_deleted": deleted}
+    finally:
+        await db.close()
+
+
+@router.post("/books/scan-sources")
+async def scan_books_sources(data: dict = Body(...)):
+    """Run a source-plugin lookup for the unique authors of the given books.
+
+    Source plugins (Goodreads, Hardcover, Kobo, FantasticFiction) work at the
+    author level — there's no per-book source lookup. So when the user picks
+    book IDs from a Books-page selection, we resolve them to the distinct set
+    of author IDs and run lookup_author on each. The frontend tooltip warns
+    the user that this scans whole authors, not individual books.
+    """
+    from app.lookup import lookup_author
+
+    book_ids = data.get("book_ids", [])
+    if not book_ids:
+        return {"error": "No books specified"}
+
+    db = await get_db()
+    try:
+        placeholders = ",".join(["?" for _ in book_ids])
+        rows = await (await db.execute(
+            f"SELECT DISTINCT a.id, a.name FROM books b JOIN authors a ON b.author_id=a.id "
+            f"WHERE b.id IN ({placeholders})",
+            book_ids,
+        )).fetchall()
+    finally:
+        await db.close()
+    if not rows:
+        return {"error": "No matching authors found"}
+
+    total_new = 0
+    scanned = 0
+    errors = 0
+    for row in rows:
+        aid, name = row["id"], row["name"]
+        try:
+            new_books = await lookup_author(aid, name)
+            total_new += int(new_books or 0)
+            scanned += 1
+        except Exception as e:
+            logger.error(f"Bulk source scan error for author {aid} ({name}): {e}")
+            errors += 1
+    return {"status": "complete", "authors_scanned": scanned, "new_books": total_new, "errors": errors}
+
+
+@router.post("/books/scan-mam")
+async def scan_books_mam(data: dict = Body(...)):
+    """Run a MAM scan against the given list of book IDs.
+
+    Used by the multi-select bar on book listing pages and by the
+    individual Re-scan MAM button in BookSidebar (which sends a list of one).
+    Re-scans even books that already have a mam_status — the user clicked
+    the button to refresh stale results.
+    """
+    from app.config import load_settings
+    from app.sources.mam import check_book as mam_check_book
+    from app import state
+
+    book_ids = data.get("book_ids", [])
+    if not book_ids:
+        return {"error": "No books specified"}
+
+    s = load_settings()
+    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+        return {"error": "MAM not configured or not enabled"}
+    if not s.get("mam_scanning_enabled", True):
+        return {"error": "MAM scanning is disabled — enable it in Settings"}
+    if state._mam_scan_progress.get("running"):
+        return {"error": "A MAM scan is already running"}
+
+    db = await get_db()
+    try:
+        placeholders = ",".join(["?" for _ in book_ids])
+        rows = await (await db.execute(
+            f"SELECT b.id, b.title, a.name FROM books b JOIN authors a ON b.author_id=a.id "
+            f"WHERE b.id IN ({placeholders})",
+            book_ids,
+        )).fetchall()
+        if not rows:
+            return {"error": "No matching books found"}
+
+        delay = s.get("rate_mam", 2)
+        format_priority = s.get("mam_format_priority")
+        token = s["mam_session_id"]
+        stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0}
+        results = []
+
+        for row in rows:
+            bid, btitle, aname = row["id"], row["title"], row["name"]
+            try:
+                check = await mam_check_book(token, btitle, aname, format_priority, delay)
+            except Exception as e:
+                logger.error(f"Bulk MAM scan error on book {bid} ({btitle[:40]}): {e}")
+                stats["errors"] += 1
+                continue
+            await db.execute("""
+                UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
+                       mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
+                WHERE id=?
+            """, (
+                check["mam_url"], check["status"], check["mam_formats"],
+                check["mam_torrent_id"],
+                1 if check["mam_has_multiple"] else 0,
+                1 if check.get("mam_my_snatched") else 0,
+                bid,
+            ))
+            stats["scanned"] += 1
+            if check["status"] == "found":
+                stats["found"] += 1
+            elif check["status"] == "possible":
+                stats["possible"] += 1
+            elif check["status"] == "not_found":
+                stats["not_found"] += 1
+            results.append({"id": bid, "status": check["status"], "match_pct": check.get("match_pct")})
+        await db.commit()
+        return {"status": "complete", **stats, "results": results}
+    finally:
+        await db.close()
+
+
 @router.delete("/books/{bid}")
 async def delete_book(bid: int):
     """Delete a book entry — only non-Calibre (discovered/imported) books can be deleted."""

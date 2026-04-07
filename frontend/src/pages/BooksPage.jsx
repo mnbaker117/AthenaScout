@@ -15,6 +15,9 @@ import { ExportModal } from "../components/ExportModal";
 // ─── Books Page (Library/Missing/Upcoming) ──────────────────
 export default function BooksPage({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}){const t=useTheme();const[bks,setBks]=useState([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist(`bp_${title}_q`,"");const[vm,setVm]=usePersist(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist(`bp_${title}_sort`,"title");const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
 const[mamFilter,setMamFilter]=usePersist(`bp_${title}_mam`,"");const[mamOn,setMamOn]=useState(false);
+const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState(new Set());const[busy,setBusy]=useState(false);
+const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
+const selectAllVisible=()=>setSel(new Set(bks.map(b=>b.id)));
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const isGrouped=grp!=="all";
@@ -26,12 +29,16 @@ useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{
 const totalPages=Math.max(1,Math.ceil(total/perPage));
 const onAction=async(act,id)=>{if(act==="hide")await api.post(`/books/${id}/hide`);if(act==="dismiss")await api.post(`/books/${id}/dismiss`);if(act==="delete")await api.del(`/books/${id}`);load(pg)};
 const dismissable=bks.filter(b=>!!b.is_new).length;
+const clearData=async(type)=>{const labels={source:"source scan",mam:"MAM scan",both:"all scan"};if(!confirm(`Clear ${labels[type]} data for ${sel.size} book(s)? ${type==="source"||type==="both"?"Discovered (non-Calibre) selected books will be DELETED.":"MAM status will be reset and books will need re-scanning."}`))return;setBusy(true);try{const r=await api.post("/books/clear-scan-data",{book_ids:[...sel],clear_source:type==="source"||type==="both",clear_mam:type==="mam"||type==="both"});if(r.error){alert(`Error: ${r.error}`)}else{setSel(new Set());setSelMode(false);load(pg)}}catch(e){alert(`Error: ${e.message||e}`)}setBusy(false)};
+const scanMam=async()=>{if(!confirm(`Run a MAM scan against ${sel.size} selected book(s)? This will re-scan even already-scanned books.`))return;setBusy(true);try{const r=await api.post("/books/scan-mam",{book_ids:[...sel]});if(r.error){alert(`MAM scan failed: ${r.error}`)}else{alert(`MAM scan complete: ${r.scanned||0} scanned, ${r.found||0} found, ${r.possible||0} possible, ${r.not_found||0} not on MAM`+(r.errors?`, ${r.errors} errors`:""));setSel(new Set());setSelMode(false);load(pg)}}catch(e){alert(`MAM scan failed: ${e.message||e}`)}setBusy(false)};
+const scanSources=async()=>{if(!confirm(`Run a source-plugin scan for the unique authors of ${sel.size} selected book(s)?\n\nNote: source plugins look up by author, so this will scan the WHOLE author for each unique author in your selection — not just the selected books.`))return;setBusy(true);try{const r=await api.post("/books/scan-sources",{book_ids:[...sel]});if(r.error){alert(`Source scan failed: ${r.error}`)}else{alert(`Source scan complete: ${r.authors_scanned||0} author(s) scanned, ${r.new_books||0} new books found`+(r.errors?`, ${r.errors} errors`:""));setSel(new Set());setSelMode(false);load(pg)}}catch(e){alert(`Source scan failed: ${e.message||e}`)}setBusy(false)};
 
 // Group books
 let content;
-if(grp==="author"&&bks.length>0){const groups={};bks.forEach(b=>{const k=b.author_name||"Unknown";if(!groups[k])groups[k]=[];groups[k].push(b)});content=Object.entries(groups).sort(([a],[b])=>a.localeCompare(b)).map(([name,books])=><Section key={name} title={name} count={books.length} defaultOpen={!allCollapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={false}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb}/>}</Section>)}
-else if(grp==="series"&&bks.length>0){const groups={};bks.forEach(b=>{const k=b.series_name||"Standalone";if(!groups[k])groups[k]=[];groups[k].push(b)});content=Object.entries(groups).sort(([a],[b])=>a==="Standalone"?1:b==="Standalone"?-1:a.localeCompare(b)).map(([name,books])=><Section key={name} title={name} count={books.length} defaultOpen={!allCollapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb}/>}</Section>)}
-else{content=vm==="list"?<BList books={bks} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor}/>:<BGrid books={bks} onAction={onAction} onBookClick={toggleSb}/>}
+const viewProps={selMode,sel,onToggleSel:toggleSel};
+if(grp==="author"&&bks.length>0){const groups={};bks.forEach(b=>{const k=b.author_name||"Unknown";if(!groups[k])groups[k]=[];groups[k].push(b)});content=Object.entries(groups).sort(([a],[b])=>a.localeCompare(b)).map(([name,books])=><Section key={name} title={name} count={books.length} defaultOpen={!allCollapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={false} {...viewProps}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} {...viewProps}/>}</Section>)}
+else if(grp==="series"&&bks.length>0){const groups={};bks.forEach(b=>{const k=b.series_name||"Standalone";if(!groups[k])groups[k]=[];groups[k].push(b)});content=Object.entries(groups).sort(([a],[b])=>a==="Standalone"?1:b==="Standalone"?-1:a.localeCompare(b)).map(([name,books])=><Section key={name} title={name} count={books.length} defaultOpen={!allCollapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} {...viewProps}/>}</Section>)}
+else{content=vm==="list"?<BList books={bks} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps}/>:<BGrid books={bks} onAction={onAction} onBookClick={toggleSb} {...viewProps}/>}
 
 return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 {/* Sticky sub-header */}
@@ -47,7 +54,23 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 <VT mode={vm} setMode={setVm}/>
 {dismissable>0?<Btn size="sm" variant="ghost" onClick={async()=>{await api.post("/books/dismiss-all");load(pg)}}>Dismiss all ({dismissable})</Btn>:null}
 {exportFilter?<Btn size="sm" variant="ghost" onClick={()=>setShowExp(true)}>{Ic.book} Export</Btn>:null}
-</div></div></div>
+<Btn size="sm" variant={selMode?"accent":"default"} onClick={()=>{setSelMode(!selMode);if(selMode)setSel(new Set())}}>{selMode?"Cancel Select":"Select"}</Btn>
+</div></div>
+{selMode?<div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",marginTop:8,background:t.bg2,border:`1px solid ${t.border}`,borderRadius:8,flexWrap:"wrap"}}>
+<span style={{fontSize:13,fontWeight:600,color:t.text2}}>{sel.size} book{sel.size===1?"":"s"} selected</span>
+{sel.size>0?<>
+<Btn size="sm" onClick={scanSources} disabled={busy} title="Scans the unique authors of the selected books — note that source plugins lookup by author, not by individual book" style={{background:t.grn+"22",color:t.grnt,border:`1px solid ${t.grn}44`}}>{busy?"…":""} Scan Sources</Btn>
+{mamOn?<Btn size="sm" onClick={scanMam} disabled={busy} style={{background:t.accent+"22",color:t.accent,border:`1px solid ${t.accent}44`}}>{busy?"…":""} Scan MAM</Btn>:null}
+<span style={{width:1,height:20,background:t.border,margin:"0 4px"}}/>
+<Btn size="sm" onClick={()=>clearData("source")} disabled={busy} style={{background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}44`}}>Clear Source Data</Btn>
+{mamOn?<Btn size="sm" onClick={()=>clearData("mam")} disabled={busy} style={{background:t.cyan+"22",color:t.cyant,border:`1px solid ${t.cyan}44`}}>Clear MAM Data</Btn>:null}
+{mamOn?<Btn size="sm" onClick={()=>clearData("both")} disabled={busy} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Clear Both</Btn>:null}
+<span style={{width:1,height:20,background:t.border,margin:"0 4px"}}/>
+</>:null}
+<Btn size="sm" onClick={selectAllVisible} disabled={busy}>Select All on Page</Btn>
+{sel.size>0?<Btn size="sm" onClick={()=>setSel(new Set())} disabled={busy}>Deselect All</Btn>:null}
+</div>:null}
+</div>
 {ld?<Load/>:<>{content}{!isGrouped&&totalPages>1&&<div style={{display:"flex",justifyContent:"center",gap:8,padding:20,alignItems:"center"}}><Btn size="sm" disabled={pg<=1} onClick={()=>{load(pg-1);window.scrollTo(0,0)}}>← Prev</Btn><span style={{fontSize:13,color:t.td}}>Page {pg} of {totalPages}</span><Btn size="sm" disabled={pg>=totalPages} onClick={()=>{load(pg+1);window.scrollTo(0,0)}}>Next →</Btn></div>}</>}
 {sb&&<BookSidebar book={sb} closing={sbClosing} onClose={closeSb} onAction={onAction} onEdit={()=>load(pg)}/>}
 {showExp?<ExportModal onClose={()=>setShowExp(false)} defaultFilter={exportFilter}/>:null}
