@@ -5,11 +5,182 @@ Holds /api/libraries, /api/libraries/active, /api/libraries/validate-path,
 /api/libraries/rescan.
 """
 import logging
-from fastapi import APIRouter
+import os
+from pathlib import Path
+from fastapi import APIRouter, Body, HTTPException
 
-from app.database import get_db
+from app.config import load_settings, save_settings, discover_libraries
+from app.database import (
+    get_db,
+    init_db,
+    set_active_library,
+    get_active_library,
+)
+from app.library_apps import get_app
+from app.sources.mam import cancel_full_scan as mam_cancel_full_scan
 from app import state
 
 logger = logging.getLogger("athenascout")
 
 router = APIRouter(prefix="/api", tags=["libraries"])
+
+
+@router.get("/libraries")
+async def list_libraries():
+    """Return all discovered Calibre libraries with active flag."""
+    active = get_active_library()
+    return {
+        "libraries": [
+            {
+                "name": lib["name"],
+                "slug": lib["slug"],
+                "app_type": lib.get("app_type", "calibre"),
+                "content_type": lib.get("content_type", "ebook"),
+                "display_name": lib.get("display_name", "Calibre"),
+                "source_db_path": lib["source_db_path"],
+                "library_path": lib["library_path"],
+                "active": lib["slug"] == active,
+            }
+            for lib in state._discovered_libraries
+        ]
+    }
+
+
+@router.post("/libraries/active")
+async def switch_library(body: dict = Body(...)):
+    """Switch the active library. Cancels any running scans first."""
+    slug = body.get("slug", "")
+    valid_slugs = [l["slug"] for l in state._discovered_libraries]
+    if slug not in valid_slugs:
+        raise HTTPException(400, f"Unknown library slug: {slug}. Valid: {valid_slugs}")
+
+    old_slug = get_active_library()
+    if slug == old_slug:
+        return {"status": "ok", "active": slug, "message": "Already active"}
+
+    # ── Cancel all running scans before switching ──
+    cancelled = []
+
+    # Cancel author lookup
+    if state._lookup_task and not state._lookup_task.done():
+        state._lookup_task.cancel()
+        state._lookup_progress.update({"running": False, "status": "cancelled (library switch)"})
+        cancelled.append("author scan")
+
+    # Cancel MAM scan (manual or scheduled)
+    if state._mam_scan_task and not state._mam_scan_task.done():
+        state._mam_scan_task.cancel()
+        state._mam_scan_progress.update({"running": False, "status": "cancelled (library switch)"})
+        cancelled.append("MAM scan")
+
+    # Cancel MAM full scan
+    if state._mam_full_scan_task and not state._mam_full_scan_task.done():
+        state._mam_full_scan_task.cancel()
+        try:
+            db = await get_db()
+            try:
+                await mam_cancel_full_scan(db)
+            finally:
+                await db.close()
+        except Exception:
+            pass
+        cancelled.append("MAM full scan")
+
+    if cancelled:
+        logger.info(f"Cancelled running scans due to library switch ({old_slug} → {slug}): {', '.join(cancelled)}")
+
+    # ── Switch the active library ──
+    set_active_library(slug)
+    s = load_settings()
+    s["active_library"] = slug
+    save_settings(s)
+    logger.info(f"Switched active library to '{slug}'")
+    return {"status": "ok", "active": slug, "cancelled": cancelled}
+
+
+@router.post("/libraries/validate-path")
+async def validate_library_path(body: dict = Body(...)):
+    """Validate a filesystem path for use as a library source.
+
+    Supports any registered library app type — uses the app's db_filename
+    to look for the correct database file (e.g., metadata.db for Calibre).
+    """
+    path = body.get("path", "").strip()
+    path_type = body.get("type", "root")
+    app_type = body.get("app_type", "calibre")
+
+    if not path:
+        return {"valid": False, "error": "No path provided"}
+    if not os.path.exists(path):
+        return {"valid": False, "error": f"Path does not exist: {path}"}
+
+    # Get the database filename for this app type
+    app_instance = get_app(app_type)
+    db_filename = app_instance.db_filename if app_instance else "metadata.db"
+
+    found = []
+    if path_type == "root":
+        root = Path(path)
+        for child in sorted(root.iterdir()):
+            if child.is_dir():
+                db_file = child / db_filename
+                if db_file.exists():
+                    found.append({"name": child.name, "path": str(db_file)})
+        root_db = root / db_filename
+        if root_db.exists():
+            found.append({"name": root.name, "path": str(root_db)})
+        if not found:
+            return {"valid": False, "error": f"No {db_filename} files found in subdirectories"}
+        return {"valid": True, "libraries_found": len(found), "details": found}
+
+    elif path_type == "direct":
+        p = Path(path)
+        if p.name == db_filename and p.exists():
+            return {"valid": True, "libraries_found": 1, "details": [{"name": p.parent.name, "path": str(p)}]}
+        elif (p / db_filename).exists():
+            return {"valid": True, "libraries_found": 1, "details": [{"name": p.name, "path": str(p / db_filename)}]}
+        else:
+            return {"valid": False, "error": f"No {db_filename} found at this path"}
+    else:
+        return {"valid": False, "error": f"Unknown type: {path_type}"}
+
+
+@router.post("/libraries/rescan")
+async def rescan_libraries():
+    """Re-run library discovery from current settings. Initializes new databases."""
+    s = load_settings()
+    new_libs = discover_libraries(s)
+    if not new_libs:
+        return {"status": "error", "error": "No libraries found after rescan"}
+
+    # Initialize any new library databases
+    existing_slugs = {l["slug"] for l in state._discovered_libraries}
+    for lib in new_libs:
+        if lib["slug"] not in existing_slugs:
+            await init_db(lib["slug"])
+            logger.info(f"Initialized new library database: {lib['slug']}")
+
+    state._discovered_libraries = new_libs
+    lib_names = [f'"{l["name"]}" ({l["slug"]})' for l in new_libs]
+    logger.info(f"Library rescan complete: {len(new_libs)} libraries found: {', '.join(lib_names)}")
+
+    # Ensure active library is still valid
+    active = get_active_library()
+    valid_slugs = [l["slug"] for l in new_libs]
+    if active not in valid_slugs:
+        new_active = new_libs[0]["slug"]
+        set_active_library(new_active)
+        s["active_library"] = new_active
+        save_settings(s)
+        logger.info(f"Active library reset to '{new_active}' after rescan")
+
+    return {
+        "status": "ok",
+        "libraries": [
+            {"name": l["name"], "slug": l["slug"],
+             "source_db_path": l["source_db_path"],
+             "library_path": l["library_path"],
+             "active": l["slug"] == get_active_library()}
+            for l in new_libs
+        ]
+    }
