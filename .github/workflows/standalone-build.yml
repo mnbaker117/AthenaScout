@@ -16,6 +16,12 @@ on:
       - '.github/workflows/standalone-build.yml'
   workflow_dispatch:
 
+# Default to least-privilege permissions for all jobs.
+# The `release` job below overrides this with `contents: write` so it can
+# upload artifacts to GitHub Releases.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build (${{ matrix.os }})
