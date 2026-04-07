@@ -8,6 +8,8 @@ import { Btn } from "./components/Btn";
 import { Spin } from "./components/Spin";
 import { Load } from "./components/Load";
 import { PB } from "./components/PB";
+import { VT } from "./components/VT";
+import { SearchBar } from "./components/SearchBar";
 import { Section } from "./components/Section";
 import { BGrid, BList } from "./components/BookViews";
 import { BookSidebar } from "./components/BookSidebar";
