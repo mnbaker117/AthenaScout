@@ -105,9 +105,23 @@ the same network.
   the auth middleware.
 - **Cookie flags:** `HttpOnly`, `SameSite=Lax`, `Secure` (only when the
   request was over HTTPS), `Max-Age=30 days`, `Path=/`.
-- **The signing secret** lives in `<data_dir>/auth_secret`, generated
-  with `secrets.token_urlsafe(48)` on first run. Locked down to `0600`
-  on POSIX. If the file is lost, the only side effect is that all current
+- **The signing secret** can come from one of three places, in priority
+  order:
+    1. The `ATHENASCOUT_AUTH_SECRET` environment variable (recommended
+       for containerized deployments — inject via Docker secrets,
+       Kubernetes secrets, systemd-creds, or a `.env` file). When set,
+       no secret file is written to disk at all. Must be at least 32
+       characters of high-entropy randomness; shorter values are
+       rejected with a loud error and the file fallback is used instead.
+    2. A file at `<data_dir>/auth_secret`, generated with
+       `secrets.token_urlsafe(48)` on first run. Locked down to `0600`
+       on POSIX so only the owning user can read it. This is the
+       default for users who don't configure the env var.
+    3. An in-memory-only secret as a last-resort fallback if both the
+       env var is missing AND the file write fails (e.g., read-only
+       filesystem). Sessions work for the lifetime of the process but
+       are invalidated on every restart; a loud error is logged.
+  If the file is lost, the only side effect is that all current
   sessions are invalidated and users have to log in again.
 - **Rate limiting:** 5 failed login attempts within any window triggers
   a 5-minute lockout. A successful login resets the counter.

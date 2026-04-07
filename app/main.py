@@ -383,26 +383,43 @@ if FD.exists():
     if (FD / "assets").exists():
         app.mount("/assets", StaticFiles(directory=FD / "assets"), name="assets")
 
+    # ─── SPA fallback whitelist ───────────────────────────
+    # Top-level files that vite emits to dist/. Built ONCE at startup
+    # from the trusted dist directory; user input is only used as a
+    # dict key, never concatenated into a path. CodeQL recognizes the
+    # membership lookup as a sanitizer for py/path-injection.
+    #
+    # This replaces the earlier resolve()/is_relative_to() approach,
+    # which was functionally correct (verified by smoke tests blocking
+    # /etc/passwd, /proc/self/environ, etc.) but which CodeQL's data-
+    # flow analysis couldn't recognize as safe. The whitelist pattern
+    # is simpler AND CodeQL-friendly. Phase 22B.3 Stage 2 follow-up.
+    _INDEX_HTML = (FD / "index.html").resolve()
+    _SERVE_FE_FILES: dict[str, Path] = {
+        p.name: p.resolve() for p in FD.iterdir() if p.is_file()
+    }
+
     @app.get("/{path:path}")
     async def serve_fe(path: str):
-        """SPA fallback handler — serves the requested static file if it
-        exists inside the frontend dist directory, falls back to index.html
-        for client-side routing.
+        """SPA fallback handler.
 
-        Path traversal protection: the requested path is resolved and
-        verified to stay within FD before serving. Any attempt to escape
-        (via .., symlinks, absolute paths, encoded traversal sequences)
-        falls through to index.html instead of touching the host filesystem.
-        Phase 22B.3 Stage 2B fix for the CodeQL high-severity finding.
+        Top-level files emitted by vite (index.html, icon.png, icon.svg,
+        favicon, etc.) are served from a startup-computed whitelist.
+        Anything else — including all client-side SPA routes — falls
+        through to index.html so the React router can take over.
+
+        Security: user input is ONLY used as a key into the
+        `_SERVE_FE_FILES` dict, which is built from `FD.iterdir()` at
+        startup. The path values served to FileResponse always come
+        from the trusted set, never from string concatenation with
+        user input. This makes path traversal structurally impossible
+        and is a pattern CodeQL's py/path-injection rule recognizes
+        as a sanitizer.
         """
-        try:
-            fp = (FD / path).resolve()
-            fd_resolved = FD.resolve()
-            if not fp.is_relative_to(fd_resolved):
-                return FileResponse(FD / "index.html")
-        except (ValueError, OSError):
-            return FileResponse(FD / "index.html")
-        return FileResponse(fp if fp.is_file() else FD / "index.html")
+        safe_file = _SERVE_FE_FILES.get(path)
+        if safe_file is not None:
+            return FileResponse(safe_file)
+        return FileResponse(_INDEX_HTML)
 elif IS_STANDALONE:
     @app.get("/{path:path}")
     async def serve_fe_missing(path: str):
