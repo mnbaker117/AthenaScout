@@ -39,14 +39,16 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install Python dependencies
         run: |
@@ -77,7 +79,7 @@ jobs:
           echo "✓ Build verified for ${{ matrix.os }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/athenascout/
@@ -216,7 +218,7 @@ jobs:
 
       - name: Linux — Upload native packages
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: athenascout-linux-packages
           path: packages/
@@ -284,7 +286,7 @@ jobs:
 
       - name: Windows — Upload native packages
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: athenascout-windows-packages
           path: packages/
@@ -390,7 +392,7 @@ jobs:
 
       - name: macOS — Upload native packages
         if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: athenascout-macos-packages
           path: packages/
@@ -406,7 +408,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 

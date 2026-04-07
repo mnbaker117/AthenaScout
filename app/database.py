@@ -254,33 +254,75 @@ async def get_db(slug=None) -> aiosqlite.Connection:
 async def init_db(slug=None):
     """Initialize schema and run migrations for a library database.
 
+    Uses PRAGMA user_version to track which migrations have been applied,
+    so the migration loop is skipped on subsequent startups (avoiding
+    redundant work and silent error swallowing).
+
+    Adding a new migration: append to the MIGRATIONS list. The next startup
+    will detect that user_version < len(MIGRATIONS) and run only the new
+    entries, then update user_version.
+
     Args:
         slug: Library slug. If None, uses the active library / legacy path.
     """
     db = await get_db(slug)
     try:
-        # Step 1: Create tables (IF NOT EXISTS — safe for existing DBs)
-        # Split schema: tables first, indexes later
+        # ── Step 1: Read current schema version ────────────────────
+        # PRAGMA user_version returns 0 for fresh databases or those that
+        # were initialized before we started using version tracking.
+        cursor = await db.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        current_version = row[0] if row else 0
+        target_version = len(MIGRATIONS)
+
+        # ── Step 2: Always ensure base tables exist ────────────────
+        # CREATE TABLE IF NOT EXISTS is cheap and safe — handles fresh DBs
+        # without us needing a separate "first install" code path.
         tables_sql = SCHEMA.split("CREATE INDEX")[0]
         await db.executescript(tables_sql)
         await db.commit()
 
-        # Step 2: Run migrations to add new columns to existing tables
-        for migration in MIGRATIONS:
-            try:
-                await db.execute(migration)
-                await db.commit()
-            except Exception:
-                pass  # Column/index already exists
+        # ── Step 3: Run only the migrations we haven't applied yet ─
+        if current_version < target_version:
+            _db_logger.info(
+                f"Migrating database schema: v{current_version} → v{target_version}"
+            )
+            for i, migration in enumerate(MIGRATIONS):
+                if i < current_version:
+                    continue
+                try:
+                    await db.execute(migration)
+                except aiosqlite.OperationalError as e:
+                    # The "duplicate column" / "already exists" cases are
+                    # expected when migrating a legacy database that already
+                    # had columns added by the old always-run loop. Silently
+                    # tolerate those, but log anything else as a warning so
+                    # real migration failures don't disappear.
+                    msg = str(e).lower()
+                    if "duplicate column" in msg or "already exists" in msg:
+                        continue
+                    _db_logger.warning(
+                        f"Migration #{i} failed unexpectedly: {e} "
+                        f"(SQL: {migration[:80]}...)"
+                    )
+            await db.commit()
 
-        # Step 3: Now create indexes (columns guaranteed to exist)
+            # Stamp the new version so we skip this loop next startup
+            await db.execute(f"PRAGMA user_version = {target_version}")
+            await db.commit()
+
+        # ── Step 4: Ensure indexes exist (cheap, idempotent) ───────
+        # Indexes are always checked because adding a new index to SCHEMA
+        # without a corresponding migration entry should still work.
         index_statements = [line.strip() for line in SCHEMA.split(";")
                            if "CREATE INDEX" in line]
         for idx_sql in index_statements:
             try:
                 await db.execute(idx_sql)
-                await db.commit()
-            except Exception:
-                pass  # Index already exists
+            except aiosqlite.OperationalError as e:
+                # "already exists" is the expected case for indexes
+                if "already exists" not in str(e).lower():
+                    _db_logger.warning(f"Index creation failed: {e}")
+        await db.commit()
     finally:
         await db.close()

@@ -581,7 +581,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 
 {/* Tab bar */}
 <div style={{display:"flex",gap:4,overflowX:"auto",paddingBottom:4}}>
-{tables.map(tb=><button key={tb} onClick={()=>switchTab(tb)} style={{padding:"8px 16px",borderRadius:8,fontSize:13,fontWeight:500,border:"none",cursor:"pointer",whiteSpace:"nowrap",background:tab===tb?t.accent+"22":t.bg2,color:tab===tb?t.accent:t.tf,border:`1px solid ${tab===tb?t.accent+"44":t.border}`}}>{tb.replace(/_/g," ")}</button>)}
+{tables.map(tb=><button key={tb} onClick={()=>switchTab(tb)} style={{padding:"8px 16px",borderRadius:8,fontSize:13,fontWeight:500,cursor:"pointer",whiteSpace:"nowrap",background:tab===tb?t.accent+"22":t.bg2,color:tab===tb?t.accent:t.tf,border:`1px solid ${tab===tb?t.accent+"44":t.border}`}}>{tb.replace(/_/g," ")}</button>)}
 </div>
 
 {/* Search + info bar */}

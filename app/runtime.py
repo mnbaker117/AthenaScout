@@ -97,9 +97,19 @@ def get_default_library_paths() -> list[dict]:
     """Get OS-appropriate default library path suggestions.
 
     Returns a list of dicts with 'path', 'app_type', and 'description'.
-    These are suggestions for the setup wizard — the paths may or may not
-    exist on the user's system.
+    These are suggestions for the standalone setup wizard — the paths may
+    or may not exist on the user's system.
+
+    In Docker mode, returns an empty list. Docker users always configure
+    paths via the CALIBRE_PATH / CALIBRE_EXTRA_PATHS environment variables
+    pointing at mounted volumes, so OS-default paths inside the container
+    are never useful and would only confuse the setup wizard UI.
     """
+    # Docker has no concept of "default install location" — paths come
+    # from env vars pointing at user-mounted volumes.
+    if IS_DOCKER:
+        return []
+
     home = str(Path.home())
 
     if OS_TYPE == "windows":

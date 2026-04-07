@@ -397,8 +397,10 @@ async def run_full_lookup(on_progress=None):
             try:
                 await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid))
                 await db.commit()
-            except Exception:
-                pass
+            except Exception as cleanup_err:
+                # Don't mask the original error, but don't lose the cleanup
+                # failure either — log it so debugging is possible.
+                logger.warning(f"Failed to mark sync_log {sid} as errored: {cleanup_err}")
         raise
     finally:
         await db.close()
@@ -433,8 +435,10 @@ async def run_full_rescan(on_progress=None):
             try:
                 await db.execute("UPDATE sync_log SET finished_at=?,status='error',error=? WHERE id=?", (time.time(), str(e), sid))
                 await db.commit()
-            except Exception:
-                pass
+            except Exception as cleanup_err:
+                # Don't mask the original error, but don't lose the cleanup
+                # failure either — log it so debugging is possible.
+                logger.warning(f"Failed to mark sync_log {sid} as errored: {cleanup_err}")
         raise
     finally:
         await db.close()
