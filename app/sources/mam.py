@@ -94,6 +94,12 @@ RESULTS_PER_PAGE = 100
 # AND could pass the match threshold via shared filler words.
 ENGLISH_LANG_ID = 1
 
+# Per-result lang_code values that count as "English". MAM returns
+# 3-letter ISO codes like "ENG" (which we discovered live in the wild —
+# the original H9 filter was too narrow and rejected every English result),
+# but other forms ("en", "english", "1") are also accepted defensively.
+ENGLISH_LANG_VALUES = frozenset({"", "en", "eng", "english", "1"})
+
 # Default format priority (user can override in settings)
 DEFAULT_FORMAT_PRIORITY = ["epub", "azw3", "mobi", "kfx", "pdf", "html", "lit", "rtf", "doc"]
 
@@ -670,7 +676,7 @@ def _evaluate_results(
         # already restricts to English, but if MAM ever returns a non-English
         # row (e.g. cataloging glitches) we don't want it slipping through.
         lang_code = item.get("lang_code") or item.get("language") or ""
-        if lang_code and str(lang_code).strip().lower() not in ("", "en", "english", "1"):
+        if lang_code and str(lang_code).strip().lower() not in ENGLISH_LANG_VALUES:
             logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — non-English lang_code={lang_code}")
             continue
 
