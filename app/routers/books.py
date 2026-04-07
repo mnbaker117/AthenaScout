@@ -296,7 +296,7 @@ async def scan_books_mam(data: dict = Body(...)):
     the button to refresh stale results.
     """
     from app.config import load_settings
-    from app.sources.mam import check_book as mam_check_book
+    from app.sources.mam import check_book as mam_check_book, _resolve_mam_languages
     from app import state
 
     book_ids = data.get("book_ids", [])
@@ -325,13 +325,14 @@ async def scan_books_mam(data: dict = Body(...)):
         delay = s.get("rate_mam", 2)
         format_priority = s.get("mam_format_priority")
         token = s["mam_session_id"]
+        lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
         stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0}
         results = []
 
         for row in rows:
             bid, btitle, aname = row["id"], row["title"], row["name"]
             try:
-                check = await mam_check_book(token, btitle, aname, format_priority, delay)
+                check = await mam_check_book(token, btitle, aname, format_priority, delay, lang_ids=lang_ids)
             except Exception as e:
                 logger.error(f"Bulk MAM scan error on book {bid} ({btitle[:40]}): {e}")
                 stats["errors"] += 1

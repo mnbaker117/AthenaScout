@@ -87,18 +87,60 @@ DEFAULT_DELAY = 2.0
 # on MAM, because Wheel of Time bundles took the top slots.
 RESULTS_PER_PAGE = 100
 
-# Language ID for English in MAM's browse_lang filter. Phase 22B.2.6:
-# we send tor.browse_lang=[ENGLISH_LANG_ID] on every search so foreign
-# editions are filtered at the API level. Before this change, French /
-# Dutch / Italian / Spanish / Portuguese editions consumed perpage budget
-# AND could pass the match threshold via shared filler words.
-ENGLISH_LANG_ID = 1
+# MAM language ID mapping. The MAM API uses numeric language IDs both for
+# the request payload (`tor.browse_lang`) and for the per-result `language`
+# field. We send the IDs corresponding to the user's selected languages so
+# foreign editions don't consume our perpage budget or pass the title match
+# threshold via shared filler words.
+#
+# IDs below were captured from real MAM responses during testing — DO NOT
+# guess at IDs you haven't verified, because a wrong ID will silently pull
+# results in an unrelated language. To add a new language: open MAM's
+# torrent search, filter by that language, inspect the network request
+# payload's `browse_lang` array, and add the entry here.
+MAM_LANGUAGES: dict[str, int] = {
+    "English": 1,
+    "Spanish": 4,
+    "Dutch": 22,
+    "Hungarian": 28,
+    "French": 36,
+    "Italian": 43,
+    "Portuguese": 52,
+}
 
-# Per-result lang_code values that count as "English". MAM returns
-# 3-letter ISO codes like "ENG" (which we discovered live in the wild —
-# the original H9 filter was too narrow and rejected every English result),
-# but other forms ("en", "english", "1") are also accepted defensively.
-ENGLISH_LANG_VALUES = frozenset({"", "en", "eng", "english", "1"})
+# Default English language ID — used when nothing in the user's language
+# selection resolves to a known MAM ID, so we never accidentally send an
+# empty browse_lang (which would un-filter the search entirely).
+_ENGLISH_LANG_ID = MAM_LANGUAGES["English"]
+
+
+def _resolve_mam_languages(language_names: list[str]) -> list[int]:
+    """Convert human-readable language names to MAM browse_lang IDs.
+
+    Names not in MAM_LANGUAGES are silently dropped (debug-logged) — we
+    deliberately don't guess at IDs we haven't verified. If nothing
+    resolves we fall back to English-only so the search remains filtered.
+    """
+    if not language_names:
+        return [_ENGLISH_LANG_ID]
+    ids: list[int] = []
+    unknown: list[str] = []
+    for name in language_names:
+        mid = MAM_LANGUAGES.get(name)
+        if mid is None:
+            unknown.append(name)
+        elif mid not in ids:
+            ids.append(mid)
+    if unknown:
+        logger.debug(
+            f"MAM language(s) not yet mapped, ignoring: {unknown}. "
+            f"To add: inspect MAM's browse_lang request payload for that language "
+            f"and add the numeric ID to MAM_LANGUAGES in app/sources/mam.py."
+        )
+    if not ids:
+        logger.debug("No selected languages map to MAM IDs — defaulting to English")
+        return [_ENGLISH_LANG_ID]
+    return ids
 
 # Default format priority (user can override in settings)
 DEFAULT_FORMAT_PRIORITY = ["epub", "azw3", "mobi", "kfx", "pdf", "html", "lit", "rtf", "doc"]
@@ -533,6 +575,7 @@ async def verify_search_auth(session_id: str) -> dict:
     """Verify MAM search API access with a test query."""
     logger.info("Verifying MAM search API access...")
 
+    # Auth probe only — always English, regardless of user language settings.
     test_payload = json.dumps({
         "tor": {
             "text": "test",
@@ -540,7 +583,7 @@ async def verify_search_auth(session_id: str) -> dict:
             "searchType": "active",
             "searchIn": "torrents",
             "main_cat": [EBOOK_CATEGORY],
-            "browse_lang": [ENGLISH_LANG_ID],
+            "browse_lang": [_ENGLISH_LANG_ID],
             "startNumber": "0",
         },
         "perpage": 5,
@@ -596,6 +639,7 @@ async def _mam_search(
     authors: Optional[str],
     title: str,
     perpage: int = RESULTS_PER_PAGE,
+    lang_ids: Optional[list[int]] = None,
 ) -> Optional[dict]:
     """
     Search MAM using requests library (via asyncio.to_thread).
@@ -608,6 +652,9 @@ async def _mam_search(
         query = _clean_title_loose(title)
     else:
         query = _build_query(authors, title)
+
+    if not lang_ids:
+        lang_ids = [_ENGLISH_LANG_ID]
 
     payload = json.dumps({
         "tor": {
@@ -624,7 +671,7 @@ async def _mam_search(
             "searchType": "active",
             "searchIn": "torrents",
             "main_cat": [EBOOK_CATEGORY],
-            "browse_lang": [ENGLISH_LANG_ID],
+            "browse_lang": lang_ids,
             "browseFlagsHideVsShow": "0",
             "startDate": "", "endDate": "", "hash": "",
             "sortType": "default",
@@ -658,6 +705,7 @@ def _evaluate_results(
     search_title: str,
     authors: str,
     format_priority: list[str],
+    lang_ids: Optional[list[int]] = None,
 ) -> list[dict]:
     """
     Evaluate all MAM search results for a book. Returns a list of viable
@@ -667,18 +715,34 @@ def _evaluate_results(
       torrent_id, mam_title, formats, format_str, match_pct,
       author_matched, search_link, raw
     """
+    if not lang_ids:
+        lang_ids = [_ENGLISH_LANG_ID]
+    allowed_lang_set = set(lang_ids)
+
     matches = []
     for item in data:
         mam_title = item.get("title", "") or item.get("name", "") or ""
         torrent_id = item.get("id", "")
 
         # Belt-and-suspenders language filter. browse_lang in the request body
-        # already restricts to English, but if MAM ever returns a non-English
-        # row (e.g. cataloging glitches) we don't want it slipping through.
-        lang_code = item.get("lang_code") or item.get("language") or ""
-        if lang_code and str(lang_code).strip().lower() not in ENGLISH_LANG_VALUES:
-            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — non-English lang_code={lang_code}")
-            continue
+        # already restricts to the user's selected languages, but if MAM ever
+        # returns a row in a different language (e.g. cataloging glitches) we
+        # don't want it slipping through. We check the numeric `language`
+        # field first because it's the same vocabulary as browse_lang; falls
+        # back to the 3-letter `lang_code` only if the numeric field is missing.
+        result_lang = item.get("language")
+        if isinstance(result_lang, int):
+            if result_lang not in allowed_lang_set:
+                logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — language={result_lang} not in {sorted(allowed_lang_set)}")
+                continue
+        else:
+            # No numeric language — fall back to 3-letter code (rare).
+            lang_code = str(item.get("lang_code") or "").strip().lower()
+            if lang_code and lang_code not in ("eng", "en", "english"):
+                # We only know how to fall-back-match English. Anything else
+                # gets a free pass since we can't safely correlate.
+                logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — non-English lang_code={lang_code} (no numeric language field)")
+                continue
 
         # Check author match
         author_ok = _author_match(authors, item)
@@ -724,6 +788,7 @@ async def check_book(
     authors: str,
     format_priority: list[str] = None,
     delay: float = DEFAULT_DELAY,
+    lang_ids: Optional[list[int]] = None,
 ) -> dict:
     """
     Five-pass search cascade for a single book, with format preference scoring.
@@ -734,6 +799,8 @@ async def check_book(
     """
     if format_priority is None:
         format_priority = DEFAULT_FORMAT_PRIORITY
+    if not lang_ids:
+        lang_ids = [_ENGLISH_LANG_ID]
 
     # Default result — search link as fallback URL
     fallback_search_link = build_search_link(authors, title)
@@ -779,7 +846,7 @@ async def check_book(
                     )
             except (ValueError, TypeError):
                 pass
-        matches = _evaluate_results(data, title, search_title, authors, format_priority)
+        matches = _evaluate_results(data, title, search_title, authors, format_priority, lang_ids)
 
         if not matches:
             return False
@@ -833,7 +900,7 @@ async def check_book(
 
     try:
         # --- Pass 1: author + full title ---
-        r = await _mam_search(token, authors, title)
+        r = await _mam_search(token, authors, title, lang_ids=lang_ids)
         await asyncio.sleep(delay)
         result["passes_tried"].append(1)
         if _try_evaluate(1, r, title):
@@ -842,7 +909,7 @@ async def check_book(
         # --- Pass 2: author + core title (volume prefix stripped) ---
         core = _extract_core_title(title)
         if core:
-            r = await _mam_search(token, authors, core)
+            r = await _mam_search(token, authors, core, lang_ids=lang_ids)
             await asyncio.sleep(delay)
             if _try_evaluate(2, r, core):
                 return result
@@ -850,7 +917,7 @@ async def check_book(
         # --- Pass 3: author + subtitle right (part after colon) ---
         sub_right = _extract_subtitle_part(title)
         if sub_right and sub_right != core:
-            r = await _mam_search(token, authors, sub_right)
+            r = await _mam_search(token, authors, sub_right, lang_ids=lang_ids)
             await asyncio.sleep(delay)
             if _try_evaluate(3, r, sub_right):
                 return result
@@ -858,14 +925,14 @@ async def check_book(
         # --- Pass 4: author + short title (part before colon) ---
         short = _strip_subtitle(title)
         if short and short != title and short != core:
-            r = await _mam_search(token, authors, short)
+            r = await _mam_search(token, authors, short, lang_ids=lang_ids)
             await asyncio.sleep(delay)
             if _try_evaluate(4, r, short):
                 return result
 
         # --- Pass 5: title only (no author), loose cleaning ---
         title_only = core or sub_right or short or title
-        r = await _mam_search(token, None, title_only)
+        r = await _mam_search(token, None, title_only, lang_ids=lang_ids)
         await asyncio.sleep(delay)
         if _try_evaluate(5, r, title_only):
             return result
@@ -904,6 +971,7 @@ async def scan_books_batch(
     format_priority: list[str] = None,
     on_progress: Optional[Callable[[dict], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    lang_ids: Optional[list[int]] = None,
 ) -> dict:
     """
     Scan a batch of books that don't yet have MAM data.
@@ -942,7 +1010,7 @@ async def scan_books_batch(
 
         logger.debug(f"MAM [{i+1}/{len(rows)}] {book_title[:65]} — {author_name[:35]}")
 
-        check = await check_book(session_id, book_title, author_name, format_priority, delay)
+        check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids)
         stats["scanned"] += 1
 
         # Write result to DB
@@ -1030,6 +1098,7 @@ async def run_full_scan_batch(
     skip_ip_update: bool = True,
     delay: float = DEFAULT_DELAY,
     format_priority: list[str] = None,
+    lang_ids: Optional[list[int]] = None,
 ) -> dict:
     """
     Run one batch of a full scan (250 books).
@@ -1078,7 +1147,7 @@ async def run_full_scan_batch(
     for i, row in enumerate(book_rows):
         book_id, book_title, author_name = row
 
-        check = await check_book(session_id, book_title, author_name, format_priority, delay)
+        check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids)
         scanned += 1
 
         await db.execute("""

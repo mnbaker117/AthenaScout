@@ -188,7 +188,7 @@ async def scan_authors_mam(data: dict = Body(...)):
     authors. Per-author state isn't tracked in state._mam_scan_progress
     because this is a synchronous bulk action driven from the Select bar.
     """
-    from app.sources.mam import check_book as mam_check_book
+    from app.sources.mam import check_book as mam_check_book, _resolve_mam_languages
     from app import state
 
     author_ids = data.get("author_ids", [])
@@ -219,12 +219,13 @@ async def scan_authors_mam(data: dict = Body(...)):
         delay = s.get("rate_mam", 2)
         format_priority = s.get("mam_format_priority")
         token = s["mam_session_id"]
+        lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
         stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0}
 
         for row in book_rows:
             bid, btitle, aname = row[0], row[1], row[2]
             try:
-                check = await mam_check_book(token, btitle, aname, format_priority, delay)
+                check = await mam_check_book(token, btitle, aname, format_priority, delay, lang_ids=lang_ids)
             except Exception as e:
                 logger.error(f"Bulk author MAM scan error on book {bid} ({btitle[:40]}): {e}")
                 stats["errors"] += 1

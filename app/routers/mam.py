@@ -20,6 +20,7 @@ from app.sources.mam import (
     get_full_scan_status as mam_get_full_scan_status,
     get_mam_stats,
     check_book as mam_check_book,
+    _resolve_mam_languages,
 )
 from app import state
 
@@ -138,6 +139,7 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                     format_priority=cs.get("mam_format_priority"),
                     on_progress=_progress,
                     cancel_check=lambda: state._lookup_progress.get("running", False),
+                    lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
                 )
                 # Progress already updated per-book via on_progress callback
                 if result.get("error"):
@@ -230,6 +232,7 @@ async def mam_test_scan():
             skip_ip_update=True,
             format_priority=s.get("mam_format_priority"),
             cancel_check=lambda: state._lookup_progress.get("running", False),
+            lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
         )
         return result
     finally:
@@ -273,6 +276,7 @@ async def mam_full_scan_start():
                     skip_ip_update=True,
                     delay=cs.get("rate_mam", 2),
                     format_priority=cs.get("mam_format_priority"),
+                    lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
                 )
                 fs = await mam_get_full_scan_status(db)
                 state._mam_scan_progress.update({
@@ -408,6 +412,7 @@ async def mam_scan_single_book(book_id: int):
             s["mam_session_id"], title, author,
             format_priority=s.get("mam_format_priority"),
             delay=s.get("rate_mam", 2),
+            lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
         )
         await db.execute("""
             UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
@@ -474,11 +479,12 @@ async def mam_scan_single_author(author_id: int):
         delay = s.get("rate_mam", 2)
         format_priority = s.get("mam_format_priority")
         token = s["mam_session_id"]
+        lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
         stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0}
 
         for bid, btitle in book_rows:
             try:
-                check = await mam_check_book(token, btitle, author_name, format_priority, delay)
+                check = await mam_check_book(token, btitle, author_name, format_priority, delay, lang_ids=lang_ids)
             except Exception as e:
                 logger.error(f"Author scan error on book {bid} ({btitle[:40]}): {e}")
                 stats["errors"] += 1

@@ -55,6 +55,7 @@ from app.sources.mam import (
     close_session as mam_close_session,
     scan_books_batch as mam_scan_batch,
     validate_connection as mam_validate,
+    _resolve_mam_languages,
 )
 from app import state
 
@@ -281,6 +282,7 @@ async def lifespan(app: FastAPI):
                     format_priority=s.get("mam_format_priority"),
                     on_progress=_sched_progress,
                     cancel_check=lambda: state._lookup_progress.get("running", False),
+                    lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
                 )
                 state._mam_scan_progress.update({
                     "running": False,
