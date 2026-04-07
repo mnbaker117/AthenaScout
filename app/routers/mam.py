@@ -19,6 +19,7 @@ from app.sources.mam import (
     cancel_full_scan as mam_cancel_full_scan,
     get_full_scan_status as mam_get_full_scan_status,
     get_mam_stats,
+    check_book as mam_check_book,
 )
 from app import state
 
@@ -380,6 +381,132 @@ async def mam_books_endpoint(section: str = "upload", search: str = "",
         await db.close()
 
 
+@router.post("/scan-book/{book_id}")
+async def mam_scan_single_book(book_id: int):
+    """Re-scan a single book against MAM, ignoring its existing mam_status.
+
+    Used by the "Re-scan MAM" button in BookSidebar so the user can manually
+    refresh a stale or wrong match without waiting for a full or scheduled scan.
+    """
+    s = load_settings()
+    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+        return {"error": "MAM not configured or not enabled"}
+    if not s.get("mam_scanning_enabled", True):
+        return {"error": "MAM scanning is disabled — enable it in Settings"}
+
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT b.id, b.title, a.name FROM books b JOIN authors a ON b.author_id=a.id WHERE b.id=?",
+            (book_id,),
+        )
+        if not rows:
+            return {"error": f"Book {book_id} not found"}
+        _, title, author = rows[0]
+
+        check = await mam_check_book(
+            s["mam_session_id"], title, author,
+            format_priority=s.get("mam_format_priority"),
+            delay=s.get("rate_mam", 2),
+        )
+        await db.execute("""
+            UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
+                   mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
+            WHERE id=?
+        """, (
+            check["mam_url"], check["status"], check["mam_formats"],
+            check["mam_torrent_id"],
+            1 if check["mam_has_multiple"] else 0,
+            1 if check.get("mam_my_snatched") else 0,
+            book_id,
+        ))
+        await db.commit()
+        return {
+            "status": check["status"],
+            "mam_url": check["mam_url"],
+            "mam_torrent_id": check["mam_torrent_id"],
+            "mam_title": check.get("mam_title"),
+            "mam_formats": check["mam_formats"],
+            "mam_has_multiple": check["mam_has_multiple"],
+            "mam_my_snatched": check.get("mam_my_snatched", False),
+            "match_pct": check.get("match_pct"),
+            "best_format": check.get("best_format"),
+            "passes_tried": check.get("passes_tried", []),
+        }
+    finally:
+        await db.close()
+
+
+@router.post("/scan-author/{author_id}")
+async def mam_scan_single_author(author_id: int):
+    """Scan all of an author's missing/un-scanned books against MAM.
+
+    Runs synchronously inside the request — fine because the per-author book
+    count is small. For large authors the request will take a while, but the
+    result is returned in one shot rather than fronted by progress polling.
+    """
+    s = load_settings()
+    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+        return {"error": "MAM not configured or not enabled"}
+    if not s.get("mam_scanning_enabled", True):
+        return {"error": "MAM scanning is disabled — enable it in Settings"}
+    if state._mam_scan_progress.get("running"):
+        return {"error": "A MAM scan is already running"}
+
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT name FROM authors WHERE id=?", (author_id,),
+        )
+        if not rows:
+            return {"error": f"Author {author_id} not found"}
+        author_name = rows[0][0]
+
+        book_rows = await db.execute_fetchall(
+            "SELECT id, title FROM books WHERE author_id=? AND mam_status IS NULL "
+            "AND is_unreleased=0 AND hidden=0 ORDER BY title",
+            (author_id,),
+        )
+        if not book_rows:
+            return {"status": "complete", "message": "No un-scanned books for this author",
+                    "scanned": 0, "found": 0, "possible": 0, "not_found": 0}
+
+        delay = s.get("rate_mam", 2)
+        format_priority = s.get("mam_format_priority")
+        token = s["mam_session_id"]
+        stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0}
+
+        for bid, btitle in book_rows:
+            try:
+                check = await mam_check_book(token, btitle, author_name, format_priority, delay)
+            except Exception as e:
+                logger.error(f"Author scan error on book {bid} ({btitle[:40]}): {e}")
+                stats["errors"] += 1
+                continue
+            await db.execute("""
+                UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
+                       mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
+                WHERE id=?
+            """, (
+                check["mam_url"], check["status"], check["mam_formats"],
+                check["mam_torrent_id"],
+                1 if check["mam_has_multiple"] else 0,
+                1 if check.get("mam_my_snatched") else 0,
+                bid,
+            ))
+            stats["scanned"] += 1
+            if check["status"] == "found":
+                stats["found"] += 1
+            elif check["status"] == "possible":
+                stats["possible"] += 1
+            elif check["status"] == "not_found":
+                stats["not_found"] += 1
+        await db.commit()
+        return {"status": "complete", "author": author_name, **stats}
+    finally:
+        await db.close()
+
+
 @router.post("/reset")
 async def mam_reset_scans():
     """Reset all MAM scan data — clears all mam_* fields on all books."""
@@ -387,7 +514,7 @@ async def mam_reset_scans():
     try:
         await db.execute(
             "UPDATE books SET mam_url=NULL, mam_status=NULL, mam_formats=NULL, "
-            "mam_torrent_id=NULL, mam_has_multiple=0"
+            "mam_torrent_id=NULL, mam_has_multiple=0, mam_my_snatched=0"
         )
         await db.execute("DELETE FROM mam_scan_log")
         await db.commit()

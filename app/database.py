@@ -174,6 +174,7 @@ CREATE TABLE IF NOT EXISTS books (
     mam_formats TEXT,
     mam_torrent_id TEXT,
     mam_has_multiple INTEGER NOT NULL DEFAULT 0,
+    mam_my_snatched INTEGER NOT NULL DEFAULT 0,
     source_url TEXT,
     first_seen_at REAL NOT NULL DEFAULT (strftime('%s','now')),
     created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
@@ -237,6 +238,7 @@ MIGRATIONS = [
     "ALTER TABLE books ADD COLUMN mam_torrent_id TEXT",
     "ALTER TABLE books ADD COLUMN mam_has_multiple INTEGER NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status)",
+    "ALTER TABLE books ADD COLUMN mam_my_snatched INTEGER NOT NULL DEFAULT 0",
 ]
 
 

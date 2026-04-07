@@ -29,12 +29,11 @@ import asyncio
 import json
 import logging
 import re
-import time as _time
-from typing import Optional
+import time
+from typing import Callable, Optional
 from urllib.parse import urlencode
 
-# aiohttp removed — using requests via asyncio.to_thread() instead
-# (MAM's TLS fingerprinting rejects Python aiohttp)
+import requests
 
 logger = logging.getLogger("athenascout.mam")
 
@@ -46,6 +45,24 @@ MAM_BROWSE_BASE = "https://www.myanonamouse.net/tor/browse.php"
 MAM_TORRENT_BASE = "https://www.myanonamouse.net/t"
 MAM_DYNIP_URL = "https://t.myanonamouse.net/json/dynamicSeedbox.php"
 EBOOK_CATEGORY = "14"
+
+# ─── SQL predicates for "books needing MAM scan" ─────────────
+# Two flavors exist for historical reasons. They're functionally equivalent
+# in practice (mam_url and mam_status are always set together by the
+# UPDATE statement that records scan results), but kept separate to
+# preserve existing behavior exactly. A future cleanup could unify them
+# after verifying the invariant holds across the entire codebase.
+#
+# Each flavor has _BARE (no table alias) and _ALIASED (with `b.` prefix)
+# variants because some queries JOIN authors and need to disambiguate.
+
+# Used by scan_books_batch — checks only mam_status (basic flavor)
+_NEEDS_SCAN_BASIC_BARE = "mam_status IS NULL AND is_unreleased = 0 AND hidden = 0"
+_NEEDS_SCAN_BASIC_ALIASED = "b.mam_status IS NULL AND b.is_unreleased = 0 AND b.hidden = 0"
+
+# Used by full-scan paths — strict flavor including mam_url IS NULL
+_NEEDS_SCAN_STRICT_BARE = "mam_url IS NULL AND mam_status IS NULL AND is_unreleased = 0 AND hidden = 0"
+_NEEDS_SCAN_STRICT_ALIASED = "b.mam_url IS NULL AND b.mam_status IS NULL AND b.is_unreleased = 0 AND b.hidden = 0"
 
 # Match quality thresholds (same as standalone script)
 MATCH_MIN_PCT = 25.0       # below this → junk, skip
@@ -61,8 +78,21 @@ STATUS_ERROR = "error"
 # Default delay between MAM API requests (seconds)
 DEFAULT_DELAY = 2.0
 
-# How many results to request per search (enough to find format variations)
-RESULTS_PER_PAGE = 25
+# How many results to request per search. The MAM API allows 5–1000.
+# Phase 22B.2.6: bumped from 25 → 100 because, for prolific authors with
+# many torrents in a series, the actual exact match would get pushed off
+# page 1 by collection bundles and series-sibling torrents that the API
+# ranks higher. The captured logs showed Robert Jordan's "The Eye of the
+# World" being completely absent from a 25-result page despite existing
+# on MAM, because Wheel of Time bundles took the top slots.
+RESULTS_PER_PAGE = 100
+
+# Language ID for English in MAM's browse_lang filter. Phase 22B.2.6:
+# we send tor.browse_lang=[ENGLISH_LANG_ID] on every search so foreign
+# editions are filtered at the API level. Before this change, French /
+# Dutch / Italian / Spanish / Portuguese editions consumed perpage budget
+# AND could pass the match threshold via shared filler words.
+ENGLISH_LANG_ID = 1
 
 # Default format priority (user can override in settings)
 DEFAULT_FORMAT_PRIORITY = ["epub", "azw3", "mobi", "kfx", "pdf", "html", "lit", "rtf", "doc"]
@@ -180,10 +210,22 @@ def _torrent_url(torrent_id) -> str:
     return f"{MAM_TORRENT_BASE}/{torrent_id}"
 
 
+_RE_PUNCT_TOKEN = re.compile(r"[^\w\s]+")
+
+
 def _word_match_pct(text1: str, text2: str) -> float:
-    """Sorted-token word overlap percentage."""
-    w1 = sorted(text1.lower().split())
-    w2 = sorted(text2.lower().split())
+    """Sorted-token word overlap percentage.
+
+    Strips punctuation before tokenizing so that "Reach:" matches "Reach"
+    (Phase 22B.2.6). Without this, colons / apostrophes / commas attached
+    to words caused real exact matches to score below the promote threshold,
+    which silently mis-linked books in series with subtitled titles like
+    "Halo: Shadows of Reach: A Master Chief Story".
+    """
+    def _tokens(t: str) -> list[str]:
+        return sorted(_RE_PUNCT_TOKEN.sub(" ", t.lower()).split())
+    w1 = _tokens(text1)
+    w2 = _tokens(text2)
     i = j = m = 0
     while i < len(w1) and j < len(w2):
         if w1[i] == w2[j]:
@@ -195,10 +237,37 @@ def _word_match_pct(text1: str, text2: str) -> float:
     return round(m / max(len(w1), len(w2), 1) * 100, 1)
 
 
+def _parse_author_info(raw) -> list[str]:
+    """Parse MAM's author_info field into a list of author names.
+
+    MAM returns author_info as a JSON-encoded string mapping author IDs to
+    names, e.g. '{"12345":"Brandon Sanderson","6789":"Janci Patterson"}'.
+    Falls back to treating the input as a plain string if JSON parsing fails.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, dict):
+        return [str(v) for v in raw.values() if v]
+    if isinstance(raw, list):
+        return [str(v) for v in raw if v]
+    s = str(raw).strip()
+    if not s:
+        return []
+    try:
+        parsed = json.loads(s)
+    except (ValueError, TypeError):
+        return [s]
+    if isinstance(parsed, dict):
+        return [str(v) for v in parsed.values() if v]
+    if isinstance(parsed, list):
+        return [str(v) for v in parsed if v]
+    return [str(parsed)]
+
+
 def _author_match(calibre_authors: str, mam_result: dict) -> bool:
     """Check if MAM result author plausibly matches our author string."""
-    mam_author = mam_result.get("author_info", "") or ""
-    if not mam_author:
+    mam_authors = _parse_author_info(mam_result.get("author_info"))
+    if not mam_authors:
         return True
 
     def tokens(s: str) -> set:
@@ -206,7 +275,9 @@ def _author_match(calibre_authors: str, mam_result: dict) -> bool:
         return set(re.findall(r'[a-z]+', s))
 
     cal_tok = tokens(calibre_authors)
-    mam_tok = tokens(str(mam_author))
+    mam_tok = set()
+    for name in mam_authors:
+        mam_tok |= tokens(name)
     overlap = {t for t in cal_tok & mam_tok if len(t) > 1}
     return bool(overlap)
 
@@ -249,25 +320,48 @@ def _format_score(formats: list[str], priority: list[str]) -> tuple[int, int, st
     return (999, len(formats), formats[0] if formats else "unknown")
 
 
+# Phase 22B.2.6 — Books at or above this match_pct are considered the
+# "same book" with high confidence. The format-aware sort that prefers more
+# formats is only meaningful WITHIN this set; allowing low-confidence
+# matches into the format-preference comparison caused the historical bug
+# where a wrong-but-multi-format result would beat the right-but-single-
+# format match.
+HIGH_CONFIDENCE_PCT = 80.0
+
+
 def _pick_best_result(
     matches: list[dict],
     format_priority: list[str],
 ) -> dict:
     """
-    From a list of scored MAM matches, pick the best one based on format preference.
+    From a list of scored MAM matches, pick the best one.
 
-    Each match dict has: torrent_id, title, formats, match_pct, author_matched, search_link, raw
+    Each match dict has: torrent_id, mam_title, formats, match_pct,
+    author_matched, seeders, plus per-result fields.
 
-    Selection logic:
-      1. Find which results contain the user's highest-priority format
-      2. Among those, prefer the one with the most total formats (more choice)
-      3. If tied, prefer higher match_pct
+    Selection logic (Phase 22B.2.6):
+      1. Filter to high-confidence title matches (>= HIGH_CONFIDENCE_PCT) if
+         any exist; this prevents a wrong-book-with-more-formats from beating
+         a right-book-with-fewer-formats. Fall back to all matches if no
+         high-confidence ones are present.
+      2. Among the candidates, score by user's format preference (rank).
+      3. Within the same format rank, prefer the result with the highest
+         match_pct (the actual title match), then with more formats, then
+         with more seeders.
+
+    The previous version sorted by (fmt_rank, -fmt_count, -match_pct), which
+    placed format count BEFORE match quality and silently produced wrong
+    matches for any series where one torrent bundled extra formats.
     """
     if not matches:
         return None
 
+    # ── Filter to high-confidence matches when possible ────────
+    high = [m for m in matches if m["match_pct"] >= HIGH_CONFIDENCE_PCT]
+    candidates = high if high else matches
+
     scored = []
-    for m in matches:
+    for m in candidates:
         rank, count, best_fmt = _format_score(m["formats"], format_priority)
         scored.append({
             **m,
@@ -276,13 +370,18 @@ def _pick_best_result(
             "best_format": best_fmt,
         })
 
-    # Sort: lowest fmt_rank first, then highest fmt_count, then highest match_pct
-    scored.sort(key=lambda x: (x["fmt_rank"], -x["fmt_count"], -x["match_pct"]))
+    # Sort: lowest fmt_rank, highest match_pct, highest fmt_count, highest seeders
+    scored.sort(key=lambda x: (
+        x["fmt_rank"],
+        -x["match_pct"],
+        -x["fmt_count"],
+        -x.get("seeders", 0),
+    ))
     return scored[0]
 
 
 # ---------------------------------------------------------------------------
-# Session / auth (async versions)
+# HTTP layer (sync helpers + Session + auth flow)
 # ---------------------------------------------------------------------------
 
 def _build_headers(token: str) -> dict:
@@ -294,41 +393,130 @@ def _build_headers(token: str) -> dict:
     }
 
 
-async def register_ip(session_id: str, skip_ip_update: bool = False) -> dict:
+# ---------------------------------------------------------------------------
+# HTTP helpers (sync — call via asyncio.to_thread)
+# ---------------------------------------------------------------------------
+# These wrap requests.get/post with the standard MAM headers. They're
+# synchronous because MAM's TLS fingerprinting rejects async HTTP clients,
+# so all calls go through asyncio.to_thread() at the caller. DO NOT change
+# the underlying library or header format — see _build_headers for why.
+#
+# We use a module-level requests.Session() for connection reuse. Without it,
+# every search would do a fresh TCP+TLS handshake (50-150ms each), and a
+# 100-book batch with a 5-pass cascade could spend 30-60 seconds just on
+# handshakes. With the Session, the connection is reused across requests
+# and that overhead drops to one handshake per batch.
+#
+# Critical: using a Session does NOT change the TLS fingerprint — it's the
+# same `requests` library producing the same ClientHello, so MAM still
+# accepts the requests. Same User-Agent, same Cookie header, same data=
+# POST encoding.
+
+_session: Optional[requests.Session] = None
+
+
+def _get_session() -> requests.Session:
+    """Lazy-initialized module-level requests.Session for connection reuse.
+
+    Single-consumer (called from the scan loop via asyncio.to_thread).
+    `requests.Session` handles stale connections automatically — if the
+    server has closed the keep-alive connection, requests reconnects on
+    the next call.
+    """
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        logger.debug("MAM HTTP session created")
+    return _session
+
+
+def close_session() -> None:
+    """Tear down the module-level Session.
+
+    Called from main.py's lifespan() during app shutdown. Safe to call
+    multiple times — subsequent calls are no-ops.
+    """
+    global _session
+    if _session is not None:
+        try:
+            _session.close()
+            logger.debug("MAM HTTP session closed")
+        except Exception as e:
+            logger.warning(f"Error closing MAM session: {e}")
+        finally:
+            _session = None
+
+
+def _do_get(url: str, token: str, timeout: int = 15) -> requests.Response:
+    """Synchronous GET to a MAM endpoint with standard headers."""
+    return _get_session().get(url, headers=_build_headers(token), timeout=timeout)
+
+
+def _do_post(url: str, token: str, payload: str, timeout: int = 20) -> requests.Response:
+    """Synchronous POST to a MAM endpoint with standard headers.
+
+    `payload` should be a JSON-encoded string (use json.dumps at the call
+    site). MAM expects `data=` not `json=` — DO NOT change this without
+    re-testing the entire MAM integration.
+    """
+    return _get_session().post(url, headers=_build_headers(token), data=payload, timeout=timeout)
+
+
+async def register_ip(session_id: str, skip_ip_update: bool = True) -> dict:
     """
     Ping MAM's dynamic seedbox endpoint to register this server's IP.
     Returns {"success": bool, "message": str}
+
+    Note: skip_ip_update defaults to True because IP registration is only
+    needed for non-ASN-locked sessions, and the AthenaScout codebase always
+    passes True at the call site to avoid interfering with seedbox sessions.
+    The False default would only fire if someone called this from a new
+    code path without specifying — making the safer behavior the default.
     """
     if skip_ip_update:
         return {"success": True, "message": "Skipped IP registration (ASN-locked session)"}
 
     logger.info("Registering server IP with MAM...")
 
-    def _do_request():
-        import requests
-        return requests.get(
-            MAM_DYNIP_URL,
-            headers=_build_headers(session_id),
-            timeout=15
-        )
-
     try:
-        resp = await asyncio.to_thread(_do_request)
+        resp = await asyncio.to_thread(_do_get, MAM_DYNIP_URL, session_id)
         body = resp.text.strip()
         logger.debug(f"IP registration response: {body}")
 
-        if "Completed" in body or "No Change" in body:
-            logger.info("IP registration OK")
-            return {"success": True, "message": body}
-        elif "No Session Cookie" in body:
-            return {"success": False, "message": "Token not recognised by MAM"}
-        elif "Incorrect session type" in body:
-            logger.warning("ASN-locked session — IP registration skipped")
+        # MAM dynamicSeedbox.php returns JSON like:
+        #   {"Success": true, "msg": "Completed", "ip": "...", "ASN": 12345, "AS": "..."}
+        # On failure msg may be "No Session Cookie", "Incorrect session type - ...",
+        # "Invalid session - IP mismatch", "Last Change too recent", etc.
+        try:
+            data = resp.json()
+        except Exception:
+            if "<html" in body.lower():
+                return {"success": False, "message": "Got HTML login page — token wrong or expired"}
+            return {"success": False, "message": f"Non-JSON response: {body[:200]}"}
+
+        msg = str(data.get("msg", "")).strip()
+        if data.get("Success"):
+            logger.info(f"IP registration OK ({msg or 'no message'})")
+            return {
+                "success": True,
+                "message": msg or "OK",
+                "ip": data.get("ip"),
+                "asn": data.get("ASN"),
+                "as_org": data.get("AS"),
+            }
+
+        # Success=false branch — interpret known msg values
+        msg_l = msg.lower()
+        if "incorrect session type" in msg_l:
+            logger.warning("ASN-locked session — IP registration not needed")
             return {"success": True, "message": "ASN-locked session — IP registration not needed"}
-        elif "<html" in body.lower():
-            return {"success": False, "message": "Got HTML login page — token wrong or expired"}
-        else:
-            return {"success": False, "message": f"Unexpected response: {body[:200]}"}
+        if "no session cookie" in msg_l or "invalid cookie" in msg_l:
+            return {"success": False, "message": "Token not recognised by MAM"}
+        if "ip mismatch" in msg_l or "asn mismatch" in msg_l:
+            return {"success": False, "message": f"Session locked to a different network: {msg}"}
+        if "too recent" in msg_l:
+            return {"success": False, "message": f"IP change rate-limited by MAM: {msg}"}
+        return {"success": False, "message": msg or f"Unexpected response: {body[:200]}"}
     except asyncio.TimeoutError:
         return {"success": False, "message": "Timeout connecting to MAM"}
     except Exception as e:
@@ -339,27 +527,21 @@ async def verify_search_auth(session_id: str) -> dict:
     """Verify MAM search API access with a test query."""
     logger.info("Verifying MAM search API access...")
 
-    def _do_request():
-        import requests
-        return requests.post(
-            MAM_SEARCH_URL,
-            headers=_build_headers(session_id),
-            data=json.dumps({
-                "tor": {
-                    "text": "test",
-                    "srchIn": {"title": "true"},
-                    "searchType": "active",
-                    "searchIn": "torrents",
-                    "main_cat": [EBOOK_CATEGORY],
-                    "startNumber": "0",
-                },
-                "perpage": 5,
-            }),
-            timeout=15,
-        )
+    test_payload = json.dumps({
+        "tor": {
+            "text": "test",
+            "srchIn": {"title": "true"},
+            "searchType": "active",
+            "searchIn": "torrents",
+            "main_cat": [EBOOK_CATEGORY],
+            "browse_lang": [ENGLISH_LANG_ID],
+            "startNumber": "0",
+        },
+        "perpage": 5,
+    })
 
     try:
-        resp = await asyncio.to_thread(_do_request)
+        resp = await asyncio.to_thread(_do_post, MAM_SEARCH_URL, session_id, test_payload, 15)
         if resp.status_code == 200 and len(resp.text) > 0:
             logger.info("MAM search auth OK")
             return {"success": True, "message": "Connection successful"}
@@ -374,8 +556,11 @@ async def verify_search_auth(session_id: str) -> dict:
         return {"success": False, "message": f"Network error: {str(e)}"}
 
 
-async def validate_connection(session_id: str, skip_ip_update: bool = False) -> dict:
-    """Full validation: IP registration + search auth test."""
+async def validate_connection(session_id: str, skip_ip_update: bool = True) -> dict:
+    """Full validation: IP registration + search auth test.
+
+    See register_ip() for why skip_ip_update defaults to True.
+    """
     ip_result = await register_ip(session_id, skip_ip_update)
     if not ip_result["success"]:
         return {
@@ -433,6 +618,7 @@ async def _mam_search(
             "searchType": "active",
             "searchIn": "torrents",
             "main_cat": [EBOOK_CATEGORY],
+            "browse_lang": [ENGLISH_LANG_ID],
             "browseFlagsHideVsShow": "0",
             "startDate": "", "endDate": "", "hash": "",
             "sortType": "default",
@@ -441,25 +627,13 @@ async def _mam_search(
         "perpage": perpage,
     })
 
-    def _do_request():
-        import requests
-        return requests.post(
-            MAM_SEARCH_URL,
-            headers=_build_headers(token),
-            data=payload,
-            timeout=20,
-        )
-
     try:
-        resp = await asyncio.to_thread(_do_request)
+        resp = await asyncio.to_thread(_do_post, MAM_SEARCH_URL, token, payload)
         if resp.status_code in (401, 403):
             raise _AuthError(f"HTTP {resp.status_code}")
         resp.raise_for_status()
         if not resp.text or len(resp.text) == 0:
             return None
-        # === TEMP CAPTURE — REMOVE AFTER ONE RUN (Phase 22B.2.5 investigation) ===
-        logger.info(f"MAM_RAW_RESPONSE query={query[:80]!r} status={resp.status_code} bytes={len(resp.text)} body={resp.text[:8000]}")
-        # === END TEMP CAPTURE ===
         return resp.json()
     except _AuthError:
         raise
@@ -492,6 +666,14 @@ def _evaluate_results(
         mam_title = item.get("title", "") or item.get("name", "") or ""
         torrent_id = item.get("id", "")
 
+        # Belt-and-suspenders language filter. browse_lang in the request body
+        # already restricts to English, but if MAM ever returns a non-English
+        # row (e.g. cataloging glitches) we don't want it slipping through.
+        lang_code = item.get("lang_code") or item.get("language") or ""
+        if lang_code and str(lang_code).strip().lower() not in ("", "en", "english", "1"):
+            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — non-English lang_code={lang_code}")
+            continue
+
         # Check author match
         author_ok = _author_match(authors, item)
 
@@ -508,6 +690,10 @@ def _evaluate_results(
         filetypes_raw = item.get("filetype", "") or item.get("filetypes", "") or ""
         formats = _parse_formats(filetypes_raw)
 
+        # MAM marks torrents the user has already snatched via "my_snatched"
+        # (truthy when present). Capture so we can show a badge in the UI.
+        my_snatched = bool(item.get("my_snatched"))
+
         matches.append({
             "torrent_id": str(torrent_id),
             "mam_title": mam_title,
@@ -516,6 +702,7 @@ def _evaluate_results(
             "match_pct": pct,
             "author_matched": author_ok,
             "seeders": int(item.get("seeders", 0) or 0),
+            "my_snatched": my_snatched,
         })
 
     return matches
@@ -551,6 +738,7 @@ async def check_book(
         "mam_title": None,
         "mam_formats": None,
         "mam_has_multiple": False,
+        "mam_my_snatched": False,
         "match_pct": None,
         "best_format": None,
         "passes_tried": [],
@@ -573,6 +761,18 @@ async def check_book(
             return False
 
         data = resp["data"]
+        # H10: log total_found vs returned so we can spot truncated result sets
+        total_found = resp.get("found") or resp.get("total_found") or resp.get("total")
+        if total_found is not None and isinstance(total_found, (int, str)):
+            try:
+                tf = int(total_found)
+                if tf > len(data):
+                    logger.debug(
+                        f"  Pass {pass_num}: MAM returned {len(data)} of {tf} total — "
+                        f"results may be truncated by perpage limit"
+                    )
+            except (ValueError, TypeError):
+                pass
         matches = _evaluate_results(data, title, search_title, authors, format_priority)
 
         if not matches:
@@ -603,6 +803,7 @@ async def check_book(
             "match_pct": pct,
             "best_format": best.get("best_format", ""),
             "author_matched": best["author_matched"],
+            "my_snatched": best.get("my_snatched", False),
         }
 
         # Promote to FOUND if match is strong and author checks out
@@ -614,6 +815,7 @@ async def check_book(
             result["mam_title"] = best["mam_title"]
             result["mam_formats"] = best["format_str"]
             result["mam_has_multiple"] = has_multiple
+            result["mam_my_snatched"] = best.get("my_snatched", False)
             result["match_pct"] = pct
             result["best_format"] = best.get("best_format", "")
             return True  # stop cascade
@@ -675,6 +877,7 @@ async def check_book(
         result["mam_title"] = best_possible["mam_title"]
         result["mam_formats"] = best_possible["formats"]
         result["mam_has_multiple"] = best_possible["has_multiple"]
+        result["mam_my_snatched"] = best_possible.get("my_snatched", False)
         result["match_pct"] = best_possible["match_pct"]
         result["best_format"] = best_possible.get("best_format", "")
         result["passes_tried"] = [best_possible["pass"]]
@@ -691,10 +894,10 @@ async def scan_books_batch(
     session_id: str,
     limit: int = 100,
     delay: float = DEFAULT_DELAY,
-    skip_ip_update: bool = False,
+    skip_ip_update: bool = True,
     format_priority: list[str] = None,
-    on_progress: callable = None,
-    cancel_check: callable = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """
     Scan a batch of books that don't yet have MAM data.
@@ -711,13 +914,11 @@ async def scan_books_batch(
                 "errors": 0, "error": f"IP registration failed: {ip_result['message']}"}
 
     # Get books needing scan (no mam_status yet, not upcoming)
-    rows = await db.execute_fetchall("""
+    rows = await db.execute_fetchall(f"""
         SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased
         FROM books b
         JOIN authors a ON b.author_id = a.id
-        WHERE b.mam_status IS NULL
-          AND b.is_unreleased = 0
-          AND b.hidden = 0
+        WHERE {_NEEDS_SCAN_BASIC_ALIASED}
         ORDER BY b.owned DESC, b.id ASC
         LIMIT ?
     """, (limit,))
@@ -741,7 +942,7 @@ async def scan_books_batch(
         # Write result to DB
         await db.execute("""
             UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
-                   mam_torrent_id=?, mam_has_multiple=?
+                   mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
             WHERE id=?
         """, (
             check["mam_url"],
@@ -749,6 +950,7 @@ async def scan_books_batch(
             check["mam_formats"],
             check["mam_torrent_id"],
             1 if check["mam_has_multiple"] else 0,
+            1 if check.get("mam_my_snatched") else 0,
             book_id,
         ))
 
@@ -795,17 +997,16 @@ async def start_full_scan(db) -> dict:
     if running:
         return {"error": "A full scan is already in progress"}
 
-    row = await db.execute_fetchall("""
+    row = await db.execute_fetchall(f"""
         SELECT COUNT(*) FROM books
-        WHERE mam_url IS NULL AND mam_status IS NULL
-          AND is_unreleased = 0 AND hidden = 0
+        WHERE {_NEEDS_SCAN_STRICT_BARE}
     """)
     total = row[0][0] if row else 0
 
     if total == 0:
         return {"error": "No books need scanning — all books already have MAM data"}
 
-    now = _time.time()
+    now = time.time()
     cursor = await db.execute(
         """INSERT INTO mam_scan_log (total_books, last_offset, batch_size, started_at, status)
            VALUES (?, 0, 250, ?, 'running')""",
@@ -820,7 +1021,7 @@ async def start_full_scan(db) -> dict:
 async def run_full_scan_batch(
     db,
     session_id: str,
-    skip_ip_update: bool = False,
+    skip_ip_update: bool = True,
     delay: float = DEFAULT_DELAY,
     format_priority: list[str] = None,
 ) -> dict:
@@ -847,12 +1048,11 @@ async def run_full_scan_batch(
                 "error": f"IP registration failed: {ip_result['message']}"}
 
     # Get next batch
-    book_rows = await db.execute_fetchall("""
+    book_rows = await db.execute_fetchall(f"""
         SELECT b.id, b.title, a.name as author_name
         FROM books b
         JOIN authors a ON b.author_id = a.id
-        WHERE b.mam_url IS NULL AND b.mam_status IS NULL
-          AND b.is_unreleased = 0 AND b.hidden = 0
+        WHERE {_NEEDS_SCAN_STRICT_ALIASED}
         ORDER BY b.owned DESC, b.id ASC
         LIMIT ?
     """, (batch_size,))
@@ -860,7 +1060,7 @@ async def run_full_scan_batch(
     if not book_rows:
         await db.execute(
             "UPDATE mam_scan_log SET status='complete', finished_at=? WHERE id=?",
-            (_time.time(), scan_id)
+            (time.time(), scan_id)
         )
         await db.commit()
         logger.info(f"Full MAM scan complete (scan_id={scan_id})")
@@ -877,11 +1077,12 @@ async def run_full_scan_batch(
 
         await db.execute("""
             UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
-                   mam_torrent_id=?, mam_has_multiple=?
+                   mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
             WHERE id=?
         """, (
             check["mam_url"], check["status"], check["mam_formats"],
             check["mam_torrent_id"], 1 if check["mam_has_multiple"] else 0,
+            1 if check.get("mam_my_snatched") else 0,
             book_id,
         ))
 
@@ -908,17 +1109,16 @@ async def run_full_scan_batch(
     await db.commit()
 
     # Check remaining
-    remaining_row = await db.execute_fetchall("""
+    remaining_row = await db.execute_fetchall(f"""
         SELECT COUNT(*) FROM books
-        WHERE mam_url IS NULL AND mam_status IS NULL
-          AND is_unreleased = 0 AND hidden = 0
+        WHERE {_NEEDS_SCAN_STRICT_BARE}
     """)
     remaining = remaining_row[0][0] if remaining_row else 0
 
     if remaining == 0:
         await db.execute(
             "UPDATE mam_scan_log SET status='complete', finished_at=? WHERE id=?",
-            (_time.time(), scan_id)
+            (time.time(), scan_id)
         )
         await db.commit()
         logger.info(f"Full MAM scan complete (scan_id={scan_id})")
@@ -935,7 +1135,7 @@ async def cancel_full_scan(db) -> dict:
         return {"success": False, "message": "No running scan to cancel"}
     await db.execute(
         "UPDATE mam_scan_log SET status='cancelled', finished_at=? WHERE id=?",
-        (_time.time(), rows[0][0])
+        (time.time(), rows[0][0])
     )
     await db.commit()
     logger.info(f"Full MAM scan cancelled (scan_id={rows[0][0]})")
@@ -977,7 +1177,7 @@ async def get_mam_stats(db) -> dict:
         "SELECT COUNT(*) FROM books WHERE mam_status IS NOT NULL AND hidden=0"
     )
     unscanned_row = await db.execute_fetchall(
-        "SELECT COUNT(*) FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0"
+        f"SELECT COUNT(*) FROM books WHERE {_NEEDS_SCAN_BASIC_BARE}"
     )
     return {
         "upload_candidates": upload_row[0][0] if upload_row else 0,

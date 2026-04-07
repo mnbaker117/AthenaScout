@@ -52,6 +52,7 @@ from app.routers import (
 )
 from app.runtime import IS_DOCKER, IS_STANDALONE
 from app.sources.mam import (
+    close_session as mam_close_session,
     scan_books_batch as mam_scan_batch,
     validate_connection as mam_validate,
 )
@@ -304,6 +305,8 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     yield
     scheduler.shutdown()
+    # Tear down the MAM HTTP session (Phase 22B.2.5)
+    mam_close_session()
 
 
 # ─── App + Router Registration ───────────────────────────────

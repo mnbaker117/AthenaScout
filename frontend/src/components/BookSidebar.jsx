@@ -7,8 +7,9 @@ import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 import { SBRow } from "./SBRow";
 
-export function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}){const t=useTheme();const[editing,setEditing]=useState(false);const[ef,setEf]=useState({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");
+export function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}){const t=useTheme();const[editing,setEditing]=useState(false);const[ef,setEf]=useState({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");const[mamScanning,setMamScanning]=useState(false);
 useEffect(()=>{api.get("/settings").then(s=>setCwUrl(s.calibre_web_url||"")).catch(()=>{})},[]);
+const rescanMam=async()=>{if(mamScanning)return;setMamScanning(true);try{const r=await api.post(`/mam/scan-book/${book.id}`);if(r.error){alert(`MAM scan failed: ${r.error}`)}else{onEdit&&onEdit()}}catch(e){alert(`MAM scan failed: ${e}`)}setMamScanning(false)};
 if(!book)return null;
 const startEdit=()=>{setEf({title:book.title||"",description:book.description||"",pub_date:book.pub_date||"",expected_date:book.expected_date||"",isbn:book.isbn||"",series_index:book.series_index||"",is_unreleased:!!book.is_unreleased,source_url:book.source_url||"",mam_url:book.mam_url||""});setEditing(true)};
 const saveEdit=async()=>{setSaving(true);try{await api.put(`/books/${book.id}`,ef);setEditing(false);onEdit&&onEdit()}catch{}setSaving(false)};
@@ -49,10 +50,14 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
 {book.mam_status?<div>
 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:4}}>
 <span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM</span>
+<div style={{display:"flex",alignItems:"center",gap:6}}>
 {book.mam_url?<a href={book.mam_url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:book.mam_status==="found"?"#1a3a1a":"#3a3a1a",color:book.mam_status==="found"?t.grnt:t.ylwt,border:`1px solid ${book.mam_status==="found"?"#2a882a":"#88882a"}`}}>{book.mam_status==="found"?"Found":"Possible"}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>:book.mam_status==="not_found"?<span style={{fontSize:12,color:t.tg,fontStyle:"italic"}}>{book.owned?"Not on MAM (upload candidate)":"Not on MAM"}</span>:null}
+<button onClick={rescanMam} disabled={mamScanning} title="Re-scan this book against MAM" style={{background:t.bg4,border:`1px solid ${t.border}`,borderRadius:5,cursor:mamScanning?"wait":"pointer",color:t.tg,padding:"3px 8px",fontSize:11,fontWeight:600}}>{mamScanning?"…":"↻"}</button>
 </div>
-{book.mam_url&&(book.mam_formats||book.mam_has_multiple)?<div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"flex-end",marginTop:3}}>
+</div>
+{book.mam_url&&(book.mam_formats||book.mam_has_multiple||book.mam_my_snatched)?<div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"flex-end",marginTop:3,flexWrap:"wrap"}}>
 {book.mam_formats?<span style={{fontSize:11,color:t.td,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.03em"}}>{book.mam_formats.split(",").join(" · ")}</span>:null}
+{book.mam_my_snatched?<span title="You've already snatched this torrent on MAM" style={{fontSize:11,padding:"1px 6px",borderRadius:4,background:t.grn+"22",color:t.grnt,border:`1px solid ${t.grn}44`}}>Already snatched</span>:null}
 {book.mam_has_multiple?<span style={{fontSize:11,padding:"1px 6px",borderRadius:4,background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}33`}}>Multiple uploads</span>:null}
 </div>:null}
 </div>:null}
