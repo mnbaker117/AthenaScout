@@ -192,6 +192,9 @@ return<div style={{paddingBottom:40}}>
 </div>:null}
 </div>
 </SF>
+<SF label="Reset ALL source scan data" desc="Wipe every discovered (non-Calibre, non-owned) book and reset every author's last-scanned timestamp. Owned books and MAM data are kept. Use this for a full source clean-slate.">
+<Btn size="sm" onClick={async()=>{if(!confirm("Reset ALL source scan data?\n\nThis will DELETE every discovered book across the entire library and reset every author's last-scanned timestamp so future scans treat them as never-scanned.\n\nOwned books and MAM data are NOT affected.\n\nThis cannot be undone."))return;setSv(true);try{const r=await api.post("/sources/reset");setMsg(`Source data reset — ${r.books_deleted||0} books deleted`);setTimeout(()=>setMsg(""),4000)}catch(e){setMsg(`Error: ${e.message||e}`)}setSv(false)}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Reset all source data</Btn>
+</SF>
 
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Logging</div>
 <SF label="Verbose logging" desc="Show detailed debug output in Docker logs. Logs individual book decisions, page visit details, and merge operations."><STog on={!!s.verbose_logging} onToggle={()=>upd("verbose_logging",!s.verbose_logging)}/></SF>

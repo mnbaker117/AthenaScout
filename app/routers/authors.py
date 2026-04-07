@@ -139,3 +139,32 @@ async def clear_author_scan_data(data: dict = Body(...)):
         return {"status": "ok", "authors_cleared": len(author_ids), "books_deleted": affected}
     finally:
         await db.close()
+
+
+@router.post("/sources/reset")
+async def reset_all_source_scan_data():
+    """Reset all source scan data across the entire library.
+
+    Deletes every non-Calibre, non-owned book (i.e. books discovered by source
+    scans), clears source_url on owned/Calibre books, and resets last_lookup_at
+    on every author so future scans treat all authors as never-scanned.
+    MAM data is left untouched.
+    """
+    db = await get_db()
+    try:
+        # Count discovered books that will be deleted
+        count_row = await db.execute_fetchall(
+            "SELECT COUNT(*) FROM books WHERE owned=0 AND calibre_id IS NULL"
+        )
+        affected = count_row[0][0] if count_row else 0
+        # Delete all non-owned discovered books
+        await db.execute("DELETE FROM books WHERE owned=0 AND calibre_id IS NULL")
+        # Clear source URLs on owned books
+        await db.execute("UPDATE books SET source_url=NULL WHERE owned=1")
+        # Reset every author's last_lookup_at so the next scheduled scan picks them all up
+        await db.execute("UPDATE authors SET last_lookup_at=NULL")
+        await db.commit()
+        logger.info(f"Reset all source scan data: {affected} discovered books deleted")
+        return {"status": "ok", "books_deleted": affected}
+    finally:
+        await db.close()
