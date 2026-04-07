@@ -5,6 +5,7 @@ Holds /api/db/tables, /api/db/table/{table_name}/schema,
 /api/db/table/{table_name} (list/update/add), and row delete.
 """
 import logging
+import sqlite3
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.database import get_db
@@ -428,8 +429,20 @@ async def db_table_delete_row(table_name: str, row_id: int):
         if not row:
             raise HTTPException(404, f"Row {row_id} not found in {table_name}")
 
-        await db.execute(f"DELETE FROM [{table_name}] WHERE [{pk_col}] = ?", (row_id,))
-        await db.commit()
+        try:
+            await db.execute(f"DELETE FROM [{table_name}] WHERE [{pk_col}] = ?", (row_id,))
+            await db.commit()
+        except sqlite3.IntegrityError as e:
+            # Most commonly: foreign key constraint (child rows reference this row)
+            msg = str(e)
+            if "FOREIGN KEY" in msg.upper():
+                hint = "This row is referenced by other records. Delete or reassign those first."
+                if table_name == "authors":
+                    hint = "This author still has books in the books table. Delete or reassign their books first."
+                elif table_name == "series":
+                    hint = "This series still has books referencing it. Delete or reassign those books first."
+                raise HTTPException(409, f"Cannot delete: {hint}")
+            raise HTTPException(409, f"Cannot delete: {msg}")
         logger.info(f"DB editor: deleted row {row_id} from {table_name}")
         return {"status": "ok"}
     finally:
