@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.calibre_sync import sync_calibre
 from app.config import load_settings, save_settings
-from app.database import get_active_library
+from app.database import get_active_library, get_db
 from app.library_apps import get_app
 from app.lookup import run_full_lookup, run_full_rescan
 from app import state
@@ -63,7 +63,33 @@ async def trigger_lookup():
         return {"error": "Author scanning is disabled — enable it in Settings"}
     if state._lookup_task and not state._lookup_task.done():
         return {"error": "An author scan is already running"}
-    state._lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+
+    # Pre-flight: how many authors are actually due for scanning given the
+    # cache window? If zero, surface a clear "nothing to do" status instead
+    # of starting a no-op task that briefly shows "Scanning... 0 of 0" then
+    # vanishes. Users hitting this most often have just completed a scan and
+    # are inside the lookup_interval_days cache window.
+    cache_sec = s.get("lookup_interval_days", 3) * 86400
+    cutoff = time.time() - cache_sec
+    db = await get_db()
+    try:
+        row = await (await db.execute(
+            "SELECT COUNT(*) c FROM authors WHERE COALESCE(last_lookup_at,0) < ?",
+            (cutoff,),
+        )).fetchone()
+        due_count = row["c"] if row else 0
+    finally:
+        await db.close()
+    if due_count == 0:
+        state._lookup_progress = {
+            "running": False, "checked": 0, "total": 0, "current_author": "",
+            "new_books": 0, "type": "lookup",
+            "status": f"no authors due (cache window: {s.get('lookup_interval_days', 3)} days)",
+        }
+        return {"status": "ok", "due": 0,
+                "message": "No authors due for scanning within the current cache window."}
+
+    state._lookup_progress = {"running": True, "checked": 0, "total": due_count, "current_author": "",
                         "new_books": 0, "status": "scanning", "type": "lookup"}
     def _progress(data):
         state._lookup_progress.update({"checked": data["checked"], "total": data["total"],

@@ -64,7 +64,12 @@ async def switch_library(body: dict = Body(...)):
     # Cancel author lookup
     if state._lookup_task and not state._lookup_task.done():
         state._lookup_task.cancel()
-        state._lookup_progress.update({"running": False, "status": "cancelled (library switch)"})
+        # Fully reinit so the previous library's checked/total/current_author
+        # don't bleed into the new library's dashboard before a new scan starts.
+        state._lookup_progress = {
+            "running": False, "checked": 0, "total": 0, "current_author": "",
+            "new_books": 0, "status": "cancelled (library switch)", "type": "none",
+        }
         cancelled.append("author scan")
 
     # Cancel MAM scan (manual or scheduled)
