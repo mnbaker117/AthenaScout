@@ -1,42 +1,83 @@
-"""AthenaScout — Main FastAPI Application"""
-import logging, time, asyncio
+"""AthenaScout — Main FastAPI Application
+
+This file is the application entry point. It creates the FastAPI app, sets up
+the lifespan context manager (library discovery, initial sync, scheduler,
+shutdown cleanup), and registers all route modules from app/routers/.
+
+For individual endpoints, see app/routers/. For shared background-task state
+(scan tasks, library discovery cache), see app/state.py.
+"""
+import asyncio
+import logging
+import os
+import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from app.config import (SYNC_INTERVAL_MINUTES, load_settings, save_settings, apply_logging, discover_libraries)
+
+from app.calibre_sync import sync_calibre
+from app.config import (
+    SYNC_INTERVAL_MINUTES,
+    apply_logging,
+    discover_libraries,
+    load_settings,
+    save_settings,
+)
+from app.database import (
+    get_active_library,
+    get_db,
+    init_db,
+    match_legacy_db_to_library,
+    migrate_legacy_db,
+    set_active_library,
+)
 from app.library_apps import get_app
-from app.database import init_db, get_db, set_active_library, get_active_library, migrate_legacy_db, match_legacy_db_to_library
+from app.lookup import reload_sources, run_full_lookup
+from app.routers import (
+    authors,
+    books,
+    config,
+    covers,
+    db_editor,
+    import_export,
+    libraries,
+    mam,
+    scan,
+    series,
+)
+from app.runtime import IS_DOCKER, IS_STANDALONE
+from app.sources.mam import (
+    scan_books_batch as mam_scan_batch,
+    validate_connection as mam_validate,
+)
 from app import state
 
 
-# Filter out noisy health check and cover/series access logs
+# ─── Logging setup ───────────────────────────────────────────
 class QuietAccessFilter(logging.Filter):
+    """Filter out noisy polling endpoints from uvicorn's access log."""
     NOISY = ("/api/health", "/api/covers/", "/api/series/")
+
     def filter(self, record):
         msg = record.getMessage()
         return not any(p in msg for p in self.NOISY)
 
-# Apply filter to uvicorn access logger
-uv_access = logging.getLogger("uvicorn.access")
-uv_access.addFilter(QuietAccessFilter())
-from app.calibre_sync import sync_calibre
-from app.lookup import run_full_lookup, reload_sources
-from app.sources.mam import (
-    validate_connection as mam_validate,
-    scan_books_batch as mam_scan_batch,
-)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+logging.getLogger("uvicorn.access").addFilter(QuietAccessFilter())
 logger = logging.getLogger("athenascout")
+
 scheduler = AsyncIOScheduler()
 
+
+# ─── Lifespan ────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import os as _os
-
     s = load_settings()
     apply_logging(s.get("verbose_logging", False))
     reload_sources()
@@ -44,7 +85,6 @@ async def lifespan(app: FastAPI):
     # ─── Library Discovery ────────────────────────────────
     state._discovered_libraries = discover_libraries(s)
     if not state._discovered_libraries:
-        from app.runtime import IS_DOCKER
         if IS_DOCKER:
             logger.warning("No libraries found. Check CALIBRE_PATH env var and volume mounts, or use the setup wizard.")
         else:
@@ -88,17 +128,16 @@ async def lifespan(app: FastAPI):
         for lib in state._discovered_libraries:
             set_active_library(lib["slug"])
             try:
-                current_mtime = _os.path.getmtime(lib["source_db_path"])
+                current_mtime = os.path.getmtime(lib["source_db_path"])
                 last_mtime = mtimes.get(lib["slug"])
                 if last_mtime is not None and current_mtime == last_mtime:
                     logger.info(f"Library '{lib['name']}': metadata.db unchanged, skipping sync")
                 else:
-                    app = get_app(lib.get("app_type", "calibre"))
-                    logger.info(f"Library '{lib['name']}': syncing from {app.display_name if app else 'unknown'}...")
-                    if app:
-                        await app.sync(lib["source_db_path"], lib["library_path"])
+                    lib_app = get_app(lib.get("app_type", "calibre"))
+                    logger.info(f"Library '{lib['name']}': syncing from {lib_app.display_name if lib_app else 'unknown'}...")
+                    if lib_app:
+                        await lib_app.sync(lib["source_db_path"], lib["library_path"])
                     else:
-                        from app.calibre_sync import sync_calibre
                         await sync_calibre(lib["source_db_path"], lib["library_path"])
                     mtimes[lib["slug"]] = current_mtime
                     s["calibre_mtimes"] = mtimes
@@ -118,7 +157,6 @@ async def lifespan(app: FastAPI):
 
     async def _sync_all_libraries():
         """Scheduled task: sync all libraries with mtime optimization."""
-        import os as _os2
         current_active = get_active_library()
         st = load_settings()
         mtimes = st.get("calibre_mtimes", {})
@@ -126,17 +164,16 @@ async def lifespan(app: FastAPI):
         for lib in state._discovered_libraries:
             try:
                 set_active_library(lib["slug"])
-                current_mtime = _os2.path.getmtime(lib["source_db_path"])
+                current_mtime = os.path.getmtime(lib["source_db_path"])
                 last_mtime = mtimes.get(lib["slug"])
                 if last_mtime is not None and current_mtime == last_mtime:
                     logger.debug(f"Scheduled sync: '{lib['name']}' metadata.db unchanged, skipping")
                     continue
-                app = get_app(lib.get("app_type", "calibre"))
-                logger.info(f"Scheduled sync: '{lib['name']}' {app.db_filename if app else 'database'} changed, syncing...")
-                if app:
-                    await app.sync(lib["source_db_path"], lib["library_path"])
+                lib_app = get_app(lib.get("app_type", "calibre"))
+                logger.info(f"Scheduled sync: '{lib['name']}' {lib_app.db_filename if lib_app else 'database'} changed, syncing...")
+                if lib_app:
+                    await lib_app.sync(lib["source_db_path"], lib["library_path"])
                 else:
-                    from app.calibre_sync import sync_calibre
                     await sync_calibre(lib["source_db_path"], lib["library_path"])
                 mtimes[lib["slug"]] = current_mtime
                 st["calibre_mtimes"] = mtimes
@@ -155,6 +192,7 @@ async def lifespan(app: FastAPI):
             logger.info("Calibre auto-sync skipped - no libraries configured")
     else:
         logger.info("Calibre auto-sync disabled (interval = 0)")
+
     async def _scheduled_lookup():
         s = load_settings()
         if not s.get("author_scanning_enabled", True):
@@ -177,6 +215,7 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(_scheduled_lookup, "interval", minutes=lookup_days*1440, id="author_lookup", replace_existing=True)
     else:
         logger.info("Auto-lookup disabled (interval = 0)")
+
     async def _mam_scheduler():
         last_scan_at = 0.0
         while True:
@@ -262,56 +301,37 @@ async def lifespan(app: FastAPI):
             last_scan_at = time.time()
 
     asyncio.create_task(_mam_scheduler())
-    scheduler.start(); yield; scheduler.shutdown()
+    scheduler.start()
+    yield
+    scheduler.shutdown()
 
+
+# ─── App + Router Registration ───────────────────────────────
 app = FastAPI(title="AthenaScout", lifespan=lifespan)
 
-# ─── Router registration ─────────────────────────────────────
-# Routers are currently empty scaffolds; routes still live inline below.
-# Stage A3 will move routes out one group at a time.
-from app.routers import (
-    config as _r_config,
-    libraries as _r_libraries,
-    books as _r_books,
-    authors as _r_authors,
-    series as _r_series,
-    covers as _r_covers,
-    scan as _r_scan,
-    mam as _r_mam,
-    db_editor as _r_db_editor,
-    import_export as _r_import_export,
-)
-app.include_router(_r_config.router)
-app.include_router(_r_libraries.router)
-app.include_router(_r_books.router)
-app.include_router(_r_authors.router)
-app.include_router(_r_series.router)
-app.include_router(_r_covers.router)
-app.include_router(_r_scan.router)
-app.include_router(_r_mam.router)
-app.include_router(_r_db_editor.router)
-app.include_router(_r_import_export.router)
+# All API routes live in app/routers/ — see individual files for endpoints.
+for r in (config, libraries, books, authors, series, covers, scan, mam, db_editor, import_export):
+    app.include_router(r.router)
 
 
-# ─── Frontend ────────────────────────────────────────────────
+# ─── Frontend Static File Serving ────────────────────────────
 # Support both source tree and PyInstaller bundle layouts.
 # PyInstaller sets sys._MEIPASS to its temp extraction directory.
-import sys as _sys
-_pyinstaller_base = getattr(_sys, '_MEIPASS', None)
+_pyinstaller_base = getattr(sys, '_MEIPASS', None)
 if _pyinstaller_base:
     FD = Path(_pyinstaller_base) / "frontend" / "dist"
 else:
     FD = Path(__file__).parent.parent / "frontend" / "dist"
 
 if FD.exists():
-    if (FD / "assets").exists(): app.mount("/assets", StaticFiles(directory=FD / "assets"), name="assets")
+    if (FD / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=FD / "assets"), name="assets")
+
     @app.get("/{path:path}")
     async def serve_fe(path: str):
         fp = FD / path
         return FileResponse(fp if fp.is_file() else FD / "index.html")
-else:
-    from app.runtime import IS_STANDALONE
-    if IS_STANDALONE:
-        @app.get("/{path:path}")
-        async def serve_fe_missing(path: str):
-            return {"error": "Frontend not built. Run 'cd frontend && npm install && npm run build' first."}
+elif IS_STANDALONE:
+    @app.get("/{path:path}")
+    async def serve_fe_missing(path: str):
+        return {"error": "Frontend not built. Run 'cd frontend && npm install && npm run build' first."}
