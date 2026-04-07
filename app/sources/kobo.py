@@ -23,10 +23,13 @@ def _create_scraper():
 
 
 class KoboSource(BaseSource):
+    """Kobo uses cloudscraper (sync) instead of httpx, so it doesn't use the
+    base class's _get/_get_client machinery. It still inherits from BaseSource
+    for interface consistency and shared logger/rate_limit."""
     name = "kobo"
 
     def __init__(self, rate_limit: float = 3.0):
-        self.rate_limit = rate_limit
+        super().__init__(rate_limit=rate_limit)
         self._session = None
 
     def _get_session(self):
@@ -145,4 +148,9 @@ class KoboSource(BaseSource):
 
     async def close(self):
         if self._session:
-            self._session.close()
+            try:
+                self._session.close()
+            except Exception:
+                pass
+            self._session = None
+        await super().close()

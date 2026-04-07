@@ -5,6 +5,7 @@ Based on the official Calibre Hardcover plugin approach:
 2. Fetch books by ids with fragments
 3. Auth: 'Authorization' header with full value (user pastes 'Bearer ...')
 """
+import asyncio
 import httpx, logging, json
 from typing import Optional
 from app.sources.base import BaseSource, AuthorResult, BookResult, SeriesResult
@@ -76,35 +77,51 @@ query AuthorBooks($id: Int!, $languages: [String!]) {
 
 class HardcoverSource(BaseSource):
     name = "hardcover"
+    default_headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "AthenaScout/1.0 (https://github.com/mnbaker117/AthenaScout)",
+    }
+    default_timeout = 30.0
 
     def __init__(self, api_key: str = ""):
+        super().__init__(rate_limit=1.0)
         self.api_key = api_key.strip()
-        self._client = None
 
-    def _get_client(self):
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "AthenaScout/1.0 (https://github.com/mnbaker117/AthenaScout)",
-        }
+    def _get_client(self) -> httpx.AsyncClient:
+        """Override to inject the Bearer token header from self.api_key.
+
+        Always creates a fresh client so that update_api_key() can force a
+        reconnect with the new credentials.
+        """
+        headers = dict(self.default_headers)
         if self.api_key:
             token = self.api_key
             # Match plugin logic: add Bearer if not already present
             if " " not in token:
                 token = f"Bearer {token}"
             headers["Authorization"] = token
-        if self._client:
-            try: self._client.close()
-            except: pass
-        self._client = httpx.AsyncClient(timeout=30.0, headers=headers)
+
+        # Close any existing client before creating a new one
+        if self._client is not None:
+            try:
+                # Schedule the close but don't block on it
+                asyncio.create_task(self._client.aclose())
+            except Exception:
+                pass
+
+        self._client = httpx.AsyncClient(
+            timeout=self.default_timeout,
+            headers=headers,
+            follow_redirects=self.follow_redirects,
+        )
         return self._client
 
-    @property
-    def client(self):
-        return self._client or self._get_client()
+    # client property inherited from BaseSource
 
     def update_api_key(self, key: str):
+        """Force client recreation with new API key on next access."""
         self.api_key = key.strip()
-        self._get_client()
+        self._client = None  # Next client access will trigger _get_client()
 
     async def _query(self, query: str, variables: dict = None) -> dict:
         if not self.api_key:
@@ -365,7 +382,3 @@ class HardcoverSource(BaseSource):
     async def get_author_books(self, author_id: str) -> Optional[AuthorResult]:
         """For Hardcover, search_author already returns full results."""
         return None  # Already handled in search_author
-
-    async def close(self):
-        if self._client:
-            await self._client.aclose()

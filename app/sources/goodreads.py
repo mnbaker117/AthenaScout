@@ -4,7 +4,7 @@ Goodreads — PRIMARY source. Two-pass scraping:
 2. Individual book pages for EVERY book to get: language, pub date, expected date, 
    series details (for set/collection detection), and translator info
 """
-import httpx, logging, re, asyncio, json
+import logging, re, json
 from datetime import datetime
 from typing import Optional
 from bs4 import BeautifulSoup
@@ -50,24 +50,12 @@ def _is_set_from_series(series_text: str) -> bool:
 
 class GoodreadsSource(BaseSource):
     name = "goodreads"
+    default_headers = HDR
+    default_timeout = 60.0
+    # follow_redirects=True is the base default
 
-    def __init__(self, rate_limit: float = 2.0):
-        self.rate_limit = rate_limit
-        self.client = httpx.AsyncClient(timeout=60.0, headers=HDR, follow_redirects=True)
-
-    async def _get(self, url, retries=1, **kw):
-        for attempt in range(retries + 1):
-            try:
-                await asyncio.sleep(self.rate_limit)
-                r = await self.client.get(url, **kw)
-                r.raise_for_status()
-                return r
-            except Exception as e:
-                if attempt < retries:
-                    logger.debug(f"  Goodreads: retry {attempt+1} for {url}: {e}")
-                    await asyncio.sleep(3)
-                    continue
-                raise
+    # No custom __init__ — base handles rate_limit, logger, client
+    # No custom _get — base provides it
 
     async def _get_book_details(self, book_id: str, title: str) -> dict:
         """Visit individual book page to get full details."""
@@ -515,6 +503,3 @@ class GoodreadsSource(BaseSource):
         except Exception as e:
             logger.error(f"Goodreads author error id={author_id}: {type(e).__name__}: {e}")
             return None
-
-    async def close(self):
-        await self.client.aclose()
