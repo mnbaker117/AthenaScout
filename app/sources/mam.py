@@ -457,6 +457,9 @@ async def _mam_search(
         resp.raise_for_status()
         if not resp.text or len(resp.text) == 0:
             return None
+        # === TEMP CAPTURE — REMOVE AFTER ONE RUN (Phase 22B.2.5 investigation) ===
+        logger.info(f"MAM_RAW_RESPONSE query={query[:80]!r} status={resp.status_code} bytes={len(resp.text)} body={resp.text[:8000]}")
+        # === END TEMP CAPTURE ===
         return resp.json()
     except _AuthError:
         raise
