@@ -735,7 +735,12 @@ def _evaluate_results(
 
     matches = []
     for item in data:
-        mam_title = item.get("title", "") or item.get("name", "") or ""
+        # MAM normally returns title/name as strings, but some catalog rows
+        # store numeric-looking titles (e.g. "1984") as JSON numbers, and the
+        # `or` chain happily returns those ints if they're truthy. Coerce to
+        # str so downstream string ops (.lower(), .split(), .strip()) don't
+        # explode partway through a 2000-book scan with a generic AttributeError.
+        mam_title = str(item.get("title") or item.get("name") or "")
         torrent_id = item.get("id", "")
 
         # Belt-and-suspenders language filter. browse_lang in the request body
@@ -770,8 +775,10 @@ def _evaluate_results(
             logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — match {pct}% < {MATCH_MIN_PCT}% min")
             continue  # junk result
 
-        # Parse ebook formats from filetypes field
-        filetypes_raw = item.get("filetype", "") or item.get("filetypes", "") or ""
+        # Parse ebook formats from filetypes field. Same defensive coercion
+        # as mam_title above — MAM occasionally returns numeric values here
+        # for malformed catalog entries.
+        filetypes_raw = str(item.get("filetype") or item.get("filetypes") or "")
         formats = _parse_formats(filetypes_raw)
 
         # MAM marks torrents the user has already snatched via "my_snatched"

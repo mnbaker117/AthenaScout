@@ -157,7 +157,11 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                 )
                 await db.commit()
             except Exception as e:
-                logger.error(f"MAM scan batch error: {e}")
+                # exc_info=True logs the full traceback so future "MAM scan
+                # batch error" lines actually tell us WHICH line in mam.py
+                # crashed. The bare message we used to log was useless for
+                # diagnosing AttributeError-class bugs from MAM data.
+                logger.error(f"MAM scan batch error: {e}", exc_info=True)
                 state._mam_scan_progress.update({"status": f"error: {e}", "running": False})
                 return
             finally:
