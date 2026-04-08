@@ -25,6 +25,41 @@ logger = logging.getLogger("athenascout.lookup")
 _RX_LEADING_ARTICLE = re.compile(r'^(the|a|an)\s+')
 _RX_PARENS = re.compile(r'\s*\([^)]*\)\s*')
 _RX_SUBTITLE = re.compile(r'\s*:.*$')
+# Inverse of _RX_SUBTITLE: strips up to and including the first colon.
+# Used for the "SeriesPrefix: BookTitle" case that Hardcover often uses
+# (e.g., "Mistborn: The Final Empire" while Calibre has just "The Final
+# Empire"). _normalize strips the suffix after `:` which is the wrong
+# half for this layout — _normalize_strip_prefix handles the other.
+_RX_SERIES_PREFIX = re.compile(r'^[^:]+:\s*')
+
+# "Generic-subtitle" matcher: detects suffixes that are obviously
+# marketing/edition taglines rather than real book titles. Used by
+# _normalize to decide whether stripping the suffix-after-colon is safe.
+# Without this, "Mistborn: The Final Empire" reduced to "mistborn" and
+# any two books in the same series collapsed to identical normalized
+# forms — fine when only Hardcover used "Series:" prefix format because
+# Calibre never did, but fragile if a future scan ever produced two
+# such titles. Patterns covered:
+#   - "A Novel" / "A Memoir" / "A Tale" / etc.
+#   - "The Definitive/Complete/Illustrated/… Edition"
+#   - "Book/Volume/Vol/Part/Chapter/Tome <number>" or "<word number>"
+#   - "<n>th Anniversary Edition"
+_RX_GENERIC_SUBTITLE = re.compile(
+    r'\s*:\s*'
+    r'(?:'
+    r'an?\s+(?:novel|novella|memoir|story|tale|history|biography|autobiography'
+    r'|guide|companion|handbook|introduction|adventure|fable|romance|mystery'
+    r'|thriller|epic|chronicle|trilogy)s?'
+    r'|the\s+(?:definitive|complete|illustrated|annotated|original|expanded'
+    r'|revised|special|limited|deluxe|collector\'?s|anniversary)\s+'
+    r'(?:edition|version|collection)'
+    r'|\d+(?:st|nd|rd|th)\s+anniversary\s+edition'
+    r'|(?:book|volume|vol\.?|part|chapter|tome)\s+\d+'
+    r'|(?:book|volume|vol\.?|part|chapter|tome)\s+'
+    r'(?:one|two|three|four|five|six|seven|eight|nine|ten)'
+    r')\s*$',
+    re.IGNORECASE,
+)
 _RX_NONWORD = re.compile(r'[^\w\s]')
 _RX_SPACES = re.compile(r'\s+')
 # Word-joining punctuation that needs to become a SPACE before _RX_NONWORD
@@ -75,11 +110,41 @@ def reload_sources():
     kobo = KoboSource(rate_limit=s.get("rate_kobo", 3))
 
 
+def _smart_strip_subtitle(t: str) -> str:
+    """Strip the part after `:` only when it looks like a real subtitle.
+
+    Two acceptance rules — strip if EITHER fires:
+      1. The PREFIX (before colon) has 3+ words. Real titles tend to be
+         multi-word ("Project Hail Mary", "The Catcher in the Rye");
+         series names tend to be 1-2 words ("Mistborn", "Star Wars",
+         "Doctor Who"). 3-word prefixes are unambiguous.
+      2. The SUFFIX (after colon) matches a generic-subtitle pattern
+         like "A Novel", "Part 1", "The Definitive Edition" — those
+         are never real book titles, so stripping is always safe even
+         when the prefix is just one word ("Dune: A Novel").
+
+    Otherwise, leave the colon and everything after it intact. The
+    `_normalize_strip_prefix` path in _fuzzy_match handles the inverse
+    case ("Series: BookTitle" vs bare "BookTitle"), so dropping the
+    blanket strip doesn't lose match coverage — it just stops the
+    spurious cross-book collision where "Mistborn: The Final Empire"
+    and "Mistborn: The Hero of Ages" both reduced to just "mistborn".
+    """
+    if ':' not in t:
+        return t
+    prefix = t.split(':', 1)[0]
+    if len(prefix.split()) >= 3:
+        return _RX_SUBTITLE.sub('', t)
+    if _RX_GENERIC_SUBTITLE.search(t):
+        return _RX_SUBTITLE.sub('', t)
+    return t
+
+
 def _normalize(t: str) -> str:
     t = t.lower().strip()
     t = _RX_LEADING_ARTICLE.sub('', t)
     t = _RX_PARENS.sub(' ', t)  # Remove parenthetical
-    t = _RX_SUBTITLE.sub('', t)  # Remove subtitle after colon
+    t = _smart_strip_subtitle(t)  # Strip "X: Subtitle" only when safe
     t = _RX_TITLE_JOINERS.sub(' ', t)  # "/" "&" "+" between titles → space
     t = _RX_NONWORD.sub('', t)
     t = _RX_SPACES.sub(' ', t)
@@ -90,6 +155,25 @@ def _normalize_light(t: str) -> str:
     t = t.lower().strip()
     t = _RX_PARENS.sub(' ', t)
     t = _RX_NONWORD.sub(' ', t)
+    t = _RX_SPACES.sub(' ', t)
+    return t.strip()
+
+
+def _normalize_strip_prefix(t: str) -> str:
+    """Same as _normalize but strips the part BEFORE the first colon
+    instead of after. Lets `_fuzzy_match` link Hardcover-style
+    "Mistborn: The Final Empire" against Calibre's "The Final Empire"
+    by reducing the former to "final empire" instead of "mistborn".
+    Returns "" for inputs with no colon (caller can skip).
+    """
+    if ':' not in t:
+        return ''
+    t = t.lower().strip()
+    t = _RX_PARENS.sub(' ', t)
+    t = _RX_SERIES_PREFIX.sub('', t, count=1)
+    t = _RX_LEADING_ARTICLE.sub('', t)  # post-strip "the" survivor
+    t = _RX_TITLE_JOINERS.sub(' ', t)
+    t = _RX_NONWORD.sub('', t)
     t = _RX_SPACES.sub(' ', t)
     return t.strip()
 
@@ -147,6 +231,36 @@ def _fuzzy_match(a: str, b: str) -> bool:
         if SequenceMatcher(None, na, nb).ratio() > 0.85: return True
     if len(la) > 3 and len(lb) > 3:
         if SequenceMatcher(None, la, lb).ratio() > 0.85: return True
+
+    # Phase 3b-H2 followup: handle "SeriesPrefix: BookTitle" against
+    # bare-title Calibre rows. _normalize() strips the suffix after `:`
+    # which is the wrong half for this layout — Hardcover returns
+    # "Mistborn: The Final Empire" while Calibre has "The Final Empire",
+    # and the strip-suffix path reduces both to "mistborn" vs "final
+    # empire" (no match). _normalize_strip_prefix() does the inverse.
+    #
+    # Two-word minimum: a strip-prefix result of 1 word is too generic
+    # to safely auto-link. "Stephen King: A Biography" → "biography"
+    # would otherwise match any Calibre row called "Biography", and
+    # "Star Wars: Aftermath" → "aftermath" could collide with Stephen
+    # King's "Aftermath", Linda Hogan's "Aftermath", etc. The 2-word
+    # floor still catches the common cases ("final empire", "new hope",
+    # "way of kings") which are the ones actually showing up in scans.
+    def _strip_prefix_ok(p: str) -> bool:
+        return bool(p) and len(p.split()) >= 2
+
+    pa = _normalize_strip_prefix(a)
+    pb = _normalize_strip_prefix(b)
+    if _strip_prefix_ok(pa):
+        if pa == nb: return True
+        if pa in nb and _len_ratio_ok(len(pa), len(nb)): return True
+        if nb in pa and _len_ratio_ok(len(nb), len(pa)): return True
+    if _strip_prefix_ok(pb):
+        if pb == na: return True
+        if pb in na and _len_ratio_ok(len(pb), len(na)): return True
+        if na in pb and _len_ratio_ok(len(na), len(pb)): return True
+    if _strip_prefix_ok(pa) and _strip_prefix_ok(pb) and pa == pb: return True
+
     return False
 
 
