@@ -817,6 +817,36 @@ async def _compute_series_suggestions(author_id, series_collector):
             if not groups:
                 continue
 
+            # None-index tolerance: if a source reports a series name
+            # but no index (e.g. Kobo's detail page often omits the
+            # number even when the book IS in a series), and there's
+            # exactly ONE other group for the same name with a concrete
+            # index, fold the None-index group into that one. The None
+            # vote is better read as "I confirm the name, I just don't
+            # know the number" than as "I claim no index". Two distinct
+            # concrete indices for the same name are NOT collapsed —
+            # those represent genuine disagreement about which book in
+            # the series this is.
+            #
+            # Real case from the post-3c Sanderson scan that motivated
+            # this: Tress of the Emerald Sea — Goodreads said "Hoid's
+            # Travails #1", Kobo said "Hoid's Travails" (no index),
+            # Hardcover said "Secret Projects". Without folding, every
+            # group has 1 source and the 2+ threshold isn't met. With
+            # folding, Goodreads + Kobo become a 2-source consensus on
+            # "Hoid's Travails #1", which legitimately disagrees with
+            # the user's Calibre value of "Secret Projects" → suggestion.
+            none_keys = [k for k in groups if k[1] is None and k[0]]
+            for nk in none_keys:
+                name = nk[0]
+                concrete = [k for k in groups if k != nk and k[0] == name and k[1] is not None]
+                if len(concrete) == 1:
+                    target = concrete[0]
+                    groups[target].extend(groups[nk])
+                    del groups[nk]
+                # else: 0 concrete (just this None group, leave alone)
+                # or 2+ concrete (ambiguous which to fold into, leave alone)
+
             # Pick the largest group, with source-priority tiebreak
             # (a group containing Goodreads beats a same-size group
             # without it). Equal-size groups containing the SAME
@@ -969,12 +999,17 @@ async def _compute_series_suggestions(author_id, series_collector):
                 )
 
         await db.commit()
-        if suggestions_created or suggestions_updated or suggestions_resolved:
-            logger.info(
-                f"  Series suggestions for author_id={author_id}: "
-                f"{suggestions_created} new, {suggestions_updated} updated, "
-                f"{suggestions_resolved} resolved"
-            )
+        # Always log the summary so verification scans can confirm the
+        # consensus pass actually ran (the previous conditional log was
+        # silent in the all-zeros case, which made it impossible to
+        # tell "function ran but found nothing" from "function never
+        # ran" without adding instrumentation).
+        logger.info(
+            f"  Series consensus pass for author_id={author_id}: "
+            f"considered {len(series_collector)} books, "
+            f"{suggestions_created} new, {suggestions_updated} updated, "
+            f"{suggestions_resolved} resolved"
+        )
     finally:
         await db.close()
 
