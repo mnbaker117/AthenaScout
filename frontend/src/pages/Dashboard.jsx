@@ -7,7 +7,11 @@ import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
 
-export default function Dashboard({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
+export default function Dashboard({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);const[sugCount,setSugCount]=useState(0);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
+// Phase 3c: pending suggestions count for the Dashboard card. Refetched
+// on the same "athenascout:suggestions-changed" event the navbar uses,
+// so accepting/ignoring on the SuggestionsPage immediately reflects here.
+useEffect(()=>{const refresh=()=>api.get("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[]);
 useEffect(()=>{api.get("/lookup/status").then(r=>{if(r.running||(r.status&&r.status!=="idle"))setLookupScan(r)}).catch(()=>{});api.get("/mam/scan/status").then(r=>{if(r.running||r.status==="complete")setMamScan(r)}).catch(()=>{})},[]);
 // Lookup polling (3s while running). Page Visibility API: skip the fetch when the tab is
 // hidden (saves network chatter on long-running scans left open in a background tab), and
@@ -43,6 +47,9 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
   {label:"Authors",value:d.authors,color:t.purt,icon:"✍",nav:()=>onNav("authors")},
   {label:"Series",value:d.total_series,color:t.cyant,icon:"📖"},
   {label:"Upcoming",value:d.upcoming_books||0,color:t.cyant,icon:"📅",nav:()=>onNav("upcoming")},
+  // Phase 3c: only render the Suggestions card when there's something to review.
+  // Conditionally appended via spread so the grid layout collapses cleanly when 0.
+  ...(sugCount>0?[{label:"Suggestions",value:sugCount,color:t.accent,icon:"💡",nav:()=>onNav("suggestions")}]:[]),
 ].map(c=><div key={c.label} onClick={c.nav} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"16px 18px",cursor:c.nav?"pointer":"default",transition:"border-color 0.2s"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:20}}>{c.icon}</span><span style={{fontSize:24,fontWeight:700,color:c.color}}>{c.value}</span></div><div style={{fontSize:12,color:t.td,marginTop:6}}>{c.label}</div></div>)}
 </div>
 

@@ -7,9 +7,14 @@ import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 import { SBRow } from "./SBRow";
 
-export function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}){const t=useTheme();const[editing,setEditing]=useState(false);const[ef,setEf]=useState({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");const[mamScanning,setMamScanning]=useState(false);const[mamOn,setMamOn]=useState(false);
+export function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}){const t=useTheme();const[editing,setEditing]=useState(false);const[ef,setEf]=useState({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");const[mamScanning,setMamScanning]=useState(false);const[mamOn,setMamOn]=useState(false);const[suggestion,setSuggestion]=useState(null);const[sugBusy,setSugBusy]=useState(null);
 useEffect(()=>{api.get("/settings").then(s=>setCwUrl(s.calibre_web_url||"")).catch(()=>{})},[]);
 useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
+// Phase 3c: fetch the active series-suggestion (if any) for this book
+// when the sidebar opens. The endpoint returns {suggestion: null} when
+// there is none, so we always have a deterministic terminal state.
+useEffect(()=>{if(!book?.id){setSuggestion(null);return}let cancelled=false;api.get(`/series-suggestions/by-book/${book.id}`).then(r=>{if(!cancelled)setSuggestion(r.suggestion||null)}).catch(()=>{if(!cancelled)setSuggestion(null)});return()=>{cancelled=true}},[book?.id]);
+const sugAction=async(action)=>{if(!suggestion||sugBusy)return;setSugBusy(action);try{if(action==="apply")await api.post(`/series-suggestions/${suggestion.id}/apply`);else if(action==="ignore")await api.post(`/series-suggestions/${suggestion.id}/ignore`);else if(action==="delete")await api.del(`/series-suggestions/${suggestion.id}`);try{window.dispatchEvent(new CustomEvent("athenascout:suggestions-changed"))}catch{};setSuggestion(null);if(action==="apply")onEdit&&onEdit()}catch(e){alert(`${action} failed: ${e.message||e}`)}setSugBusy(null)};
 const rescanMam=async()=>{if(mamScanning)return;setMamScanning(true);try{const r=await api.post("/books/scan-mam",{book_ids:[book.id]});if(r.error){alert(`MAM scan failed: ${r.error}`)}else{const res=(r.results&&r.results[0])||{};const label=res.status==="found"?"Found ✓":res.status==="possible"?`Possible (${res.match_pct||"?"}%)`:res.status==="not_found"?"Not on MAM":"Scan complete";alert(`MAM ${label}`);onEdit&&onEdit()}}catch(e){alert(`MAM scan failed: ${e.message||e}`)}setMamScanning(false)};
 if(!book)return null;
 const startEdit=()=>{setEf({title:book.title||"",description:book.description||"",pub_date:book.pub_date||"",expected_date:book.expected_date||"",isbn:book.isbn||"",series_index:book.series_index||"",is_unreleased:!!book.is_unreleased,source_url:book.source_url||"",mam_url:book.mam_url||""});setEditing(true)};
@@ -48,6 +53,25 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
   if(entries.length===0)return null;
   return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:4}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Metadata</span><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{entries.map(e=>{const c=badgeColors[e.name]||badgeColors.manual;return<a key={e.name} href={e.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:5,fontSize:12,fontWeight:600,textDecoration:"none",background:c.bg,color:c.fg,border:`1px solid ${c.br}`}}>{e.name}<span style={{fontSize:10,opacity:0.7}}>↗</span></a>})}</div></div>
 })()}
+{/* Phase 3c: inline series-suggestion card. Only shown when an active
+    (pending or ignored) suggestion exists for this book. Apply/Ignore/
+    Delete actions hit the same endpoints SuggestionsPage uses and
+    dispatch the same event so the navbar count stays in sync. */}
+{suggestion?(()=>{const isPending=suggestion.status==="pending";const sources=Array.isArray(suggestion.sources_agreeing)?suggestion.sources_agreeing:[];const fmt=(name,idx)=>name?(idx!=null?`${name} #${idx}`:name):"standalone";return<div style={{background:t.accent+"12",border:`1px solid ${t.accent}44`,borderRadius:10,padding:"12px 14px",display:"flex",flexDirection:"column",gap:8}}>
+<div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:14}}>💡</span><span style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em"}}>Series Suggestion</span>{!isPending?<span style={{fontSize:10,fontWeight:600,color:t.tg,textTransform:"uppercase",padding:"1px 6px",borderRadius:4,background:t.bg4,border:`1px solid ${t.borderL}`}}>{suggestion.status}</span>:null}</div>
+<div style={{fontSize:12,color:t.text2,lineHeight:1.5}}>
+<span style={{color:t.tg}}>Currently:</span> <span style={{color:t.text2}}>{fmt(suggestion.current_series_name,suggestion.current_series_index)}</span><br/>
+<span style={{color:t.tg}}>Suggested:</span> <span style={{color:t.accent,fontWeight:600}}>{fmt(suggestion.suggested_series_name,suggestion.suggested_series_index)}</span>
+</div>
+<div style={{fontSize:11,color:t.tg}}>Agreed by: {sources.join(", ")||"—"}</div>
+<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+{isPending?<>
+<Btn size="sm" variant="accent" onClick={()=>sugAction("apply")} disabled={!!sugBusy}>{sugBusy==="apply"?<Spin/>:<>{Ic.check} Apply</>}</Btn>
+<Btn size="sm" variant="ghost" onClick={()=>sugAction("ignore")} disabled={!!sugBusy}>{sugBusy==="ignore"?<Spin/>:"Ignore"}</Btn>
+</>:null}
+<Btn size="sm" variant="ghost" onClick={()=>sugAction("delete")} disabled={!!sugBusy} style={{color:t.redt}}>{sugBusy==="delete"?<Spin/>:Ic.trash}</Btn>
+</div>
+</div>})():null}
 {(mamOn||book.mam_status)?<div>
 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:4}}>
 <span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>MAM</span>

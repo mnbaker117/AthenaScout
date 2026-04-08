@@ -220,6 +220,35 @@ CREATE TABLE IF NOT EXISTS mam_scan_log (
     status TEXT NOT NULL DEFAULT 'running'
 );
 
+-- Phase 3c: Source-consensus series suggestions.
+-- One row per book with an active suggestion. The merge layer
+-- (lookup.py:_merge_result + _compute_series_suggestions) populates
+-- this whenever 2+ sources agree on a (series_name, series_index)
+-- tuple that differs from what's currently stored on the book row.
+-- The user reviews pending suggestions in the UI and either applies
+-- (writes back to books.series_id/series_index, status→applied) or
+-- ignores (status→ignored, suppresses re-suggestion of the SAME tuple).
+-- A future scan that produces a DIFFERENT consensus from a previously
+-- ignored one creates a fresh pending suggestion.
+--
+-- The current_* columns snapshot the book's series state at the moment
+-- the suggestion was generated, so the UI can render "currently: X →
+-- suggested: Y" diffs without re-querying the books row (which may
+-- have changed by the time the user reviews).
+CREATE TABLE IF NOT EXISTS book_series_suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL UNIQUE,
+    suggested_series_name TEXT,
+    suggested_series_index REAL,
+    sources_agreeing TEXT NOT NULL,
+    current_series_name TEXT,
+    current_series_index REAL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at REAL,
+    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_books_author ON books(author_id);
 CREATE INDEX IF NOT EXISTS idx_books_series ON books(series_id);
 CREATE INDEX IF NOT EXISTS idx_books_owned ON books(owned);
@@ -232,6 +261,8 @@ CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status);
 -- the author-detail page and the lookup-merge pass that runs once per
 -- author during source scans.
 CREATE INDEX IF NOT EXISTS idx_books_author_owned ON books(author_id, owned);
+CREATE INDEX IF NOT EXISTS idx_suggestions_status ON book_series_suggestions(status);
+CREATE INDEX IF NOT EXISTS idx_suggestions_book ON book_series_suggestions(book_id);
 """
 
 # Migrations for existing databases
@@ -276,6 +307,23 @@ MIGRATIONS = [
     "ALTER TABLE authors DROP COLUMN fantasticfiction_id",
     "ALTER TABLE series DROP COLUMN fantasticfiction_id",
     "ALTER TABLE books DROP COLUMN fantasticfiction_id",
+    # ── Phase 3c: source-consensus series suggestions ────────────
+    # See SCHEMA above for full doc. Single new table; no changes
+    # to existing tables. Indexes are created via the SCHEMA index
+    # block at startup so they're not duplicated here.
+    """CREATE TABLE IF NOT EXISTS book_series_suggestions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id INTEGER NOT NULL UNIQUE,
+        suggested_series_name TEXT,
+        suggested_series_index REAL,
+        sources_agreeing TEXT NOT NULL,
+        current_series_name TEXT,
+        current_series_index REAL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+        updated_at REAL,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    )""",
 ]
 
 

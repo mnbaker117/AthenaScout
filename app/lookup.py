@@ -340,7 +340,7 @@ async def _validate_author(author_name: str, our_titles: list[str], result: Auth
     return False
 
 
-async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False):
+async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None):
     """Merge an AuthorResult, filtering by language. In full_scan mode, updates metadata on existing books.
 
     When owned_only=True (the "Library-only source scan" setting), the
@@ -350,6 +350,16 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
     over the user's owned library without ever discovering new missing or
     upcoming books. Useful for getting an existing library polished before
     turning the discovery firehose on.
+
+    Phase 3c: when `series_collector` is a dict, this function records each
+    matched (book_id → source_name → (series_name, series_index)) tuple
+    into it. The collector is owned by lookup_author() and threaded through
+    every source's _merge_result call so that after all sources have run,
+    _compute_series_suggestions() can tally per-source agreement and write
+    suggestion rows where 2+ sources agree on a series different from the
+    book's current value. Recording is non-destructive — the merge layer's
+    actual write behavior (priority-gated for series, Calibre-locked for
+    owned books) is unchanged.
     """
     db = await get_db()
     try:
@@ -538,6 +548,15 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 if matched_row:
                     sql, vals = _update_existing(matched_row, bk, series_id=sid)
                     await db.execute(sql, vals)
+                    # Phase 3c: record this source's series claim for the
+                    # matched book so consensus can be computed at the
+                    # end of lookup_author. We use the SOURCE's reported
+                    # series name (sr.name), not the resolved series_id
+                    # — different sources may use slightly different
+                    # canonical names ("The Mistborn Saga" vs "Mistborn
+                    # Saga") and the consensus computer normalizes them.
+                    if series_collector is not None:
+                        series_collector.setdefault(matched_row["id"], {})[source_name] = (sr.name, bk.series_index)
                     continue
                 if owned_only:
                     # Library-only scan: don't add discovered series books that
@@ -569,6 +588,13 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if matched_row:
                 sql, vals = _update_existing(matched_row, bk)
                 await db.execute(sql, vals)
+                # Phase 3c: record (None, None) — this source thinks
+                # the book is a standalone, not in any series. This
+                # captures disagreements where Source A says "in series
+                # X" while Source B says "standalone", which is just as
+                # important to surface as a name conflict.
+                if series_collector is not None:
+                    series_collector.setdefault(matched_row["id"], {})[source_name] = (None, None)
                 continue
             if owned_only:
                 # Library-only scan: skip discovered standalone books we don't own.
@@ -588,7 +614,294 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         await db.close()
 
 
-async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False):
+# ─── Phase 3c: source-consensus series suggestions ───────────────────
+# Series-name normalization for consensus grouping. Mirrors hardcover.py's
+# _norm_series so two sources reporting "The Mistborn Saga" and "Mistborn
+# Saga" group together. Standalone (None) is its own bucket and never
+# normalizes into a name group.
+_RX_CONSENSUS_LEAD = re.compile(r'^(the|a|an)\s+', re.IGNORECASE)
+_RX_CONSENSUS_TAIL = re.compile(
+    r'\s+(saga|series|trilogy|cycle|chronicles|novels|books)\s*$',
+    re.IGNORECASE,
+)
+_RX_CONSENSUS_PUNCT = re.compile(r'[^\w\s]')
+
+
+def _norm_consensus_series(name):
+    """Normalize a series name for consensus grouping. Returns "" for None."""
+    if not name:
+        return ""
+    n = name.strip()
+    n = _RX_CONSENSUS_LEAD.sub('', n)
+    for _ in range(3):  # iterative tail strip handles "Mistborn Saga Series"
+        new_n = _RX_CONSENSUS_TAIL.sub('', n)
+        if new_n == n:
+            break
+        n = new_n
+    n = _RX_CONSENSUS_PUNCT.sub(' ', n).lower()
+    return re.sub(r'\s+', ' ', n).strip()
+
+
+def _norm_consensus_index(idx):
+    """Normalize a series index for grouping. 3 == 3.0 == "3"; None stays None.
+
+    Sources can return ints, floats, or strings. We coerce to float and
+    round to 1 decimal so 3 / 3.0 / "3" group together but 3.0 and 3.5
+    stay distinct (sub-numbered novellas like Edgedancer #2.5).
+    """
+    if idx is None:
+        return None
+    try:
+        return round(float(idx), 1)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _compute_series_suggestions(author_id, series_collector):
+    """Tally per-source series claims and write pending suggestions.
+
+    Called by lookup_author() after all sources have run. For each
+    book in series_collector, groups the per-source (name, index)
+    tuples by their normalized form. If the largest group has >=2
+    sources AND that group's value differs from the book's CURRENT
+    series state in the DB, upsert a row in book_series_suggestions.
+
+    Suggestion lifecycle (see schema doc in database.py):
+      - No existing row + new disagreement → INSERT pending
+      - status='applied' → leave alone (user already accepted)
+      - status='ignored' + same (name, idx) → leave alone (respect ignore)
+      - status='ignored' + different (name, idx) → UPDATE to pending
+        (a NEW disagreement, the old ignore doesn't apply)
+      - status='pending' → UPDATE to latest values + bump updated_at
+      - Consensus no longer disagrees → DELETE row entirely (resolved)
+
+    Computes the consensus by majority vote of normalized tuples. Ties
+    are broken by preferring source priority (Goodreads > Hardcover >
+    Kobo) — i.e., a 1-1 tie between Goodreads and Hardcover picks the
+    Goodreads value, since Goodreads is the most-trusted source. (Tie
+    handling rarely fires in practice — most disagreements are 1-1-1
+    or 2-1, which is unambiguous.)
+    """
+    if not series_collector:
+        return
+
+    db = await get_db()
+    try:
+        # Pull current DB state for all books in the collector in one
+        # query. Joins to series so we get the canonical name string.
+        book_ids = list(series_collector.keys())
+        placeholders = ",".join("?" * len(book_ids))
+        rows = await (await db.execute(
+            f"SELECT b.id, b.title, b.series_index AS cur_idx, "
+            f"s.name AS cur_series_name "
+            f"FROM books b LEFT JOIN series s ON b.series_id = s.id "
+            f"WHERE b.id IN ({placeholders})",
+            book_ids,
+        )).fetchall()
+        current_state = {
+            r["id"]: (r["cur_series_name"], r["cur_idx"], r["title"])
+            for r in rows
+        }
+
+        # Pull existing suggestion rows for these books in one query
+        # so we don't issue N round-trips.
+        existing_rows = await (await db.execute(
+            f"SELECT id, book_id, suggested_series_name, suggested_series_index, "
+            f"status FROM book_series_suggestions WHERE book_id IN ({placeholders})",
+            book_ids,
+        )).fetchall()
+        existing_by_book = {r["book_id"]: dict(r) for r in existing_rows}
+
+        # Source priority for tiebreaking the consensus vote. Mirrors
+        # SOURCE_PRIORITY in _merge_result; lower number = higher trust.
+        SOURCE_RANK = {"goodreads": 1, "hardcover": 2, "kobo": 3}
+
+        suggestions_created = 0
+        suggestions_updated = 0
+        suggestions_resolved = 0
+
+        for book_id, per_source in series_collector.items():
+            if book_id not in current_state:
+                continue  # book may have been deleted between scan and now
+            cur_name, cur_idx, book_title = current_state[book_id]
+            cur_norm_name = _norm_consensus_series(cur_name)
+            cur_norm_idx = _norm_consensus_index(cur_idx)
+
+            # Group sources by their normalized claim. Key is the
+            # normalized tuple; value is a list of (source_name,
+            # raw_name, raw_idx) so we can pick a canonical display
+            # value when the group wins.
+            groups = {}
+            for src_name, (raw_name, raw_idx) in per_source.items():
+                key = (_norm_consensus_series(raw_name), _norm_consensus_index(raw_idx))
+                groups.setdefault(key, []).append((src_name, raw_name, raw_idx))
+
+            if not groups:
+                continue
+
+            # Pick the largest group, with source-priority tiebreak
+            # (a group containing Goodreads beats a same-size group
+            # without it). Equal-size groups containing the SAME
+            # priority source — extremely rare — fall back to dict
+            # iteration order, which is stable in Python 3.7+.
+            def _group_score(item):
+                key, members = item
+                size = len(members)
+                # Best (lowest) source rank in this group; missing
+                # sources score 99 so they lose tiebreaks naturally.
+                best_rank = min(SOURCE_RANK.get(m[0], 99) for m in members)
+                # Score: size dominates (×100), tiebreak by inverted rank
+                return size * 100 + (10 - best_rank)
+
+            largest_key, largest_members = max(groups.items(), key=_group_score)
+
+            # Threshold: need at least 2 sources to call it a consensus.
+            if len(largest_members) < 2:
+                # Check if there's a stale suggestion to clean up:
+                # the consensus collapsed (used to have 2+, now only 1).
+                if book_id in existing_by_book:
+                    ex = existing_by_book[book_id]
+                    if ex["status"] == "pending":
+                        await db.execute(
+                            "DELETE FROM book_series_suggestions WHERE id = ?",
+                            (ex["id"],),
+                        )
+                        suggestions_resolved += 1
+                        logger.debug(
+                            f"    SUGGESTION RESOLVED (consensus collapsed): "
+                            f"'{book_title}' (book_id={book_id})"
+                        )
+                continue
+
+            consensus_norm_name, consensus_norm_idx = largest_key
+
+            # Does the consensus actually differ from the current DB value?
+            if (consensus_norm_name == cur_norm_name and
+                    consensus_norm_idx == cur_norm_idx):
+                # Consensus matches what's already in the DB — no
+                # suggestion needed. Clean up any stale pending row
+                # (the disagreement was resolved by a previous Apply
+                # or by the user manually editing).
+                if book_id in existing_by_book:
+                    ex = existing_by_book[book_id]
+                    if ex["status"] == "pending":
+                        await db.execute(
+                            "DELETE FROM book_series_suggestions WHERE id = ?",
+                            (ex["id"],),
+                        )
+                        suggestions_resolved += 1
+                        logger.debug(
+                            f"    SUGGESTION RESOLVED (matches current): "
+                            f"'{book_title}' (book_id={book_id})"
+                        )
+                continue
+
+            # Pick the canonical display name from the group. Prefer the
+            # highest-priority source's raw name string (so we display
+            # "The Mistborn Saga" instead of "Mistborn Saga" if Goodreads
+            # is in the winning group).
+            canonical_member = min(
+                largest_members,
+                key=lambda m: SOURCE_RANK.get(m[0], 99),
+            )
+            suggested_name = canonical_member[1]
+            suggested_idx = canonical_member[2]
+            sources_agreeing = sorted(
+                m[0] for m in largest_members
+            )
+            sources_json = json.dumps(sources_agreeing)
+            now = time.time()
+
+            ex = existing_by_book.get(book_id)
+            if ex is None:
+                # No existing suggestion — INSERT a new pending row
+                await db.execute(
+                    "INSERT INTO book_series_suggestions "
+                    "(book_id, suggested_series_name, suggested_series_index, "
+                    "sources_agreeing, current_series_name, current_series_index, "
+                    "status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                    (book_id, suggested_name, suggested_idx, sources_json,
+                     cur_name, cur_idx, now, now),
+                )
+                suggestions_created += 1
+                logger.info(
+                    f"    SUGGESTION NEW: '{book_title}' (book_id={book_id}) "
+                    f"current=({cur_name!r}, {cur_idx}) → "
+                    f"suggested=({suggested_name!r}, {suggested_idx}) "
+                    f"by {sources_agreeing}"
+                )
+                continue
+
+            # Existing row — branch on status
+            if ex["status"] == "applied":
+                continue  # user already accepted; never re-suggest
+
+            ex_norm_name = _norm_consensus_series(ex["suggested_series_name"])
+            ex_norm_idx = _norm_consensus_index(ex["suggested_series_index"])
+            same_as_existing = (
+                ex_norm_name == consensus_norm_name and
+                ex_norm_idx == consensus_norm_idx
+            )
+
+            if ex["status"] == "ignored":
+                if same_as_existing:
+                    continue  # respect the ignore
+                # Different consensus → reset to pending. The user's
+                # ignore was for the OLD values, not these.
+                await db.execute(
+                    "UPDATE book_series_suggestions SET "
+                    "suggested_series_name=?, suggested_series_index=?, "
+                    "sources_agreeing=?, current_series_name=?, "
+                    "current_series_index=?, status='pending', updated_at=? "
+                    "WHERE id=?",
+                    (suggested_name, suggested_idx, sources_json,
+                     cur_name, cur_idx, now, ex["id"]),
+                )
+                suggestions_updated += 1
+                logger.info(
+                    f"    SUGGESTION REOPENED (was ignored, new consensus): "
+                    f"'{book_title}' → ({suggested_name!r}, {suggested_idx})"
+                )
+                continue
+
+            # status == 'pending' — refresh values + updated_at
+            if same_as_existing:
+                # Same consensus, just touch updated_at to keep it fresh
+                await db.execute(
+                    "UPDATE book_series_suggestions SET "
+                    "sources_agreeing=?, current_series_name=?, "
+                    "current_series_index=?, updated_at=? WHERE id=?",
+                    (sources_json, cur_name, cur_idx, now, ex["id"]),
+                )
+            else:
+                # Pending row's consensus shifted to a different value
+                await db.execute(
+                    "UPDATE book_series_suggestions SET "
+                    "suggested_series_name=?, suggested_series_index=?, "
+                    "sources_agreeing=?, current_series_name=?, "
+                    "current_series_index=?, updated_at=? WHERE id=?",
+                    (suggested_name, suggested_idx, sources_json,
+                     cur_name, cur_idx, now, ex["id"]),
+                )
+                suggestions_updated += 1
+                logger.info(
+                    f"    SUGGESTION UPDATED: '{book_title}' "
+                    f"→ ({suggested_name!r}, {suggested_idx})"
+                )
+
+        await db.commit()
+        if suggestions_created or suggestions_updated or suggestions_resolved:
+            logger.info(
+                f"  Series suggestions for author_id={author_id}: "
+                f"{suggestions_created} new, {suggestions_updated} updated, "
+                f"{suggestions_resolved} resolved"
+            )
+    finally:
+        await db.close()
+
+
+async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None):
     """Try a single source with validation and detailed logging."""
     try:
         logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
@@ -658,7 +971,7 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
             logger.info(f"  [{source_name}] Author validation failed — skipping (likely wrong author)")
             return 0
 
-        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only)
+        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
         parts = []
         if n > 0: parts.append(f"{n} new")
         if u > 0: parts.append(f"{u} updated")
@@ -705,20 +1018,36 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     finally:
         await db.close()
 
+    # Phase 3c: per-source series collector. Threaded through every
+    # _try_source call so each source's matched-book series claims are
+    # recorded. After all sources have run, _compute_series_suggestions()
+    # tallies the per-source agreement and writes pending suggestions
+    # for any book where 2+ sources agree on a series different from the
+    # book's current value. The dict is local to this scan and discarded
+    # after the consensus pass — we don't need to persist per-source raw
+    # data, only the final consensus diffs.
+    series_collector: dict[int, dict[str, tuple]] = {}
+
     # 1. Goodreads (PRIMARY)
     if settings.get("goodreads_enabled", True):
-        total += await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
+        total += await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
 
     # 2. Hardcover
     if settings.get("hardcover_api_key") and settings.get("hardcover_enabled", True):
         hardcover.update_api_key(settings["hardcover_api_key"])
         hardcover._owned_titles = our_titles
         hardcover._owned_series_names = our_series_names
-        total += await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
+        total += await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
 
     # 3. Kobo
     if settings.get("kobo_enabled", True):
-        total += await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
+        total += await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+
+    # Phase 3c: compute consensus and write pending suggestions for
+    # any per-book disagreement that meets the 2+ sources threshold.
+    # Runs after all sources so it sees the full per-book picture.
+    if series_collector:
+        await _compute_series_suggestions(author_id, series_collector)
 
     db2 = await get_db()
     try:

@@ -19,6 +19,7 @@ import AuthorDetailPage from "./pages/AuthorDetailPage";
 import MAMPage from "./pages/MAMPage";
 import DatabasePage from "./pages/DatabasePage";
 import SettingsPage from "./pages/SettingsPage";
+import SuggestionsPage from "./pages/SuggestionsPage";
 
 // ─── App Shell ──────────────────────────────────────────────
 
@@ -48,6 +49,14 @@ useEffect(()=>{if(!authState.authenticated)return;api.get("/platform").then(r=>s
 // refetch on every `pg` change (page nav) as a lazy refresh trigger, which
 // cost 1 API call per nav click. Event-driven is surgical and free.
 useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{});refresh();window.addEventListener("athenascout:mam-state-changed",refresh);return()=>window.removeEventListener("athenascout:mam-state-changed",refresh)},[authState.authenticated]);
+// Phase 3c: pending series-suggestion count drives whether the
+// "Suggestions" nav item appears at all (hidden when 0 to keep the
+// navbar clean) and the badge number shown next to it. Refetched on
+// page changes via the explicit "athenascout:suggestions-changed"
+// event that SuggestionsPage dispatches after Apply/Ignore/Delete,
+// plus a one-shot fetch on initial auth.
+const[sugCount,setSugCount]=useState(0);
+useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[authState.authenticated]);
   const theme=THEMES[tn]||THEMES.dark;
   const nav=(p,a=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
   useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);
@@ -111,8 +120,9 @@ input,select{font-family:inherit}
 {pg==="dashboard"?<div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:theme.accent,borderRadius:1}}/>:null}
 </button>
 <div className="nav-items" style={{display:"flex",alignItems:"center",gap:2,overflowX:"auto",flex:1,minWidth:0}}>
-{NAV.filter(n=>n.id!=="mam"||mamOn).map(n=><button key={n.id} onClick={()=>nav(n.id)} style={{padding:"8px 14px",borderRadius:8,fontSize:14,fontWeight:500,border:"none",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,height:36,whiteSpace:"nowrap",flexShrink:0,background:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.bg4:"transparent",color:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.accent:theme.tf}}>
+{NAV.filter(n=>(n.id!=="mam"||mamOn)&&(n.id!=="suggestions"||sugCount>0)).map(n=><button key={n.id} onClick={()=>nav(n.id)} style={{padding:"8px 14px",borderRadius:8,fontSize:14,fontWeight:500,border:"none",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,height:36,whiteSpace:"nowrap",flexShrink:0,background:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.bg4:"transparent",color:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.accent:theme.tf}}>
 <span style={{fontSize:15,lineHeight:1}}>{n.icon}</span>{n.label}
+{n.id==="suggestions"&&sugCount>0?<span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:18,height:18,padding:"0 5px",borderRadius:9,fontSize:11,fontWeight:700,background:theme.accent,color:theme.bg,marginLeft:2}}>{sugCount}</span>:null}
 </button>)}
 </div>
 <div style={{display:"flex",alignItems:"center",gap:2,flexShrink:0}}>
@@ -124,6 +134,7 @@ input,select{font-family:inherit}
 </div>}
 </div>
 <button onClick={nextT} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:"transparent",color:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title={`Theme: ${theme.name}`}>{tn==="dark"?Ic.moon:tn==="light"?Ic.sun:Ic.cloudsun}</button>
+<button onClick={()=>nav("importexport")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="importexport"?theme.bg4:"transparent",color:pg==="importexport"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Import / Export">{Ic.arrows}</button>
 <button onClick={()=>nav("database")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="database"?theme.bg4:"transparent",color:pg==="database"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Database">{Ic.database}</button>
 <button onClick={()=>nav("settings")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="settings"?theme.bg4:"transparent",color:pg==="settings"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Settings">{Ic.gear}</button>
 </div></div></nav>
@@ -143,6 +154,7 @@ input,select{font-family:inherit}
 {pg==="hidden"&&<HiddenPage onNav={nav}/>}
 {pg==="importexport"&&<ImportExportPage/>}
 {pg==="mam"&&<MAMPage onNav={nav}/>}
+{pg==="suggestions"&&<SuggestionsPage onNav={nav}/>}
 {pg==="database"&&<DatabasePage/>}
 {pg==="settings"&&<SettingsPage/>}
 </div></main>

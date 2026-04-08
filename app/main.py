@@ -53,6 +53,7 @@ from app.routers import (
     mam,
     scan,
     series,
+    suggestions,
 )
 from app.runtime import IS_DOCKER, IS_STANDALONE
 from app.sources.mam import (
@@ -397,7 +398,7 @@ app.add_middleware(AuthMiddleware)
 
 # All API routes live in app/routers/ — see individual files for endpoints.
 # `auth` is registered first by convention since it gates everything else.
-for r in (auth, config, libraries, books, authors, series, covers, scan, mam, db_editor, import_export):
+for r in (auth, config, libraries, books, authors, series, suggestions, covers, scan, mam, db_editor, import_export):
     app.include_router(r.router)
 
 
