@@ -1140,31 +1140,43 @@ async def scan_books_batch(
 # ---------------------------------------------------------------------------
 
 async def start_full_scan(db) -> dict:
-    """Start a full MAM scan. Creates a tracking row in mam_scan_log."""
+    """Start a full MAM scan. Creates a tracking row in mam_scan_log.
+
+    Phase 3d-1 (post-feedback):
+      - Batch size bumped 250 → 400.
+      - The eligible book IDs are SNAPSHOTTED at scan start and stored
+        as a JSON array in mam_scan_log.book_ids_snapshot. Each
+        subsequent batch consumes a slice of this list rather than
+        re-querying `WHERE mam_status IS NULL`. New books added by a
+        concurrent author/source scan are NOT picked up — they wait
+        for the next full scan, matching the manual MAM scan behavior.
+    """
     running = await db.execute_fetchall(
         "SELECT id FROM mam_scan_log WHERE status='running'"
     )
     if running:
         return {"error": "A full scan is already in progress"}
 
-    row = await db.execute_fetchall(f"""
-        SELECT COUNT(*) FROM books
+    id_rows = await db.execute_fetchall(f"""
+        SELECT id FROM books
         WHERE {_NEEDS_SCAN_STRICT_BARE}
+        ORDER BY owned DESC, id ASC
     """)
-    total = row[0][0] if row else 0
+    snapshot = [r[0] for r in id_rows]
+    total = len(snapshot)
 
     if total == 0:
         return {"error": "No books need scanning — all books already have MAM data"}
 
     now = time.time()
     cursor = await db.execute(
-        """INSERT INTO mam_scan_log (total_books, last_offset, batch_size, started_at, status)
-           VALUES (?, 0, 250, ?, 'running')""",
-        (total, now)
+        """INSERT INTO mam_scan_log (total_books, last_offset, batch_size, started_at, status, book_ids_snapshot)
+           VALUES (?, 0, 400, ?, 'running', ?)""",
+        (total, now, json.dumps(snapshot))
     )
     scan_id = cursor.lastrowid
     await db.commit()
-    logger.info(f"Full MAM scan started: {total} books, scan_id={scan_id}")
+    logger.info(f"Full MAM scan started: {total} books snapshotted, scan_id={scan_id}")
     return {"id": scan_id, "total_books": total}
 
 
@@ -1177,19 +1189,35 @@ async def run_full_scan_batch(
     lang_ids: Optional[list[int]] = None,
 ) -> dict:
     """
-    Run one batch of a full scan (250 books).
+    Run one batch of a full scan (400 books per batch).
+
+    Phase 3d-1 (post-feedback): consumes the snapshot stored in
+    mam_scan_log.book_ids_snapshot rather than re-querying for any
+    book where mam_status IS NULL. The snapshot is sliced by
+    last_offset → last_offset + batch_size and only those exact IDs
+    are processed. This means a concurrent author/source scan that
+    adds new books to the database mid-run will NOT inflate the
+    queue or appear in subsequent batches of THIS full scan — those
+    new books wait for the next full scan.
+
+    Legacy support: if book_ids_snapshot is NULL (a scan that started
+    on an older binary, before the migration ran), falls back to the
+    old `WHERE mam_status IS NULL` query path so an in-progress scan
+    isn't bricked by an upgrade.
+
     Returns {"status": "batch_complete"|"scan_complete"|"error"|"no_scan", ...}
     """
     if format_priority is None:
         format_priority = DEFAULT_FORMAT_PRIORITY
 
     rows = await db.execute_fetchall(
-        "SELECT id, total_books, last_offset, batch_size FROM mam_scan_log WHERE status='running' LIMIT 1"
+        "SELECT id, total_books, last_offset, batch_size, book_ids_snapshot "
+        "FROM mam_scan_log WHERE status='running' LIMIT 1"
     )
     if not rows:
         return {"status": "no_scan", "scanned": 0, "remaining": 0, "next_batch_in_seconds": None}
 
-    scan_id, total_books, last_offset, batch_size = rows[0]
+    scan_id, total_books, last_offset, batch_size, snapshot_json = rows[0]
 
     # Register IP
     ip_result = await register_ip(session_id, skip_ip_update)
@@ -1198,15 +1226,38 @@ async def run_full_scan_batch(
                 "next_batch_in_seconds": None,
                 "error": f"IP registration failed: {ip_result['message']}"}
 
-    # Get next batch
-    book_rows = await db.execute_fetchall(f"""
-        SELECT b.id, b.title, a.name as author_name
-        FROM books b
-        JOIN authors a ON b.author_id = a.id
-        WHERE {_NEEDS_SCAN_STRICT_ALIASED}
-        ORDER BY b.owned DESC, b.id ASC
-        LIMIT ?
-    """, (batch_size,))
+    # Get next batch — snapshot path or legacy path.
+    if snapshot_json:
+        try:
+            snapshot_ids = json.loads(snapshot_json)
+        except (ValueError, TypeError):
+            snapshot_ids = []
+        batch_ids = snapshot_ids[last_offset:last_offset + batch_size]
+        if not batch_ids:
+            await db.execute(
+                "UPDATE mam_scan_log SET status='complete', finished_at=? WHERE id=?",
+                (time.time(), scan_id)
+            )
+            await db.commit()
+            logger.info(f"Full MAM scan complete (snapshot exhausted, scan_id={scan_id})")
+            return {"status": "scan_complete", "scanned": 0, "remaining": 0, "next_batch_in_seconds": None}
+        placeholders = ",".join("?" * len(batch_ids))
+        book_rows = await db.execute_fetchall(f"""
+            SELECT b.id, b.title, a.name as author_name
+            FROM books b
+            JOIN authors a ON b.author_id = a.id
+            WHERE b.id IN ({placeholders})
+            ORDER BY b.owned DESC, b.id ASC
+        """, tuple(batch_ids))
+    else:
+        book_rows = await db.execute_fetchall(f"""
+            SELECT b.id, b.title, a.name as author_name
+            FROM books b
+            JOIN authors a ON b.author_id = a.id
+            WHERE {_NEEDS_SCAN_STRICT_ALIASED}
+            ORDER BY b.owned DESC, b.id ASC
+            LIMIT ?
+        """, (batch_size,))
 
     if not book_rows:
         await db.execute(
@@ -1259,12 +1310,17 @@ async def run_full_scan_batch(
     )
     await db.commit()
 
-    # Check remaining
-    remaining_row = await db.execute_fetchall(f"""
-        SELECT COUNT(*) FROM books
-        WHERE {_NEEDS_SCAN_STRICT_BARE}
-    """)
-    remaining = remaining_row[0][0] if remaining_row else 0
+    # Remaining: snapshot path uses fixed total - processed; legacy
+    # path falls back to a fresh COUNT against `WHERE mam_status IS
+    # NULL` (which is still right for that path).
+    if snapshot_json:
+        remaining = max(0, total_books - new_offset)
+    else:
+        remaining_row = await db.execute_fetchall(f"""
+            SELECT COUNT(*) FROM books
+            WHERE {_NEEDS_SCAN_STRICT_BARE}
+        """)
+        remaining = remaining_row[0][0] if remaining_row else 0
 
     if remaining == 0:
         await db.execute(
@@ -1277,7 +1333,7 @@ async def run_full_scan_batch(
 
     logger.info(f"Full scan batch done: {scanned} scanned, {remaining} remaining")
     return {"status": "batch_complete", "scanned": scanned,
-            "remaining": remaining, "next_batch_in_seconds": 3600}
+            "remaining": remaining, "next_batch_in_seconds": 300}
 
 
 async def cancel_full_scan(db) -> dict:

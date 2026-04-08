@@ -214,10 +214,17 @@ CREATE TABLE IF NOT EXISTS mam_scan_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     total_books INTEGER NOT NULL DEFAULT 0,
     last_offset INTEGER NOT NULL DEFAULT 0,
-    batch_size INTEGER NOT NULL DEFAULT 250,
+    batch_size INTEGER NOT NULL DEFAULT 400,
     started_at REAL NOT NULL,
     finished_at REAL,
-    status TEXT NOT NULL DEFAULT 'running'
+    status TEXT NOT NULL DEFAULT 'running',
+    -- Phase 3d-1 (post-feedback): JSON array of book IDs captured at
+    -- scan start. Each batch consumes a slice of this list rather
+    -- than re-querying `WHERE mam_status IS NULL`, so a concurrent
+    -- author scan adding new books mid-scan can NOT inflate the
+    -- queue. Mirrors the snapshot semantics already in the manual
+    -- /api/mam/scan path. Empty/null means legacy pre-snapshot scan.
+    book_ids_snapshot TEXT
 );
 
 -- Phase 3c: Source-consensus series suggestions.
@@ -334,6 +341,12 @@ MIGRATIONS = [
     # one-shot DELETE kills the existing ones. Idempotent — running it
     # twice deletes nothing the second time.
     "DELETE FROM series WHERE id NOT IN (SELECT DISTINCT series_id FROM books WHERE series_id IS NOT NULL)",
+    # Phase 3d-1 (post-feedback): mam_scan_log.book_ids_snapshot column
+    # for the full MAM scan ID snapshot. Without this column, existing
+    # databases would get the legacy code path because the column read
+    # would fail. The migration loop tolerates "duplicate column" so
+    # this is safe to ship.
+    "ALTER TABLE mam_scan_log ADD COLUMN book_ids_snapshot TEXT",
 ]
 
 

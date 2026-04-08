@@ -143,6 +143,15 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                 return
             db = await get_db()
             try:
+                # Snapshot per-batch baselines BEFORE defining the
+                # progress closure so static analyzers see them as
+                # used. The closure adds incremental stats from this
+                # batch onto the running totals from prior batches.
+                base_scanned = state._mam_scan_progress["scanned"]
+                base_found = state._mam_scan_progress["found"]
+                base_possible = state._mam_scan_progress["possible"]
+                base_not_found = state._mam_scan_progress["not_found"]
+                base_errors = state._mam_scan_progress["errors"]
                 def _progress(stats):
                     state._mam_scan_progress.update({
                         "scanned": base_scanned + stats["scanned"],
@@ -151,17 +160,14 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                         "not_found": base_not_found + stats["not_found"],
                         "errors": base_errors + stats["errors"],
                     })
-                base_scanned = state._mam_scan_progress["scanned"]
-                base_found = state._mam_scan_progress["found"]
-                base_possible = state._mam_scan_progress["possible"]
-                base_not_found = state._mam_scan_progress["not_found"]
-                base_errors = state._mam_scan_progress["errors"]
                 # Slice the next batch out of the frozen snapshot. This
                 # is the snapshot guarantee: only IDs captured at scan
                 # start are processed. New books added by a concurrent
                 # author scan will NOT inflate the total or appear in
-                # later batches of THIS scan.
-                batch_ids = snapshot_ids[cursor:cursor + 100]
+                # later batches of THIS scan. Batch size 150 (was 100)
+                # — bumped per user feedback after concurrent scans
+                # made longer batches less risky.
+                batch_ids = snapshot_ids[cursor:cursor + 150]
                 if not batch_ids:
                     state._mam_scan_progress.update({"status": "complete", "running": False})
                     logger.info(f"MAM scan complete (snapshot exhausted): {state._mam_scan_progress['scanned']}/{scan_total} scanned, {state._mam_scan_progress['found']} found")
@@ -200,9 +206,14 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                 return
             batch_num += 1
             state._mam_scan_progress["status"] = "paused"
-            logger.info(f"MAM scan batch {batch_num} done ({state._mam_scan_progress['scanned']}/{state._mam_scan_progress['total']}), pausing 5 min")
-            await asyncio.sleep(300)
-            # Wait for any author scan or Calibre sync to finish before resuming
+            # 1 minute pause between batches (was 5). Bumped down per
+            # user feedback after batch size went 100→150 — the longer
+            # batches and shorter pauses make a manual scan finish in
+            # roughly half the wall-clock time without changing the
+            # per-request rate limit.
+            logger.info(f"MAM scan batch {batch_num} done ({state._mam_scan_progress['scanned']}/{state._mam_scan_progress['total']}), pausing 1 min")
+            await asyncio.sleep(60)
+            # Wait for Calibre sync (only) to finish before resuming
             await _wait_for_other_writers()
 
     state._mam_scan_task = asyncio.create_task(_do_scan())
@@ -324,12 +335,14 @@ async def mam_full_scan_start():
                 state._mam_scan_progress.update({"running": False, "status": result["status"]})
                 break
             elif result["status"] == "batch_complete":
-                wait = cs.get("mam_full_scan_batch_delay_minutes", 60) * 60
+                # Phase 3d-1 (post-feedback): hardcoded 5 minute wait
+                # between batches (was a user-configurable setting,
+                # default 60 min). The setting was removed from the
+                # Settings UI — full scans now have a fixed cadence
+                # of 400 books per batch every 5 minutes.
                 state._mam_scan_progress["status"] = "paused"
-                logger.info(f"Full MAM scan: batch done, waiting {wait//60} min")
-                await asyncio.sleep(wait)
-                # Phase 3d-1 (post-feedback): no longer waiting on a
-                # concurrent author scan between batches.
+                logger.info("Full MAM scan: batch done, waiting 5 min")
+                await asyncio.sleep(300)
                 state._mam_scan_progress["status"] = "scanning"
 
     state._mam_full_scan_task = asyncio.create_task(_full_scan_loop())

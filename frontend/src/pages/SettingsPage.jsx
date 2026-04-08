@@ -144,9 +144,7 @@ return<div style={{paddingBottom:40}}>
 <div style={{padding:"10px 0",fontSize:12,color:t.tg,fontStyle:"italic",borderBottom:`1px solid ${t.borderL}`}}>Note: MAM session tokens expire periodically. If scans start failing, generate a new token and re-validate.</div>
 
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Scan Settings</div>
-<SF label="MAM scan interval (minutes)" desc="How often automatic MAM scans run. Default 360 (6 hours). Set to 0 to disable."><input {...numP("mam_scan_interval_minutes",360)}/></SF>
-<div style={{padding:"8px 0",fontSize:12,color:t.tg,fontStyle:"italic",borderBottom:`1px solid ${t.borderL}`}}>Scheduled scans check 100 books per cycle. Use the MAM Scan button on the Dashboard to scan all remaining books.</div>
-<SF label="Full scan batch delay (minutes)" desc="Wait time between batches during a full library scan"><input {...numP("mam_full_scan_batch_delay_minutes",60,10)}/></SF>
+<SF label="MAM scan interval (minutes)" desc="How often automatic MAM scans run. Default 360 (6 hours). Set to 0 to disable. Scheduled scans run a single 150-book batch per cycle — use the Dashboard MAM Scan button to scan all remaining books, or Full Library Scan below for a long bounded run."><input {...numP("mam_scan_interval_minutes",360)}/></SF>
 
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Test Scan</div>
 <div style={{padding:"8px 0 12px"}}>

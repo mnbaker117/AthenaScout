@@ -286,7 +286,13 @@ async def lifespan(app: FastAPI):
                 logger.info("MAM scheduled scan: no books need scanning")
                 last_scan_at = time.time()
                 continue
-            scan_limit = min(100, total_remaining)
+            # Phase 3d-1 (post-feedback): scheduled MAM scans run a
+            # single 150-book batch per cycle (was 100). The interval
+            # in Settings controls ONLY this scheduler — it does NOT
+            # trigger a full library scan, just a regular bounded
+            # batch via mam_scan_batch (same code path as the
+            # Dashboard MAM Scan button, just smaller/single-batch).
+            scan_limit = min(150, total_remaining)
             logger.info(f"MAM scheduled scan starting ({scan_limit} books, {total_remaining} total remaining)")
             state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_limit,
                                   "found": 0, "possible": 0, "not_found": 0,
@@ -302,12 +308,14 @@ async def lifespan(app: FastAPI):
                 })
             db = await get_db()
             try:
+                # Phase 3d-1 (post-feedback): no cancel_check anymore
+                # (concurrent author scans are now allowed). Limit
+                # raised 100→150 to match the manual scan batch size.
                 result = await mam_scan_batch(
-                    db, session_id=s["mam_session_id"], limit=100,
+                    db, session_id=s["mam_session_id"], limit=150,
                     delay=s.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=s.get("mam_format_priority"),
                     on_progress=_sched_progress,
-                    cancel_check=lambda: state._lookup_progress.get("running", False),
                     lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
                 )
                 state._mam_scan_progress.update({
