@@ -9,9 +9,16 @@ import { Load } from "../components/Load";
 
 export default function Dashboard({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
 useEffect(()=>{api.get("/lookup/status").then(r=>{if(r.running||(r.status&&r.status!=="idle"))setLookupScan(r)}).catch(()=>{});api.get("/mam/scan/status").then(r=>{if(r.running||r.status==="complete")setMamScan(r)}).catch(()=>{})},[]);
-useEffect(()=>{if(!lookupScan?.running)return;const iv=setInterval(()=>{api.get("/lookup/status").then(r=>{setLookupScan(r);if(!r.running){clearInterval(iv);api.get("/stats").then(setD)}}).catch(()=>{})},3000);return()=>clearInterval(iv)},[lookupScan?.running]);
-useEffect(()=>{if(!mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running)clearInterval(iv)}).catch(()=>{})},5000);return()=>clearInterval(iv)},[mamScan?.running]);
-useEffect(()=>{if(mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{})},30000);return()=>clearInterval(iv)},[mamScan?.running]);
+// Lookup polling (3s while running). Page Visibility API: skip the fetch when the tab is
+// hidden (saves network chatter on long-running scans left open in a background tab), and
+// fire an immediate catch-up fetch when visibility returns so the user sees fresh progress
+// without waiting a full interval tick.
+useEffect(()=>{if(!lookupScan?.running)return;const tick=()=>{if(document.hidden)return;api.get("/lookup/status").then(r=>{setLookupScan(r);if(!r.running){clearInterval(iv);api.get("/stats").then(setD)}}).catch(()=>{})};const iv=setInterval(tick,3000);const onVis=()=>{if(!document.hidden)tick()};document.addEventListener("visibilitychange",onVis);return()=>{clearInterval(iv);document.removeEventListener("visibilitychange",onVis)}},[lookupScan?.running]);
+// MAM active polling (5s while running). Same Page Visibility treatment.
+useEffect(()=>{if(!mamScan?.running)return;const tick=()=>{if(document.hidden)return;api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running)clearInterval(iv)}).catch(()=>{})};const iv=setInterval(tick,5000);const onVis=()=>{if(!document.hidden)tick()};document.addEventListener("visibilitychange",onVis);return()=>{clearInterval(iv);document.removeEventListener("visibilitychange",onVis)}},[mamScan?.running]);
+// MAM idle watchdog (30s when not running — catches scheduled scans that start while user
+// is on the dashboard). Also pauses when tab hidden.
+useEffect(()=>{if(mamScan?.running)return;const tick=()=>{if(document.hidden)return;api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{})};const iv=setInterval(tick,30000);const onVis=()=>{if(!document.hidden)tick()};document.addEventListener("visibilitychange",onVis);return()=>{clearInterval(iv);document.removeEventListener("visibilitychange",onVis)}},[mamScan?.running]);
 if(!d)return<Load/>;
 const p=pct(d.owned_books,d.total_books);
 return<div style={{display:"flex",flexDirection:"column",gap:24}}>

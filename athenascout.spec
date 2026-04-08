@@ -8,10 +8,18 @@ Build with:
 Or use the helper script:
     python build_standalone.py
 """
+import sys
 from pathlib import Path
 
 # Repo root (the directory containing this .spec file)
 ROOT = Path(SPECPATH)
+
+# Platform gates — uvloop is POSIX-only, strip is a no-op (and can break
+# signed binaries) on Windows/macOS. Toggling via sys.platform keeps the
+# same spec file working across the three build matrix runners.
+IS_WINDOWS = sys.platform.startswith("win")
+IS_POSIX = not IS_WINDOWS
+STRIP_SYMBOLS = sys.platform.startswith("linux")  # safest on Linux only
 
 # ─── Data Files ──────────────────────────────────────────────
 # The frontend dist directory must be bundled so the FastAPI static
@@ -45,7 +53,6 @@ hiddenimports = [
     'uvicorn.protocols.http.httptools_impl',
     'uvicorn.loops.auto',
     'uvicorn.loops.asyncio',
-    'uvicorn.loops.uvloop',
 
     # APScheduler triggers and executors
     'apscheduler.triggers.interval',
@@ -58,6 +65,11 @@ hiddenimports = [
     'aiosqlite',
     'aiosqlite.core',
 ]
+
+# uvloop is only available on POSIX — adding it to hiddenimports on Windows
+# causes PyInstaller to warn (and in some versions, fail) on missing module.
+if IS_POSIX:
+    hiddenimports.append('uvicorn.loops.uvloop')
 
 # ─── Analysis ────────────────────────────────────────────────
 # Walks the dependency tree starting from the entry script.
@@ -95,7 +107,7 @@ exe = EXE(
     name='athenascout',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=STRIP_SYMBOLS,
     upx=True,                  # Compress binaries to reduce size
     console=True,              # Show terminal — server logs are useful
     disable_windowed_traceback=False,
@@ -111,7 +123,7 @@ coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
-    strip=False,
+    strip=STRIP_SYMBOLS,
     upx=True,
     upx_exclude=[],
     name='athenascout',
