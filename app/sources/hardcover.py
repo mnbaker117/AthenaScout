@@ -6,12 +6,98 @@ Based on the official Calibre Hardcover plugin approach:
 3. Auth: 'Authorization' header with full value (user pastes 'Bearer ...')
 """
 import asyncio
+import re
 import httpx, logging, json
 from typing import Optional
 from app.sources.base import BaseSource, AuthorResult, BookResult, SeriesResult
 
 logger = logging.getLogger("athenascout.hardcover")
 API = "https://api.hardcover.app/v1/graphql"
+
+
+# ─── Series-name normalization for owned-set matching ──────────────────
+# Strip leading articles ("the", "a"), trailing series-suffix words
+# ("saga", "series", "trilogy", "cycle", "chronicles", "novels"), all
+# punctuation, and lowercase. Lets us match "The Mistborn Saga" against
+# "Mistborn", "Mistborn Saga", "the mistborn saga", etc.
+_RX_SERIES_LEAD = re.compile(r'^(the|a|an)\s+', re.IGNORECASE)
+_RX_SERIES_TAIL = re.compile(
+    r'\s+(saga|series|trilogy|cycle|chronicles|novels|books)\s*$',
+    re.IGNORECASE,
+)
+_RX_SERIES_PUNCT = re.compile(r'[^\w\s]')
+
+
+def _norm_series(name: str) -> str:
+    if not name:
+        return ""
+    n = name.strip()
+    n = _RX_SERIES_LEAD.sub('', n)
+    # Apply tail-strip iteratively in case of "The Mistborn Saga Series"
+    for _ in range(3):
+        new_n = _RX_SERIES_TAIL.sub('', n)
+        if new_n == n:
+            break
+        n = new_n
+    n = _RX_SERIES_PUNCT.sub(' ', n).lower()
+    return re.sub(r'\s+', ' ', n).strip()
+
+
+def _pick_best_series(candidates: list, owned_norms: set) -> dict:
+    """Pick the best series candidate for a Hardcover book.
+
+    Phase 3b-H2: previously this used a fixed scoring heuristic that
+    favored sub-series with colons (`+10 for ":"`) and longer names.
+    That works for "Star Wars: Empire and Rebellion" but breaks for
+    Sanderson's Mistborn books — Hardcover returns
+    `['The Mistborn Saga: The Original Trilogy', 'The Mistborn Saga',
+    'The Cosmere']` and the colon bonus picked the deepest sub-series
+    while the user's Calibre data uses the parent name "The Mistborn
+    Saga". Now we accept the user's owned series names as the strongest
+    signal: an exact normalized match wins (+1000), a substring/prefix
+    overlap wins next (+500), and the original colon/word-count
+    heuristic only kicks in as a fallback for books whose owned-side
+    series is unknown (e.g., new authors, missing Calibre tags).
+    """
+    if not candidates:
+        return None
+
+    def _score(c):
+        s = 0
+        name = c["name"]
+        norm = _norm_series(name)
+
+        # Tier 1: matches what the user already has in Calibre
+        if owned_norms:
+            if norm and norm in owned_norms:
+                s += 1000  # exact normalized match — strongest signal
+            else:
+                # Prefix/substring match: e.g. owned "Mistborn" vs Hardcover
+                # "Mistborn: Era 1", or owned "The Mistborn Saga" vs
+                # Hardcover "Mistborn Saga". Both directions accepted.
+                for own in owned_norms:
+                    if not own or not norm:
+                        continue
+                    if norm.startswith(own + " ") or own.startswith(norm + " "):
+                        s += 500
+                        break
+                    if own in norm or norm in own:
+                        s += 300
+                        break
+
+        # Tier 2: original heuristics (tiebreakers / fallback for
+        # books whose owned-side series isn't in our hint set)
+        if ":" in name:
+            s += 10  # sub-series like "Star Wars: Empire and Rebellion"
+        if c["position"] is not None:
+            s += 5
+        if "(" in name:
+            s -= 3  # penalize "(Chronological)", "(Publication Order)"
+        s += min(len(name.split()), 5)
+        return s
+
+    candidates_sorted = sorted(candidates, key=_score, reverse=True)
+    return candidates_sorted[0]
 
 # Fragments matching the official plugin + book-level contributions
 FRAGMENTS = """
@@ -181,15 +267,47 @@ class HardcoverSource(BaseSource):
             logger.error(f"Hardcover query exhausted retries: {last_err}")
         return {}
 
-    async def search_author(self, author_name: str, owned_titles: list = None) -> Optional[AuthorResult]:
-        """Search for author by searching their known books, then finding all books by same author."""
+    async def search_author(self, author_name: str, owned_titles: list = None,
+                            owned_series_names: list = None) -> Optional[AuthorResult]:
+        """Search for author by searching their known books, then finding all books by same author.
+
+        Phase 3b-H2 changes:
+          - **Search expansion**: previously this method ran one search per
+            entry in `[author_name] + [f"{t} {author}" for t in owned_titles[:3]]`
+            and STOPPED at the first non-empty response. For prolific authors
+            (Brandon Sanderson, Stephen King, …) the bare-author-name query
+            returns ~10 dominated by sampler/omnibus/edge-case titles and the
+            actual bestsellers never make the cut. The early-break meant
+            owned-title queries never ran. Sanderson's first scan returned
+            10 IDs, of which only 1 (Hero of Ages) matched anything in the
+            user's library — Goodreads matched 14 of his 16 owned books in
+            the same scan. Fix: accumulate IDs across ALL queries, expand
+            owned_titles slice from [:3] → [:10], and dedupe via set.
+          - **owned_series_names** kwarg: passed through to the per-book
+            series picker so we can prefer Hardcover series candidates that
+            match what the user's Calibre data already uses (avoids picking
+            "The Mistborn Saga: The Original Trilogy" when Calibre says
+            "The Mistborn Saga"). See _pick_series() below.
+        """
         if not self.api_key:
             return None
         try:
-            # Search using author name + known book titles for better results
+            # Pre-compute normalized owned series names for the per-book
+            # series picker. Empty set if the user has nothing tagged or
+            # the caller didn't pass any — picker falls back to the
+            # original colon/word-count heuristics in that case.
+            owned_norms = {_norm_series(s) for s in (owned_series_names or []) if s}
+            owned_norms.discard("")
+
+            # Build the query list. Order matters for tie-breaking but
+            # since we accumulate from ALL queries it mostly affects the
+            # "which books got searched in priority order" debug story.
             search_queries = [author_name]
             if owned_titles:
-                for t in owned_titles[:3]:  # Try up to 3 book titles
+                # Phase 3b-H2: was [:3], bumped to [:10]. For users with
+                # 50+ owned books per author this still bounds total query
+                # cost to 11 GraphQL searches × ~300ms = ~3s of search time.
+                for t in owned_titles[:10]:
                     search_queries.append(f"{t} {author_name}")
 
             all_book_ids = set()
@@ -202,15 +320,21 @@ class HardcoverSource(BaseSource):
                         all_book_ids.add(int(bid))
                     except (ValueError, TypeError):
                         pass
-                if all_book_ids:
-                    break  # Found something, stop searching
-            
+                # No early break (was the bug). Continue accumulating.
+
             if not all_book_ids:
                 logger.info(f"  Hardcover: no search results for '{author_name}'")
                 return None
-            
-            book_ids = list(all_book_ids)[:20]
-            logger.info(f"  Hardcover: search returned {len(book_ids)} book IDs")
+
+            # Cap at 50 IDs — Hardcover's books-by-id query has practical
+            # limits and we want to keep response size bounded. With the
+            # owned-title queries this is now usually a real cap rather
+            # than the total count.
+            book_ids = list(all_book_ids)[:50]
+            logger.info(
+                f"  Hardcover: search yielded {len(all_book_ids)} unique IDs "
+                f"across {len(search_queries)} queries → fetching {len(book_ids)}"
+            )
             
             # Step 2: Fetch books by IDs
             books_data = await self._query(FIND_BOOKS_BY_IDS, {
@@ -406,29 +530,35 @@ class HardcoverSource(BaseSource):
                 sname = None; spos = None
                 bs = book.get("book_series")
                 if bs and isinstance(bs, list) and len(bs) > 0:
-                    # Pick the most specific series (avoid broad franchise catch-alls)
                     candidates = []
                     for bse in bs:
                         if isinstance(bse, dict):
                             sr_obj = bse.get("series", {})
                             if isinstance(sr_obj, dict) and sr_obj.get("name"):
-                                candidates.append({"name": sr_obj["name"], "position": bse.get("position"), "id": sr_obj.get("id")})
+                                candidates.append({
+                                    "name": sr_obj["name"],
+                                    "position": bse.get("position"),
+                                    "id": sr_obj.get("id"),
+                                })
                     if candidates:
-                        # Score: prefer specific sub-series, penalize parenthetical variants
-                        def _score(c):
-                            s = 0
-                            name = c["name"]
-                            if ":" in name: s += 10  # sub-series like "Star Wars: Empire and Rebellion"
-                            if c["position"] is not None: s += 5
-                            if "(" in name: s -= 3  # penalize "(Chronological)", "(Publication Order)" etc.
-                            s += min(len(name.split()), 5)  # more words = more specific, cap at 5
-                            return s
-                        candidates.sort(key=_score, reverse=True)
-                        best = candidates[0]
+                        # Phase 3b-H2: owned-series-aware picker. Picks
+                        # the candidate that matches what Calibre already
+                        # has, falling back to the colon/word-count
+                        # heuristic when there's no owned-side hint.
+                        best = _pick_best_series(candidates, owned_norms)
                         sname = best["name"]
                         spos = best["position"]
                         if len(candidates) > 1:
-                            logger.debug(f"  Hardcover: '{book.get('title')}' has {len(candidates)} series: {[c['name'] for c in candidates]} → picked '{sname}'")
+                            hint = " (owned-match)" if owned_norms and any(
+                                _norm_series(sname) == on or _norm_series(sname) in on or on in _norm_series(sname)
+                                for on in owned_norms
+                            ) else ""
+                            logger.debug(
+                                f"  Hardcover: '{book.get('title')}' has "
+                                f"{len(candidates)} series: "
+                                f"{[c['name'] for c in candidates]} → picked "
+                                f"'{sname}'{hint}"
+                            )
                         else:
                             logger.debug(f"  Hardcover: '{book.get('title')}' series from book_series → '{sname}' #{spos}")
                 if not sname:

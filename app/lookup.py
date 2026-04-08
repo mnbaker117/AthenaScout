@@ -481,9 +481,18 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
     """Try a single source with validation and detailed logging."""
     try:
         logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
-        # Hardcover needs owned_titles to search by book title
+        # Hardcover needs owned_titles to search by book title, and as
+        # of Phase 3b-H2 also takes owned_series_names so its per-book
+        # series picker can prefer candidates that match what Calibre
+        # already has (avoids "Mistborn Saga: Original Trilogy" being
+        # picked over "The Mistborn Saga"). Both attributes are stashed
+        # on the source instance by lookup_author() before this runs.
         if hasattr(source, '_owned_titles'):
-            found = await source.search_author(author_name, owned_titles=source._owned_titles)
+            found = await source.search_author(
+                author_name,
+                owned_titles=source._owned_titles,
+                owned_series_names=getattr(source, '_owned_series_names', None),
+            )
         else:
             found = await source.search_author(author_name)
         if not found:
@@ -560,6 +569,17 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
             t = re.sub(r'[^\w\s]', '', r["title"].lower()).strip()
             t = re.sub(r'\s+', ' ', t)
             existing_titles.add(t)
+        # Phase 3b-H2: collect distinct series names the user already
+        # has tagged for this author. Used by Hardcover (and any future
+        # source) to prefer matching series candidates over deeper
+        # sub-series in the source's series taxonomy.
+        series_rows = await (await db.execute(
+            "SELECT DISTINCT s.name FROM series s "
+            "JOIN books b ON b.series_id = s.id "
+            "WHERE b.author_id = ? AND b.owned = 1 AND s.name IS NOT NULL",
+            (author_id,)
+        )).fetchall()
+        our_series_names = [r["name"] for r in series_rows]
     finally:
         await db.close()
 
@@ -570,6 +590,7 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     if settings.get("hardcover_api_key"):
         hardcover.update_api_key(settings["hardcover_api_key"])
         hardcover._owned_titles = our_titles
+        hardcover._owned_series_names = our_series_names
         total += await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
 
     # 3. FantasticFiction
