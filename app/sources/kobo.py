@@ -278,9 +278,22 @@ class KoboSource(BaseSource):
         if existing_titles is None:
             existing_titles = set()
         try:
+            # &fcmedia=Book filters out audiobooks. Counterintuitive
+            # naming — "Book" is Kobo's internal label for the eBook
+            # category (Audiobook is its own peer category). Without
+            # this filter, prolific audiobook-only authors like
+            # J.N. Chaney would have ~280 audiobook entries fuzzy-matched
+            # against owned ebook rows by the skip-known logic below,
+            # polluting source_url with wrong-format Kobo URLs. The
+            # filter is harmless for normal authors (they have eBook
+            # entries that pass through) and protective for the edge
+            # case. Verified via a manual UI search where the same
+            # filter returned 0 results for J.N. Chaney, exposing the
+            # audiobook-only situation as a true content gap on Kobo's
+            # side rather than a scraping miss on ours.
             base_search_url = (
                 f"{BASE}/us/en/search?query={author_name.replace(' ', '%20')}"
-                f"&fcsearchfield=Author&numrecords=60"
+                f"&fcsearchfield=Author&fcmedia=Book&numrecords=60"
             )
             page_html = await self._fetch(base_search_url)
             if not page_html:
