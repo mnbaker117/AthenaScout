@@ -56,7 +56,7 @@ from app.routers import (
 )
 from app.runtime import IS_DOCKER, IS_STANDALONE
 from app.sources.mam import (
-    close_session as mam_close_session,
+    aclose_session as mam_aclose_session,
     scan_books_batch as mam_scan_batch,
     validate_connection as mam_validate,
     _resolve_mam_languages,
@@ -333,8 +333,10 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     yield
     scheduler.shutdown()
-    # Tear down the MAM HTTP session (Phase 22B.2.5)
-    mam_close_session()
+    # Tear down the MAM httpx.AsyncClient (Batch C). aclose_session is a
+    # coroutine — must be awaited so the underlying transport actually closes
+    # before uvicorn finishes shutting down the event loop.
+    await mam_aclose_session()
 
 
 # ─── App + Router Registration ───────────────────────────────

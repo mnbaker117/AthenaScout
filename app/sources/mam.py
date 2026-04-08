@@ -33,7 +33,7 @@ import time
 from typing import Callable, Optional
 from urllib.parse import urlencode
 
-import requests
+import httpx
 
 logger = logging.getLogger("athenascout.mam")
 
@@ -433,7 +433,19 @@ def _pick_best_result(
 # ---------------------------------------------------------------------------
 
 def _build_headers(token: str) -> dict:
-    """Build headers for MAM API requests. Uses curl User-Agent to pass TLS fingerprinting."""
+    """Build headers for MAM API requests.
+
+    The `curl/8.0` User-Agent is a holdover from an earlier Claude session
+    that suspected MAM was doing TLS fingerprinting. That theory turned out
+    to be wrong — the actual failure mode was HTTP 200 with a 0-byte body,
+    which is a request-encoding issue, not a TLS-layer one. We keep the
+    curl UA anyway because it's known-good and cheap. Do not remove it
+    without re-testing a full MAM scan end-to-end.
+
+    The IP-locked `mam_id` cookie is the ONLY auth mechanism; the same
+    token will be rejected if the requesting IP differs from the one that
+    generated it. See register_ip() and settings `skip_ip_update`.
+    """
     return {
         "Content-Type": "application/json",
         "User-Agent": "curl/8.0",
@@ -442,72 +454,91 @@ def _build_headers(token: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# HTTP helpers (sync — call via asyncio.to_thread)
+# HTTP layer (async — httpx.AsyncClient)
 # ---------------------------------------------------------------------------
-# These wrap requests.get/post with the standard MAM headers. They're
-# synchronous because MAM's TLS fingerprinting rejects async HTTP clients,
-# so all calls go through asyncio.to_thread() at the caller. DO NOT change
-# the underlying library or header format — see _build_headers for why.
+# Native async HTTP via a process-wide httpx.AsyncClient. Previous versions
+# of this module used `requests` + `asyncio.to_thread` because an earlier
+# attempt with aiohttp saw MAM return HTTP 200 + 0 bytes, and at the time
+# the best hypothesis was TLS fingerprinting. Re-investigation (see the
+# docstring on _build_headers) concluded the real problem was aiohttp
+# form-encoding the JSON body into `%7B%22tor%22%...` — MAM accepted the
+# cookie but had nothing valid to search against, hence the empty response.
 #
-# We use a module-level requests.Session() for connection reuse. Without it,
-# every search would do a fresh TCP+TLS handshake (50-150ms each), and a
-# 100-book batch with a 5-pass cascade could spend 30-60 seconds just on
-# handshakes. With the Session, the connection is reused across requests
-# and that overhead drops to one handshake per batch.
+# httpx avoids this cleanly by using `content=<string>` (raw body, no
+# encoding) instead of `data=<dict>` (form-url-encoded). This produces
+# the exact same bytes as `requests.post(..., data=<string>)`, which is
+# what the old mam.py relied on.
 #
-# Critical: using a Session does NOT change the TLS fingerprint — it's the
-# same `requests` library producing the same ClientHello, so MAM still
-# accepts the requests. Same User-Agent, same Cookie header, same data=
-# POST encoding.
+# Connection reuse: a single AsyncClient instance is shared across all MAM
+# calls for the lifetime of the process. Without this, every search would
+# do a fresh TCP+TLS handshake (50-150ms each); a 100-book batch with a
+# 5-pass cascade could spend 30-60 seconds just on handshakes. With the
+# shared client, handshake overhead drops to one per batch.
+#
+# http2=False is explicit — httpx can speak HTTP/2 when the `h2` package
+# is installed, but MAM isn't known to need it and we don't want variable
+# transport behavior. HTTP/1.1 matches what `requests` did before.
 
-_session: Optional[requests.Session] = None
+_client: Optional[httpx.AsyncClient] = None
 
 
-def _get_session() -> requests.Session:
-    """Lazy-initialized module-level requests.Session for connection reuse.
+def _get_client() -> httpx.AsyncClient:
+    """Lazy-initialized module-level httpx.AsyncClient for connection reuse.
 
-    Single-consumer (called from the scan loop via asyncio.to_thread).
-    `requests.Session` handles stale connections automatically — if the
-    server has closed the keep-alive connection, requests reconnects on
-    the next call.
+    MUST be called from within a running asyncio event loop — the client
+    binds to whichever loop is active at creation time. AthenaScout runs
+    one uvicorn loop for the whole process lifetime, so this is safe.
     """
-    global _session
-    if _session is None:
-        _session = requests.Session()
-        logger.debug("MAM HTTP session created")
-    return _session
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(
+            http2=False,
+            timeout=httpx.Timeout(20.0, connect=10.0),
+            follow_redirects=True,
+        )
+        logger.debug("MAM httpx.AsyncClient created")
+    return _client
 
 
-def close_session() -> None:
-    """Tear down the module-level Session.
+async def aclose_session() -> None:
+    """Tear down the module-level AsyncClient.
 
     Called from main.py's lifespan() during app shutdown. Safe to call
-    multiple times — subsequent calls are no-ops.
+    multiple times — subsequent calls are no-ops. Named `aclose_session`
+    (not `close_session`) because the coroutine-ness is load-bearing:
+    callers must `await` it to actually close the underlying transport.
     """
-    global _session
-    if _session is not None:
+    global _client
+    if _client is not None:
         try:
-            _session.close()
-            logger.debug("MAM HTTP session closed")
+            await _client.aclose()
+            logger.debug("MAM httpx.AsyncClient closed")
         except Exception as e:
-            logger.warning(f"Error closing MAM session: {e}")
+            logger.warning(f"Error closing MAM client: {e}")
         finally:
-            _session = None
+            _client = None
 
 
-def _do_get(url: str, token: str, timeout: int = 15) -> requests.Response:
-    """Synchronous GET to a MAM endpoint with standard headers."""
-    return _get_session().get(url, headers=_build_headers(token), timeout=timeout)
+async def _do_get(url: str, token: str, timeout: int = 15) -> httpx.Response:
+    """Async GET to a MAM endpoint with standard headers."""
+    return await _get_client().get(
+        url, headers=_build_headers(token), timeout=timeout
+    )
 
 
-def _do_post(url: str, token: str, payload: str, timeout: int = 20) -> requests.Response:
-    """Synchronous POST to a MAM endpoint with standard headers.
+async def _do_post(url: str, token: str, payload: str, timeout: int = 20) -> httpx.Response:
+    """Async POST to a MAM endpoint with standard headers.
 
     `payload` should be a JSON-encoded string (use json.dumps at the call
-    site). MAM expects `data=` not `json=` — DO NOT change this without
-    re-testing the entire MAM integration.
+    site). Sent via httpx `content=` — the raw-body equivalent of requests'
+    `data=<string>`. DO NOT switch to `data=<dict>` (which would form-url-
+    encode the payload and break the search API) or `json=` (which would
+    re-serialize with httpx's JSON encoder and can reorder keys). MAM wants
+    the exact bytes produced by json.dumps at the callsite.
     """
-    return _get_session().post(url, headers=_build_headers(token), data=payload, timeout=timeout)
+    return await _get_client().post(
+        url, headers=_build_headers(token), content=payload, timeout=timeout
+    )
 
 
 async def register_ip(session_id: str, skip_ip_update: bool = True) -> dict:
@@ -527,7 +558,7 @@ async def register_ip(session_id: str, skip_ip_update: bool = True) -> dict:
     logger.info("Registering server IP with MAM...")
 
     try:
-        resp = await asyncio.to_thread(_do_get, MAM_DYNIP_URL, session_id)
+        resp = await _do_get(MAM_DYNIP_URL, session_id)
         body = resp.text.strip()
         logger.debug(f"IP registration response: {body}")
 
@@ -598,7 +629,7 @@ async def verify_search_auth(session_id: str) -> dict:
     })
 
     try:
-        resp = await asyncio.to_thread(_do_post, MAM_SEARCH_URL, session_id, test_payload, 15)
+        resp = await _do_post(MAM_SEARCH_URL, session_id, test_payload, 15)
         if resp.status_code == 200 and len(resp.text) > 0:
             logger.info("MAM search auth OK")
             return {"success": True, "message": "Connection successful"}
@@ -656,11 +687,9 @@ async def _mam_search(
     lang_ids: Optional[list[int]] = None,
 ) -> Optional[dict]:
     """
-    Search MAM using requests library (via asyncio.to_thread).
-    Uses curl User-Agent to pass MAM's TLS fingerprinting.
-    Pass authors=None for title-only search (pass 5).
-    Returns parsed JSON response or None on error.
-    Raises _AuthError on 401/403.
+    Search MAM natively (httpx.AsyncClient). Pass authors=None for
+    title-only search (pass 5). Returns parsed JSON response or None on
+    error. Raises _AuthError on 401/403.
     """
     if authors is None:
         query = _clean_title_loose(title)
@@ -695,7 +724,7 @@ async def _mam_search(
     })
 
     try:
-        resp = await asyncio.to_thread(_do_post, MAM_SEARCH_URL, token, payload)
+        resp = await _do_post(MAM_SEARCH_URL, token, payload)
         if resp.status_code in (401, 403):
             raise _AuthError(f"HTTP {resp.status_code}")
         resp.raise_for_status()
