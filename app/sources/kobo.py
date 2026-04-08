@@ -295,8 +295,14 @@ class KoboSource(BaseSource):
             if not items:
                 logger.debug(f"  Kobo: no book items matched on get_author_books page for '{author_name}' ({len(page_html)} bytes)")
 
-            # Phase 1: collect raw search results (title, href, cover thumbnail)
+            # Phase 1: collect raw search results (title, href, cover thumbnail).
+            # Phase 3b-K2-fix: dedupe by kobo_id. The XPath
+            # `//a[@data-testid='title']` matches BOTH the cover-image
+            # anchor and the title-text anchor for each result, so without
+            # dedupe every book gets processed twice (visible in the first
+            # 3b-K2 verification scan as paired DETAIL/SKIP-KNOWN log lines).
             raw_books = []
+            seen_ids = set()
             for item in items:
                 title = item.text_content().strip()
                 href = item.get("href", "")
@@ -305,6 +311,14 @@ class KoboSource(BaseSource):
 
                 # Extract Kobo book ID from URL
                 kobo_id = href.rstrip("/").split("/")[-1] if href else None
+
+                # Dedupe: skip if we've already seen this kobo_id. Falls
+                # back to (title, href) for items missing a kobo_id so
+                # we still dedupe correctly on edge cases.
+                dedupe_key = kobo_id or (title, href)
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
 
                 # Try to get cover image (thumbnail from search page; will
                 # be replaced with the full-res version from the detail

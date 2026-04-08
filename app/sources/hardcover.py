@@ -304,10 +304,17 @@ class HardcoverSource(BaseSource):
             # "which books got searched in priority order" debug story.
             search_queries = [author_name]
             if owned_titles:
-                # Phase 3b-H2: was [:3], bumped to [:10]. For users with
-                # 50+ owned books per author this still bounds total query
-                # cost to 11 GraphQL searches × ~300ms = ~3s of search time.
-                for t in owned_titles[:10]:
+                # Phase 3b-H2: was [:3], bumped to [:25] in 3b-H2-fix.
+                # First Sanderson re-scan with [:10] still missed 6 of his
+                # 16 owned books (Rhythm of War, Tress, Awakening, Isles of
+                # the Emberdark, The Gathering Storm, Towers of Midnight) —
+                # those just happened to be positions 11-16 in the SQL
+                # return order. With [:25] we cover users with up to ~25
+                # owned books per prolific author, which is ~95th-percentile
+                # for fiction collections. Cost: 26 GraphQL searches ×
+                # ~250ms = ~6.5s of search time, only on first Hardcover
+                # scan of an author this large.
+                for t in owned_titles[:25]:
                     search_queries.append(f"{t} {author_name}")
 
             all_book_ids = set()
@@ -326,11 +333,12 @@ class HardcoverSource(BaseSource):
                 logger.info(f"  Hardcover: no search results for '{author_name}'")
                 return None
 
-            # Cap at 50 IDs — Hardcover's books-by-id query has practical
-            # limits and we want to keep response size bounded. With the
-            # owned-title queries this is now usually a real cap rather
-            # than the total count.
-            book_ids = list(all_book_ids)[:50]
+            # Cap at 100 IDs (was 50). With [:25] owned-title queries we
+            # routinely accumulate 60-90 unique IDs for prolific authors,
+            # and Hardcover's books-by-id query handles batches this size
+            # comfortably (the Sanderson 40-ID fetch took ~270ms in the
+            # 3b-H2 verification scan).
+            book_ids = list(all_book_ids)[:100]
             logger.info(
                 f"  Hardcover: search yielded {len(all_book_ids)} unique IDs "
                 f"across {len(search_queries)} queries → fetching {len(book_ids)}"
