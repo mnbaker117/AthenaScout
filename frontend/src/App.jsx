@@ -20,6 +20,7 @@ import MAMPage from "./pages/MAMPage";
 import DatabasePage from "./pages/DatabasePage";
 import SettingsPage from "./pages/SettingsPage";
 import SuggestionsPage from "./pages/SuggestionsPage";
+import Toaster from "./components/Toaster";
 
 // ─── App Shell ──────────────────────────────────────────────
 
@@ -57,6 +58,20 @@ useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/ma
 // plus a one-shot fetch on initial auth.
 const[sugCount,setSugCount]=useState(0);
 useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[authState.authenticated]);
+
+// Phase 3d-1 (post-feedback): app-level scan progress poller. Runs once
+// per app-mount (not per page) so the unified Dashboard widget AND any
+// other page that cares about scan completion (AuthorDetailPage refresh,
+// AuthorsPage bulk action) see consistent data without each maintaining
+// its own polling effect. Dispatches:
+//   - athenascout:scans-updated  on every poll, with the new scans array
+//   - athenascout:scan-completed when a scan transitions running→idle
+//
+// Polling cadence: 3s while any scan is in flight, 30s idle watchdog.
+// Page Visibility API pause to skip polling on backgrounded tabs.
+// Initial fetch fires immediately and any time athenascout:scan-started
+// is dispatched (so trigger sites can demand instant refresh).
+useEffect(()=>{if(!authState.authenticated)return;let prev=[];let cancelled=false;let iv=null;const tick=async()=>{if(document.hidden||cancelled)return;try{const r=await api.get("/scan-status");const next=r.scans||[];for(const ns of next){const ps=prev.find(p=>p.kind===ns.kind);if(ps&&ps.running&&!ns.running){try{window.dispatchEvent(new CustomEvent("athenascout:scan-completed",{detail:{kind:ns.kind,scan:ns}}))}catch{}}}prev=next;try{window.dispatchEvent(new CustomEvent("athenascout:scans-updated",{detail:{scans:next}}))}catch{}const anyRunning=next.some(s=>s.running);const want=anyRunning?3000:30000;if(iv){clearInterval(iv);iv=setInterval(tick,want)}}catch{}};tick();iv=setInterval(tick,30000);const onStarted=()=>tick();const onVis=()=>{if(!document.hidden)tick()};window.addEventListener("athenascout:scan-started",onStarted);document.addEventListener("visibilitychange",onVis);return()=>{cancelled=true;if(iv)clearInterval(iv);window.removeEventListener("athenascout:scan-started",onStarted);document.removeEventListener("visibilitychange",onVis)}},[authState.authenticated]);
   const theme=THEMES[tn]||THEMES.dark;
   const nav=(p,a=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
   useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);
@@ -71,6 +86,7 @@ if(authState.loading)return<TC.Provider value={theme}><div style={{display:"flex
 if(!authState.authenticated)return<TC.Provider value={theme}><LoginPage onLoginSuccess={onLoginSuccess} isFirstRun={authState.firstRun}/></TC.Provider>;
 
 return<TC.Provider value={theme}>
+<Toaster/>
 <style>{`*{box-sizing:border-box;margin:0}html{height:100%;background:${theme.bg}}body{background:${theme.bg};color:${theme.text2};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;min-height:100%;min-height:100dvh;min-height:-webkit-fill-available}::selection{background:${theme.accent}44}::-webkit-scrollbar{width:8px}::-webkit-scrollbar-track{background:${theme.bg}}::-webkit-scrollbar-thumb{background:${theme.border};border-radius:4px}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes slideIn{from{transform:translateX(100%)}to{transform:translateX(0)}}

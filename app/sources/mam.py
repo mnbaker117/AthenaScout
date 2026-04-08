@@ -1022,11 +1022,22 @@ async def scan_books_batch(
     on_progress: Optional[Callable[[dict], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     lang_ids: Optional[list[int]] = None,
+    book_ids: Optional[list[int]] = None,
 ) -> dict:
     """
     Scan a batch of books that don't yet have MAM data.
     Returns {"scanned": int, "found": int, "possible": int,
              "not_found": int, "errors": int, "error": str|None}
+
+    Phase 3d-1 (post-feedback): the optional `book_ids` parameter takes
+    a pre-computed list of book IDs to scan, instead of letting the
+    function query `WHERE mam_status IS NULL` itself. Used by the
+    orchestrators to enforce scan-set stability when concurrent author
+    scans may be adding new books to the database mid-MAM-run. With
+    `book_ids` provided, NEW books added by an author scan during this
+    MAM scan will NOT be picked up — they'll wait for the next MAM
+    scan, matching what the user expects. With `book_ids=None` the
+    legacy `WHERE mam_status IS NULL` query path is used.
     """
     if format_priority is None:
         format_priority = DEFAULT_FORMAT_PRIORITY
@@ -1037,15 +1048,30 @@ async def scan_books_batch(
         return {"scanned": 0, "found": 0, "possible": 0, "not_found": 0,
                 "errors": 0, "error": f"IP registration failed: {ip_result['message']}"}
 
-    # Get books needing scan (no mam_status yet, not upcoming)
-    rows = await db.execute_fetchall(f"""
-        SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased
-        FROM books b
-        JOIN authors a ON b.author_id = a.id
-        WHERE {_NEEDS_SCAN_BASIC_ALIASED}
-        ORDER BY b.owned DESC, b.id ASC
-        LIMIT ?
-    """, (limit,))
+    # Get books needing scan. Two paths:
+    #   - book_ids provided → scan exactly that ID set (snapshot mode)
+    #   - book_ids None     → query whatever currently has mam_status IS NULL
+    if book_ids is not None:
+        if not book_ids:
+            return {"scanned": 0, "found": 0, "possible": 0, "not_found": 0,
+                    "errors": 0, "error": None}
+        placeholders = ",".join("?" * len(book_ids))
+        rows = await db.execute_fetchall(f"""
+            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased
+            FROM books b
+            JOIN authors a ON b.author_id = a.id
+            WHERE b.id IN ({placeholders})
+            ORDER BY b.owned DESC, b.id ASC
+        """, tuple(book_ids))
+    else:
+        rows = await db.execute_fetchall(f"""
+            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased
+            FROM books b
+            JOIN authors a ON b.author_id = a.id
+            WHERE {_NEEDS_SCAN_BASIC_ALIASED}
+            ORDER BY b.owned DESC, b.id ASC
+            LIMIT ?
+        """, (limit,))
 
     if not rows:
         logger.info("MAM scan: no books need scanning")

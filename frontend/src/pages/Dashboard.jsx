@@ -6,24 +6,21 @@ import { pct, timeAgo } from "../lib/format";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
+import { toast } from "../lib/toast";
 
 export default function Dashboard({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[scans,setScans]=useState([]);const[sugCount,setSugCount]=useState(0);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
 // Phase 3c: pending suggestions count for the Dashboard card. Refetched
 // on the same "athenascout:suggestions-changed" event the navbar uses,
 // so accepting/ignoring on the SuggestionsPage immediately reflects here.
 useEffect(()=>{const refresh=()=>api.get("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[]);
-// Phase 3d-1: unified scan progress. Polls /api/scan-status which projects
-// _lookup_progress and _mam_scan_progress into a uniform shape, so a single
-// effect handles every kind of scan (Dashboard-triggered, Author-page,
-// BookSidebar, Settings, scheduled, bulk select). 3s while ANY scan is
-// running, 30s idle watchdog to catch scheduled jobs and remote triggers.
-// athenascout:scan-started window event causes an immediate refetch so
-// scans triggered from elsewhere appear without polling lag.
+// Phase 3d-1 (post-feedback): the unified scan poller now lives in
+// App.jsx and dispatches athenascout:scans-updated whenever it polls,
+// so the Dashboard just listens for that event instead of running its
+// own polling loop. Also refreshes /stats when a scan completes (the
+// running→idle transition is detected here by comparing the new array
+// against the previous render).
 const lookupRunning=scans.some(s=>s.kind==="lookup"&&s.running);
-const anyRunning=scans.some(s=>s.running);
-const refreshScans=()=>api.get("/scan-status").then(r=>{setScans(r.scans||[]);if(!r.scans?.some(s=>s.running))api.get("/stats").then(setD).catch(()=>{})}).catch(()=>{});
-useEffect(()=>{refreshScans();window.addEventListener("athenascout:scan-started",refreshScans);return()=>window.removeEventListener("athenascout:scan-started",refreshScans);/* eslint-disable-next-line */},[]);
-useEffect(()=>{const interval=anyRunning?3000:30000;const tick=()=>{if(document.hidden)return;refreshScans()};const iv=setInterval(tick,interval);const onVis=()=>{if(!document.hidden)tick()};document.addEventListener("visibilitychange",onVis);return()=>{clearInterval(iv);document.removeEventListener("visibilitychange",onVis)};/* eslint-disable-next-line */},[anyRunning]);
+useEffect(()=>{const onUpdate=(e)=>{const next=(e.detail&&e.detail.scans)||[];setScans(prev=>{const someJustFinished=prev.some(p=>p.running)&&!next.some(s=>s.running);if(someJustFinished)api.get("/stats").then(setD).catch(()=>{});return next})};window.addEventListener("athenascout:scans-updated",onUpdate);return()=>window.removeEventListener("athenascout:scans-updated",onUpdate)},[]);
 if(!d)return<Load/>;
 const p=pct(d.owned_books,d.total_books);
 return<div style={{display:"flex",flexDirection:"column",gap:24}}>
@@ -68,10 +65,10 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>Actions</div>
 <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
 {(()=>{const lookup=scans.find(s=>s.kind==="lookup");const mam=scans.find(s=>s.kind==="mam");const lookupType=lookup?.type;const mamRunning=mam?.running;return<>
-<Btn variant="accent" onClick={async()=>{setSy(true);try{await api.post("/sync/calibre")}catch{}setSy(false);api.get("/stats").then(setD)}} disabled={sy}>{sy?<Spin/>:Ic.sync} Sync Library</Btn>
-<Btn onClick={async()=>{try{const r=await api.post("/sync/lookup");if(r.error)alert(r.error);else{refreshScans();window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch{}}} disabled={lookupRunning}>{lookupRunning&&lookupType==="lookup"?<Spin/>:Ic.search} Scan Sources</Btn>
-<Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;try{const r=await api.post("/sync/full-rescan");if(r.error)alert(r.error);else{refreshScans();window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch{}}} disabled={lookupRunning}>{lookupRunning&&lookupType==="full_rescan"?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
-{d.mam_enabled&&d.mam_scanning_enabled!==false?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error)alert(r.error);else{refreshScans();window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch{}}} disabled={mamRunning}>{mamRunning?<Spin/>:Ic.search} MAM Scan</Btn>:null}
+<Btn variant="accent" onClick={async()=>{setSy(true);try{await api.post("/sync/calibre");toast.success("Library synced")}catch(e){toast.error(e.message||"Sync failed")}setSy(false);api.get("/stats").then(setD)}} disabled={sy}>{sy?<Spin/>:Ic.sync} Sync Library</Btn>
+<Btn onClick={async()=>{try{const r=await api.post("/sync/lookup");if(r.error)toast.warn(r.error);else if(r.due===0)toast.info(r.message||"No authors due for scanning");else{toast.info(`Source scan started — ${r.due||0} authors`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"Scan failed to start")}}} disabled={lookupRunning}>{lookupRunning&&lookupType==="lookup"?<Spin/>:Ic.search} Scan Sources</Btn>
+<Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;try{const r=await api.post("/sync/full-rescan");if(r.error)toast.warn(r.error);else{toast.info("Full re-scan started");window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"Full re-scan failed to start")}}} disabled={lookupRunning}>{lookupRunning&&lookupType==="full_rescan"?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
+{d.mam_enabled&&d.mam_scanning_enabled!==false?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error)toast.warn(r.error);else if(r.status==="complete")toast.info(r.message||"No books need scanning");else{toast.info(`MAM scan started — ${r.total||0} books`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"MAM scan failed to start")}}} disabled={mamRunning}>{mamRunning?<Spin/>:Ic.search} MAM Scan</Btn>:null}
 </>})()}
 </div>
 <div style={{display:"flex",gap:16,marginTop:12,fontSize:12,color:t.tg}}>
@@ -91,7 +88,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${pctVal}%`,height:"100%",borderRadius:3,background:scan.status==="paused"?t.ylw:t.accent,transition:"width 0.5s"}}/></div>
 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
 {isLookup?<span style={{fontSize:11,color:t.tg}}>New books found: <b style={{color:t.grnt}}>{ex.new_books||0}</b></span>:<div style={{display:"flex",gap:12,fontSize:11,color:t.tg}}><span style={{color:t.grnt}}>Found: {ex.found||0}</span><span style={{color:t.ylwt}}>Possible: {ex.possible||0}</span><span style={{color:t.redt}}>Not found: {ex.not_found||0}</span>{ex.errors>0?<span style={{color:t.red}}>Errors: {ex.errors}</span>:null}</div>}
-<Btn size="sm" onClick={async()=>{try{await api.post(cancelEndpoint);refreshScans()}catch{}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
+<Btn size="sm" onClick={async()=>{try{const r=await api.post(cancelEndpoint);toast.info(r.message||"Cancellation requested");window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}catch(e){toast.error(e.message||"Cancel failed")}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
 </div>:<div style={{fontSize:13,color:scan.status==="complete"?t.grnt:t.redt}}>{scan.status==="complete"?<>{scan.label} Complete — {isLookup?`${scan.current} authors checked, ${ex.new_books||0} new books found`:(()=>{const rem=ex.remaining!=null?ex.remaining-(scan.current||0):(scan.total||0)-(scan.current||0);return`${scan.current} scanned: ${ex.found||0} found, ${ex.possible||0} possible, ${ex.not_found||0} not found${ex.errors>0?`, ${ex.errors} errors`:""}${rem>0?` · ${rem.toLocaleString()} unscanned`:""}`})()}</>:`${scan.label}: ${scan.status}`}</div>}</div>})}
 
 {d.mam_enabled?<div style={{fontSize:11,color:t.tg,marginTop:6,fontStyle:"italic"}}>MAM Scan checks all books missing MAM data (100 per batch, 5-min pauses between batches).</div>:null}

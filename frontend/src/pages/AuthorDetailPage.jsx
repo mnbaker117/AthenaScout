@@ -11,6 +11,7 @@ import { VT } from "../components/VT";
 import { Section } from "../components/Section";
 import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
+import { toast } from "../lib/toast";
 
 // ─── Inline Series (for Author Detail) ─────────────────────
 // NOTE: defined at module level (NOT inside AuthorDetailPage) to preserve
@@ -31,8 +32,16 @@ useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const loadA=useCallback((signal)=>{setLd(true);api.get(`/authors/${authorId}`,signal).then(d=>{setA(d);setLd(false)}).catch(e=>{if(!api.isAbort(e))console.error(e)})},[authorId]);useEffect(()=>{const c=new AbortController();loadA(c.signal);return()=>c.abort()},[loadA]);
-const refresh=async(full=false)=>{setRef(true);window.dispatchEvent(new CustomEvent("athenascout:scan-started"));try{await api.post(`/authors/${authorId}/${full?"full-rescan":"lookup"}`);await loadA();setRk(k=>k+1)}catch(e){console.error(e)}setRef(false);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))};
-const scanMam=async()=>{if(mamRef)return;setMamRef(true);try{const r=await api.post(`/mam/scan-author/${authorId}`);if(r.error){alert(`MAM scan failed: ${r.error}`)}else{alert(`MAM scan complete: ${r.scanned||0} scanned, ${r.found||0} found, ${r.possible||0} possible, ${r.not_found||0} not on MAM`);await loadA();setRk(k=>k+1)}}catch(e){alert(`MAM scan failed: ${e.message||e}`)}setMamRef(false)};
+// Phase 3d-1 (post-feedback): scans now run as background tasks on the
+// server. We dispatch a scan-started event so the Dashboard widget shows
+// it immediately, fire the POST without awaiting completion, and listen
+// for the scan-completed event (dispatched by the Dashboard's poller
+// when it detects running→idle) to refresh the page data.
+const refresh=async(full=false)=>{if(ref)return;setRef(true);try{const r=await api.post(`/authors/${authorId}/${full?"full-rescan":"lookup"}`);toast.info(`${full?"Full re-scan":"Source scan"} started for ${r.author||"author"}`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}catch(e){toast.error(e.message||"Scan failed to start");setRef(false)}};
+const scanMam=async()=>{if(mamRef)return;setMamRef(true);try{const r=await api.post(`/mam/scan-author/${authorId}`);if(r.status==="complete"){toast.info(r.message||"No un-scanned books for this author");setMamRef(false)}else{toast.info(`MAM scan started — ${r.total||0} books`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"MAM scan failed to start");setMamRef(false)}};
+// Listen for scan completion (broadcast by the unified poller in
+// App-level Dashboard) and refresh this page's author data + book grid.
+useEffect(()=>{const onDone=()=>{loadA();setRk(k=>k+1);setRef(false);setMamRef(false)};window.addEventListener("athenascout:scan-completed",onDone);return()=>window.removeEventListener("athenascout:scan-completed",onDone)},[loadA]);
 const onAction=async(act,id)=>{if(act==="hide")await api.post(`/books/${id}/hide`);if(act==="dismiss")await api.post(`/books/${id}/dismiss`);if(act==="delete")await api.del(`/books/${id}`);loadA()};
 if(ld)return<Load/>;if(!a)return<div style={{color:t.tf}}>Not found</div>;
 const saOwned=(a.standalone_books||[]).filter(b=>b.owned===1).length;const saTotal=(a.standalone_books||[]).length;const serOwned=(a.series||[]).reduce((n,s)=>n+(s.owned_count||0),0);const serTotal=(a.series||[]).reduce((n,s)=>n+(s.book_count||0),0);const oc=saOwned+serOwned;const total=saTotal+serTotal;

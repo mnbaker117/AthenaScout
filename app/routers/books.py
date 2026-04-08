@@ -300,43 +300,35 @@ async def scan_books_sources(data: dict = Body(...)):
     finally:
         await db.close()
     if not rows:
-        return {"error": "No matching authors found"}
+        raise HTTPException(404, "No matching authors found")
 
-    # Phase 3d-1: surface in unified Dashboard widget. Same global
-    # author-scan lock as the other lookup paths — only one running
-    # at a time across all entry points.
-    if state._lookup_progress.get("running"):
-        raise HTTPException(409, "An author scan is already running")
-    if state._lookup_task and not state._lookup_task.done():
-        raise HTTPException(409, "An author scan is already running")
+    # Phase 3d-1 (post-feedback): same background-task pattern as
+    # /authors/scan-sources. Imports _spawn_lookup_task lazily to keep
+    # books.py from importing the whole authors router at module load.
+    import asyncio
+    from app.routers.authors import _spawn_lookup_task
 
-    state._lookup_progress = {
-        "running": True, "checked": 0, "total": len(rows), "current_author": "",
-        "new_books": 0, "status": "scanning", "type": "bulk_books",
-    }
-    total_new = 0
-    scanned = 0
-    errors = 0
-    try:
+    async def _runner():
+        nonlocal_state = {"scanned": 0, "errors": 0, "new": 0}
         for row in rows:
             aid, name = row["id"], row["name"]
             state._lookup_progress.update({"current_author": name})
             try:
                 new_books = await lookup_author(aid, name)
-                total_new += int(new_books or 0)
-                scanned += 1
+                nonlocal_state["new"] += int(new_books or 0)
+                nonlocal_state["scanned"] += 1
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"Bulk source scan error for author {aid} ({name}): {e}")
-                errors += 1
+                nonlocal_state["errors"] += 1
             state._lookup_progress.update({
-                "checked": scanned + errors,
-                "new_books": total_new,
+                "checked": nonlocal_state["scanned"] + nonlocal_state["errors"],
+                "new_books": nonlocal_state["new"],
             })
-        state._lookup_progress.update({"running": False, "status": "complete"})
-    except Exception as e:
-        state._lookup_progress.update({"running": False, "status": f"error: {e}"})
-        raise
-    return {"status": "complete", "authors_scanned": scanned, "new_books": total_new, "errors": errors}
+
+    _spawn_lookup_task("bulk_books", total=len(rows), runner=_runner)
+    return {"status": "started", "total": len(rows)}
 
 
 @router.post("/books/scan-mam")

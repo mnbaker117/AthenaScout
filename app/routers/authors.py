@@ -4,6 +4,7 @@ Author endpoints for AthenaScout.
 Holds /api/authors, /api/authors/{aid}, lookup/full-rescan triggers,
 clear-scan-data.
 """
+import asyncio
 import logging
 from fastapi import APIRouter, Body, HTTPException, Query
 
@@ -86,19 +87,27 @@ async def get_author(aid: int):
         await db.close()
 
 
-async def _run_single_author_with_progress(aid: int, name: str, full_scan: bool, scan_type: str):
-    """Run lookup_author with _lookup_progress wired up.
+def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:
+    """Spawn `runner` as a background asyncio task tracked by state._lookup_task.
 
-    Phase 3d-1: single-author lookups previously bypassed _lookup_progress
-    entirely, so a scan triggered from the Author page or BookSidebar
-    didn't appear in the unified Dashboard widget. This wrapper sets
-    running=True with total=1 for the duration, then marks complete (or
-    errored). It also serves as the lock — concurrent author scans
-    (whether from the Dashboard, the Authors page bulk action, or
-    another single-author trigger) are rejected via the running check.
+    Phase 3d-1 (post-feedback fix): single-author and bulk-author scans
+    previously ran inline within the request handler with `_lookup_task`
+    left unset, which broke the Dashboard Stop button — `/lookup/cancel`
+    only checks `_lookup_task and not _lookup_task.done()` to know what
+    to cancel. Spawning the work as a real background task means the
+    same cancel endpoint Just Works for every author-scan flavor,
+    including single-author refreshes from the Author detail page.
 
-    Returns the new-book count so the caller (synchronous endpoint) can
-    surface it directly to the frontend, matching the prior behavior.
+    The endpoint returns immediately with `{"status": "started"}` and
+    the frontend polls /api/scan-status (or refreshes via the
+    athenascout:scan-started window event) to surface progress and
+    completion. Pages that previously consumed the synchronous return
+    value (Author detail page's new_books count) now refresh themselves
+    on completion via /scan-status polling.
+
+    `runner` is a zero-arg async callable that returns when the work is
+    done. Exceptions inside it are caught and stored in
+    _lookup_progress["status"] so the unified widget can surface them.
     """
     if state._lookup_progress.get("running"):
         raise HTTPException(409, "An author scan is already running")
@@ -106,26 +115,32 @@ async def _run_single_author_with_progress(aid: int, name: str, full_scan: bool,
         raise HTTPException(409, "An author scan is already running")
 
     state._lookup_progress = {
-        "running": True, "checked": 0, "total": 1, "current_author": name,
+        "running": True, "checked": 0, "total": total, "current_author": "",
         "new_books": 0, "status": "scanning", "type": scan_type,
     }
-    try:
-        new_books = await lookup_author(aid, name, full_scan=full_scan)
-        state._lookup_progress.update({
-            "running": False, "checked": 1,
-            "new_books": int(new_books or 0), "status": "complete",
-        })
-        return new_books
-    except Exception as e:
-        state._lookup_progress.update({"running": False, "status": f"error: {e}"})
-        raise
+
+    async def _do():
+        try:
+            await runner()
+            state._lookup_progress.update({"running": False, "status": "complete"})
+        except asyncio.CancelledError:
+            # User clicked Stop on the Dashboard widget. Mark cancelled
+            # and let the exception propagate so any further `await` in
+            # the runner unwinds cleanly.
+            state._lookup_progress.update({"running": False, "status": "cancelled"})
+            raise
+        except Exception as e:
+            logger.error(f"Author scan task error: {e}", exc_info=True)
+            state._lookup_progress.update({"running": False, "status": f"error: {e}"})
+
+    state._lookup_task = asyncio.create_task(_do())
 
 
 @router.post("/authors/{aid}/lookup")
 async def trigger_author_lookup(aid: int):
     s = load_settings()
     if not s.get("author_scanning_enabled", True):
-        return {"error": "Author scanning is disabled — enable it in Settings"}
+        raise HTTPException(400, "Author scanning is disabled — enable it in Settings")
     db = await get_db()
     try:
         r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
@@ -133,10 +148,17 @@ async def trigger_author_lookup(aid: int):
             raise HTTPException(404)
     finally:
         await db.close()
-    new_books = await _run_single_author_with_progress(
-        aid, dict(r)["name"], full_scan=False, scan_type="single_author",
-    )
-    return {"status": "ok", "new_books": new_books}
+    name = dict(r)["name"]
+
+    async def _runner():
+        state._lookup_progress.update({"current_author": name})
+        new_books = await lookup_author(aid, name)
+        state._lookup_progress.update({
+            "checked": 1, "new_books": int(new_books or 0),
+        })
+
+    _spawn_lookup_task("single_author", total=1, runner=_runner)
+    return {"status": "started", "author": name}
 
 
 @router.post("/authors/{aid}/full-rescan")
@@ -144,7 +166,7 @@ async def trigger_author_full_rescan(aid: int):
     """Full re-scan for a single author."""
     s = load_settings()
     if not s.get("author_scanning_enabled", True):
-        return {"error": "Author scanning is disabled — enable it in Settings"}
+        raise HTTPException(400, "Author scanning is disabled — enable it in Settings")
     db = await get_db()
     try:
         r = await (await db.execute("SELECT * FROM authors WHERE id=?", (aid,))).fetchone()
@@ -152,10 +174,17 @@ async def trigger_author_full_rescan(aid: int):
             raise HTTPException(404)
     finally:
         await db.close()
-    new_books = await _run_single_author_with_progress(
-        aid, dict(r)["name"], full_scan=True, scan_type="single_author_full",
-    )
-    return {"status": "ok", "new_books": new_books}
+    name = dict(r)["name"]
+
+    async def _runner():
+        state._lookup_progress.update({"current_author": name})
+        new_books = await lookup_author(aid, name, full_scan=True)
+        state._lookup_progress.update({
+            "checked": 1, "new_books": int(new_books or 0),
+        })
+
+    _spawn_lookup_task("single_author_full", total=1, runner=_runner)
+    return {"status": "started", "author": name}
 
 
 @router.post("/authors/clear-scan-data")
@@ -227,43 +256,35 @@ async def scan_authors_sources(data: dict = Body(...)):
     finally:
         await db.close()
     if not rows:
-        return {"error": "No matching authors found"}
+        raise HTTPException(404, "No matching authors found")
 
-    # Phase 3d-1: surface this bulk action in the unified Dashboard
-    # widget. Same lock as single-author lookups and the full scan —
-    # only one author scan of any flavor at a time.
-    if state._lookup_progress.get("running"):
-        raise HTTPException(409, "An author scan is already running")
-    if state._lookup_task and not state._lookup_task.done():
-        raise HTTPException(409, "An author scan is already running")
-
-    state._lookup_progress = {
-        "running": True, "checked": 0, "total": len(rows), "current_author": "",
-        "new_books": 0, "status": "scanning", "type": "bulk_authors",
-    }
-    total_new = 0
-    scanned = 0
-    errors = 0
-    try:
+    # Phase 3d-1 (post-feedback): runs as a background task tracked by
+    # state._lookup_task so the Dashboard's Stop button can cancel it
+    # mid-stream. The endpoint returns immediately after spawning; the
+    # frontend polls /api/scan-status for live progress and listens for
+    # the athenascout:scan-started window event to refresh the widget
+    # without polling lag.
+    async def _runner():
+        nonlocal_state = {"scanned": 0, "errors": 0, "new": 0}
         for row in rows:
             aid, name = row[0], row[1]
             state._lookup_progress.update({"current_author": name})
             try:
                 new_books = await lookup_author(aid, name)
-                total_new += int(new_books or 0)
-                scanned += 1
+                nonlocal_state["new"] += int(new_books or 0)
+                nonlocal_state["scanned"] += 1
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"Bulk source scan error for author {aid} ({name}): {e}")
-                errors += 1
+                nonlocal_state["errors"] += 1
             state._lookup_progress.update({
-                "checked": scanned + errors,
-                "new_books": total_new,
+                "checked": nonlocal_state["scanned"] + nonlocal_state["errors"],
+                "new_books": nonlocal_state["new"],
             })
-        state._lookup_progress.update({"running": False, "status": "complete"})
-    except Exception as e:
-        state._lookup_progress.update({"running": False, "status": f"error: {e}"})
-        raise
-    return {"status": "complete", "scanned": scanned, "new_books": total_new, "errors": errors}
+
+    _spawn_lookup_task("bulk_authors", total=len(rows), runner=_runner)
+    return {"status": "started", "total": len(rows)}
 
 
 @router.post("/authors/scan-mam")

@@ -7,7 +7,7 @@ full-scan flow, toggle, books list, reset.
 import asyncio
 import logging
 import time
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from app.config import load_settings, save_settings
 from app.database import get_db
@@ -77,42 +77,52 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
     if state._mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
-    if state._lookup_progress.get("running"):
-        return {"error": "An author scan is running — MAM scan will wait until it finishes"}
+    # Phase 3d-1 (post-feedback): no longer blocking on a concurrent
+    # author scan — see _wait_for_other_writers() docstring below.
 
+    # Phase 3d-1 (post-feedback): snapshot the FULL set of book IDs
+    # eligible for scanning RIGHT NOW. The scan processes only this
+    # snapshot — books that get added to the database during the scan
+    # (e.g. by a concurrent author/source scan discovering new titles)
+    # are NOT picked up by this run, they wait for the next MAM scan.
+    # This is what the user expects: "MAM scan won't constantly
+    # recalculate". Without snapshotting, each batch's `WHERE
+    # mam_status IS NULL` re-query would grow the queue endlessly
+    # under sustained author-scan throughput.
     db = await get_db()
     try:
-        row = await db.execute_fetchall(
-            "SELECT COUNT(*) FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0"
+        id_rows = await db.execute_fetchall(
+            "SELECT id FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0 "
+            "ORDER BY owned DESC, id ASC"
         )
-        total = row[0][0] if row else 0
+        all_ids = [r[0] for r in id_rows]
     finally:
         await db.close()
 
-    if total == 0:
+    if not all_ids:
         return {"status": "complete", "message": "No books need scanning — all already have MAM data"}
 
-    scan_total = min(total, limit) if limit else total
+    snapshot_ids = all_ids[:limit] if limit else all_ids
+    scan_total = len(snapshot_ids)
     state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_total,
                           "found": 0, "possible": 0, "not_found": 0, "errors": 0,
                           "status": "scanning", "type": "manual"}
 
     async def _wait_for_other_writers():
-        """Yield to other background writers before grabbing the write lock.
+        """Yield to Calibre library sync before grabbing the write lock.
 
-        Waits for (a) an in-flight author/source scan to finish, and
-        (b) a Calibre library sync to finish. Both hold the SQLite write
-        lock for extended periods and used to collide with MAM batches —
-        a live incident at 22:33 showed a MAM batch racing a scheduled
-        Calibre sync and hitting "database is locked" after the 5-second
-        busy_timeout. We now wait them out gracefully instead.
+        Phase 3d-1 (post-feedback): the historical wait-out for in-flight
+        author/source scans was REMOVED. The original incident at 22:33
+        was a MAM batch racing a scheduled Calibre SYNC, not an author
+        scan — Calibre sync does massive bulk inserts in big transactions
+        and can hold the SQLite write lock for tens of seconds, longer
+        than busy_timeout. Author scans, by contrast, do small per-row
+        UPDATEs with sub-100ms write windows that the WAL-mode + 30s
+        busy_timeout combo absorbs cleanly. Letting MAM and author scans
+        run concurrently means a long Sanderson source scan no longer
+        blocks the entire MAM scan queue, which was the user-visible
+        annoyance that motivated this change.
         """
-        if state._lookup_progress.get("running"):
-            state._mam_scan_progress["status"] = "waiting (author scan running)"
-            logger.info("MAM scan waiting for author scan to finish...")
-            while state._lookup_progress.get("running"):
-                await asyncio.sleep(30)
-            logger.info("Author scan finished — MAM scan resuming")
         if state._calibre_sync_in_progress:
             state._mam_scan_progress["status"] = "waiting (calibre sync running)"
             logger.info("MAM scan waiting for Calibre sync to finish...")
@@ -123,8 +133,9 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
 
     async def _do_scan():
         batch_num = 0
+        cursor = 0  # index into snapshot_ids; advances each batch
         while True:
-            # Wait for any author scan or Calibre sync before starting next batch
+            # Wait for Calibre sync (only) before starting next batch
             await _wait_for_other_writers()
             cs = load_settings()
             if not cs.get("mam_enabled") or not cs.get("mam_session_id"):
@@ -145,29 +156,32 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                 base_possible = state._mam_scan_progress["possible"]
                 base_not_found = state._mam_scan_progress["not_found"]
                 base_errors = state._mam_scan_progress["errors"]
-                batch_limit = min(100, scan_total - state._mam_scan_progress["scanned"])
-                if batch_limit <= 0:
+                # Slice the next batch out of the frozen snapshot. This
+                # is the snapshot guarantee: only IDs captured at scan
+                # start are processed. New books added by a concurrent
+                # author scan will NOT inflate the total or appear in
+                # later batches of THIS scan.
+                batch_ids = snapshot_ids[cursor:cursor + 100]
+                if not batch_ids:
                     state._mam_scan_progress.update({"status": "complete", "running": False})
-                    logger.info(f"MAM scan reached limit ({scan_total}): {state._mam_scan_progress['scanned']} scanned, {state._mam_scan_progress['found']} found")
+                    logger.info(f"MAM scan complete (snapshot exhausted): {state._mam_scan_progress['scanned']}/{scan_total} scanned, {state._mam_scan_progress['found']} found")
                     await db.close()
                     return
                 result = await mam_scan_batch(
-                    db, session_id=cs["mam_session_id"], limit=batch_limit,
+                    db, session_id=cs["mam_session_id"], limit=len(batch_ids),
                     delay=cs.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=cs.get("mam_format_priority"),
                     on_progress=_progress,
-                    cancel_check=lambda: state._lookup_progress.get("running", False),
                     lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
+                    book_ids=batch_ids,
                 )
-                # Progress already updated per-book via on_progress callback
                 if result.get("error"):
                     state._mam_scan_progress.update({"status": f"error: {result['error']}", "running": False})
                     return
-                remaining = await db.execute_fetchall(
-                    "SELECT COUNT(*) FROM books WHERE mam_status IS NULL AND is_unreleased=0 AND hidden=0"
-                )
-                left = remaining[0][0] if remaining else 0
-                state._mam_scan_progress["total"] = state._mam_scan_progress["scanned"] + left
+                cursor += len(batch_ids)
+                # NOTE: total stays fixed at scan_total — no recompute.
+                # The user explicitly asked that the MAM scan not grow
+                # its queue when concurrent author scans add new books.
                 await db.execute(
                     "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
                     ("mam", time.time(), time.time(), "complete",
@@ -175,18 +189,14 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                 )
                 await db.commit()
             except Exception as e:
-                # exc_info=True logs the full traceback so future "MAM scan
-                # batch error" lines actually tell us WHICH line in mam.py
-                # crashed. The bare message we used to log was useless for
-                # diagnosing AttributeError-class bugs from MAM data.
                 logger.error(f"MAM scan batch error: {e}", exc_info=True)
                 state._mam_scan_progress.update({"status": f"error: {e}", "running": False})
                 return
             finally:
                 await db.close()
-            if left == 0 or result.get("scanned", 0) == 0 or state._mam_scan_progress["scanned"] >= scan_total:
+            if cursor >= scan_total:
                 state._mam_scan_progress.update({"status": "complete", "running": False})
-                logger.info(f"MAM scan complete: {state._mam_scan_progress['scanned']} scanned, {state._mam_scan_progress['found']} found")
+                logger.info(f"MAM scan complete: {state._mam_scan_progress['scanned']}/{scan_total} scanned, {state._mam_scan_progress['found']} found")
                 return
             batch_num += 1
             state._mam_scan_progress["status"] = "paused"
@@ -196,7 +206,7 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
             await _wait_for_other_writers()
 
     state._mam_scan_task = asyncio.create_task(_do_scan())
-    return {"status": "started", "total": total}
+    return {"status": "started", "total": scan_total}
 
 
 @router.post("/scan/cancel")
@@ -247,7 +257,6 @@ async def mam_test_scan():
             delay=s.get("rate_mam", 2),
             skip_ip_update=True,
             format_priority=s.get("mam_format_priority"),
-            cancel_check=lambda: state._lookup_progress.get("running", False),
             lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
         )
         return result
@@ -267,8 +276,17 @@ async def mam_full_scan_start():
         return {"error": "A full MAM scan is already running"}
     if state._mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running — wait for it to finish"}
-    if state._lookup_progress.get("running"):
-        return {"error": "An author scan is running — MAM scan will wait until it finishes"}
+    # Phase 3d-1 (post-feedback): no longer rejecting on a concurrent
+    # author scan — they're allowed to run side-by-side now. See the
+    # _wait_for_other_writers comment in /api/mam/scan above.
+    #
+    # TODO (post-3d): the full MAM scan still re-queries
+    # `WHERE mam_status IS NULL` each batch, so books added by a
+    # concurrent author scan WILL get picked up mid-run (unlike the
+    # manual /api/mam/scan path, which now snapshots IDs at start).
+    # Fixing requires adding a book_ids snapshot column to the
+    # mam_scan_log table — a schema migration that's worth doing as
+    # part of 3d-2 cleanup, not in this round.
 
     db = await get_db()
     try:
@@ -310,13 +328,8 @@ async def mam_full_scan_start():
                 state._mam_scan_progress["status"] = "paused"
                 logger.info(f"Full MAM scan: batch done, waiting {wait//60} min")
                 await asyncio.sleep(wait)
-                # Wait for any author scan to finish before resuming
-                if state._lookup_progress.get("running"):
-                    state._mam_scan_progress["status"] = "waiting (author scan running)"
-                    logger.info("Full MAM scan waiting for author scan to finish...")
-                    while state._lookup_progress.get("running"):
-                        await asyncio.sleep(30)
-                    logger.info("Author scan finished — full MAM scan resuming")
+                # Phase 3d-1 (post-feedback): no longer waiting on a
+                # concurrent author scan between batches.
                 state._mam_scan_progress["status"] = "scanning"
 
     state._mam_full_scan_task = asyncio.create_task(_full_scan_loop())
@@ -470,17 +483,22 @@ async def mam_scan_single_book(book_id: int):
 async def mam_scan_single_author(author_id: int):
     """Scan all of an author's missing/un-scanned books against MAM.
 
-    Runs synchronously inside the request — fine because the per-author book
-    count is small. For large authors the request will take a while, but the
-    result is returned in one shot rather than fronted by progress polling.
+    Phase 3d-1 (post-feedback): now spawned as a background asyncio task
+    tracked via state._mam_scan_task and reported through
+    state._mam_scan_progress so the unified Dashboard widget can show
+    live progress and the Stop button on the widget can cancel mid-run.
+    Mirrors the same lock semantics as /api/mam/scan — only one MAM
+    scan running at a time, regardless of trigger source.
     """
     s = load_settings()
     if not s.get("mam_enabled") or not s.get("mam_session_id"):
-        return {"error": "MAM not configured or not enabled"}
+        raise HTTPException(400, "MAM not configured or not enabled")
     if not s.get("mam_scanning_enabled", True):
-        return {"error": "MAM scanning is disabled — enable it in Settings"}
+        raise HTTPException(400, "MAM scanning is disabled — enable it in Settings")
     if state._mam_scan_progress.get("running"):
-        return {"error": "A MAM scan is already running"}
+        raise HTTPException(409, "A MAM scan is already running")
+    if state._mam_scan_task and not state._mam_scan_task.done():
+        raise HTTPException(409, "A MAM scan is already running")
 
     db = await get_db()
     try:
@@ -488,7 +506,7 @@ async def mam_scan_single_author(author_id: int):
             "SELECT name FROM authors WHERE id=?", (author_id,),
         )
         if not rows:
-            return {"error": f"Author {author_id} not found"}
+            raise HTTPException(404, f"Author {author_id} not found")
         author_name = rows[0][0]
 
         book_rows = await db.execute_fetchall(
@@ -496,45 +514,75 @@ async def mam_scan_single_author(author_id: int):
             "AND is_unreleased=0 AND hidden=0 ORDER BY title",
             (author_id,),
         )
-        if not book_rows:
-            return {"status": "complete", "message": "No un-scanned books for this author",
-                    "scanned": 0, "found": 0, "possible": 0, "not_found": 0}
-
-        delay = s.get("rate_mam", 2)
-        format_priority = s.get("mam_format_priority")
-        token = s["mam_session_id"]
-        lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
-        stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0}
-
-        for bid, btitle in book_rows:
-            try:
-                check = await mam_check_book(token, btitle, author_name, format_priority, delay, lang_ids=lang_ids)
-            except Exception as e:
-                logger.error(f"Author scan error on book {bid} ({btitle[:40]}): {e}")
-                stats["errors"] += 1
-                continue
-            await db.execute("""
-                UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
-                       mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
-                WHERE id=?
-            """, (
-                check["mam_url"], check["status"], check["mam_formats"],
-                check["mam_torrent_id"],
-                1 if check["mam_has_multiple"] else 0,
-                1 if check.get("mam_my_snatched") else 0,
-                bid,
-            ))
-            stats["scanned"] += 1
-            if check["status"] == "found":
-                stats["found"] += 1
-            elif check["status"] == "possible":
-                stats["possible"] += 1
-            elif check["status"] == "not_found":
-                stats["not_found"] += 1
-        await db.commit()
-        return {"status": "complete", "author": author_name, **stats}
     finally:
         await db.close()
+
+    if not book_rows:
+        # Nothing to scan — surface as a benign idle status (the unified
+        # widget will render this as a "complete" row that auto-clears).
+        state._mam_scan_progress = {
+            "running": False, "scanned": 0, "total": 0,
+            "found": 0, "possible": 0, "not_found": 0, "errors": 0,
+            "status": "complete", "type": "manual",
+        }
+        return {"status": "complete", "message": "No un-scanned books for this author",
+                "scanned": 0, "found": 0, "possible": 0, "not_found": 0}
+
+    state._mam_scan_progress = {
+        "running": True, "scanned": 0, "total": len(book_rows),
+        "found": 0, "possible": 0, "not_found": 0, "errors": 0,
+        "status": "scanning", "type": "manual",
+    }
+
+    delay = s.get("rate_mam", 2)
+    format_priority = s.get("mam_format_priority")
+    token = s["mam_session_id"]
+    lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
+
+    async def _do_scan():
+        bdb = await get_db()
+        try:
+            for bid, btitle in book_rows:
+                try:
+                    check = await mam_check_book(token, btitle, author_name, format_priority, delay, lang_ids=lang_ids)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"Author scan error on book {bid} ({btitle[:40]}): {e}")
+                    state._mam_scan_progress["errors"] += 1
+                    state._mam_scan_progress["scanned"] += 1
+                    continue
+                await bdb.execute("""
+                    UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
+                           mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
+                    WHERE id=?
+                """, (
+                    check["mam_url"], check["status"], check["mam_formats"],
+                    check["mam_torrent_id"],
+                    1 if check["mam_has_multiple"] else 0,
+                    1 if check.get("mam_my_snatched") else 0,
+                    bid,
+                ))
+                state._mam_scan_progress["scanned"] += 1
+                if check["status"] == "found":
+                    state._mam_scan_progress["found"] += 1
+                elif check["status"] == "possible":
+                    state._mam_scan_progress["possible"] += 1
+                elif check["status"] == "not_found":
+                    state._mam_scan_progress["not_found"] += 1
+            await bdb.commit()
+            state._mam_scan_progress.update({"running": False, "status": "complete"})
+        except asyncio.CancelledError:
+            state._mam_scan_progress.update({"running": False, "status": "cancelled"})
+            raise
+        except Exception as e:
+            logger.error(f"MAM single-author scan failed: {e}", exc_info=True)
+            state._mam_scan_progress.update({"running": False, "status": f"error: {e}"})
+        finally:
+            await bdb.close()
+
+    state._mam_scan_task = asyncio.create_task(_do_scan())
+    return {"status": "started", "author": author_name, "total": len(book_rows)}
 
 
 @router.post("/reset")

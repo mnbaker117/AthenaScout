@@ -249,8 +249,11 @@ async def lifespan(app: FastAPI):
                 continue
             if state._mam_scan_progress.get("running"):
                 continue
-            if state._lookup_progress.get("running"):
-                continue  # Author scan has priority
+            # Phase 3d-1 (post-feedback): no longer deferring on a
+            # concurrent author scan — WAL + busy_timeout absorbs the
+            # contention from per-row updates from both sides. Only
+            # Calibre sync (which holds the lock for tens of seconds
+            # during bulk inserts) still gets deferred.
             if state._calibre_sync_in_progress:
                 # Calibre bulk sync holds the SQLite write lock; defer
                 # this scheduled MAM scan tick and try again next cycle.
