@@ -320,8 +320,15 @@ class HardcoverSource(BaseSource):
             all_book_ids = set()
             for sq in search_queries:
                 data = await self._query(SEARCH_QUERY, {"query": sq})
-                search = data.get("search", {})
-                ids = search.get("ids", [])
+                # Defensive: Hardcover can return `search: null` or
+                # `search: {ids: null}` for queries that match nothing
+                # (or partially fail server-side). Dict-default `{}` only
+                # protects against MISSING keys, not null VALUES — so use
+                # `or` chains to coerce both null cases to safe defaults.
+                # The post-3c Sanderson scan tripped this on one of the
+                # 26 expanded queries: 'NoneType' object is not subscriptable.
+                search = data.get("search") or {}
+                ids = search.get("ids") or []
                 for bid in ids[:10]:
                     try:
                         all_book_ids.add(int(bid))
