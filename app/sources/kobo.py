@@ -278,8 +278,11 @@ class KoboSource(BaseSource):
         if existing_titles is None:
             existing_titles = set()
         try:
-            search_url = f"{BASE}/us/en/search?query={author_name.replace(' ', '%20')}&fcsearchfield=Author&numrecords=60"
-            page_html = await self._fetch(search_url)
+            base_search_url = (
+                f"{BASE}/us/en/search?query={author_name.replace(' ', '%20')}"
+                f"&fcsearchfield=Author&numrecords=60"
+            )
+            page_html = await self._fetch(base_search_url)
             if not page_html:
                 return None
 
@@ -287,13 +290,67 @@ class KoboSource(BaseSource):
             books = []
             series_map = {}
 
-            # New search page format
-            items = page.xpath("//a[@data-testid='title']")
-            if not items:
-                # Old format
-                items = page.xpath("//h2[@class='title product-field']/a")
+            def _extract_items(p):
+                # New search page format
+                its = p.xpath("//a[@data-testid='title']")
+                if not its:
+                    # Old format
+                    its = p.xpath("//h2[@class='title product-field']/a")
+                return its
+
+            items = _extract_items(page)
             if not items:
                 logger.debug(f"  Kobo: no book items matched on get_author_books page for '{author_name}' ({len(page_html)} bytes)")
+
+            # ── Phase 3b-K1: pagination ────────────────────────────────
+            # Kobo's author search caps at 60 results per page (controlled
+            # by &numrecords=60 in our URL). For very prolific authors
+            # (J.N. Chaney has ~288 audiobook entries on Kobo, Sanderson
+            # has 60+), the first page silently truncates the rest.
+            #
+            # Pagination is JavaScript-driven `<button>` elements rather
+            # than href links, but Kobo's canonical URL exposes the
+            # state as `&pagenumber=N` (page 1 has no param). The total
+            # page count is rendered as plain text inside
+            # `<button data-testid="pagination-item-last-page"><span>N</span></button>`,
+            # which we parse to know when to stop.
+            #
+            # MAX_PAGES caps runaway scans — at 60 results × 10 pages
+            # that's 600 entries, comfortably above any plausible single
+            # author's catalog while keeping the worst case bounded
+            # (10 fetches × ~3s rate-limit = ~30s for the search-results
+            # phase, with the per-book detail enrichment dwarfing it
+            # anyway for any author with this many books).
+            MAX_PAGES = 10
+            last_page = 1
+            last_page_btns = page.xpath(
+                "//button[@data-testid='pagination-item-last-page']//span/text()"
+            )
+            if last_page_btns:
+                try:
+                    last_page = int(last_page_btns[0].strip())
+                except (ValueError, TypeError):
+                    last_page = 1
+
+            if last_page > 1:
+                target_pages = min(last_page, MAX_PAGES)
+                logger.info(
+                    f"  Kobo: '{author_name}' has {last_page} result pages — "
+                    f"fetching {target_pages}{' (capped)' if last_page > MAX_PAGES else ''}"
+                )
+                for pn in range(2, target_pages + 1):
+                    page_url = f"{base_search_url}&pagenumber={pn}"
+                    extra_html = await self._fetch(page_url)
+                    if not extra_html:
+                        logger.debug(f"  Kobo: page {pn} fetch failed — stopping pagination")
+                        break
+                    extra_page = html.fromstring(extra_html)
+                    extra_items = _extract_items(extra_page)
+                    if not extra_items:
+                        logger.debug(f"  Kobo: page {pn} returned 0 items — stopping pagination")
+                        break
+                    items = items + extra_items
+                    logger.debug(f"  Kobo: page {pn} added {len(extra_items)} raw items (running total {len(items)})")
 
             # Phase 1: collect raw search results (title, href, cover thumbnail).
             # Phase 3b-K2-fix: dedupe by kobo_id. The XPath
