@@ -2,10 +2,10 @@
 Kobo — scrapes kobo.com for book metadata.
 Uses cloudscraper to bypass Cloudflare protection.
 """
-import logging, re, asyncio, time
+import logging, asyncio, time
 from typing import Optional
 from lxml import html
-from app.sources.base import BaseSource, AuthorResult, BookResult, SeriesResult
+from app.sources.base import BaseSource, AuthorResult, BookResult
 
 logger = logging.getLogger("athenascout.kobo")
 BASE = "https://www.kobo.com"
@@ -66,30 +66,58 @@ class KoboSource(BaseSource):
             # Check for author match in results
             # New Kobo: data-testid='search-result-widget'
             # Old Kobo: h2.title.product-field
-            author_found = False
-            result_titles = page.xpath("//a[@data-testid='title']")
-            if not result_titles:
-                result_titles = page.xpath("//h2[@class='title product-field']/a")
+            result_titles_new = page.xpath("//a[@data-testid='title']")
+            result_titles_old = page.xpath("//h2[@class='title product-field']/a")
+            result_titles = result_titles_new or result_titles_old
 
+            # external_id stores the ORIGINAL author_name (not a URL slug),
+            # because Kobo has no stable public author-id and get_author_books
+            # needs to re-query by name. The pre-Phase-3a code stored a slug
+            # here and then reconstructed the name via `slug.replace("-", " ").title()`,
+            # which was lossy on apostrophes, accents, and hyphens
+            # ("O'Brien" → "O'brien", "jean-luc" → "Jean Luc"). Round-tripping
+            # the raw name avoids the whole problem.
             if result_titles:
-                author_found = True
-                slug = author_name.lower().replace(" ", "-").replace(".", "")
-                return AuthorResult(name=author_name, external_id=slug)
+                which = "new layout" if result_titles_new else "old layout"
+                logger.debug(f"  Kobo: matched {len(result_titles)} results via {which} selectors for '{author_name}'")
+                return AuthorResult(name=author_name, external_id=author_name)
 
-            # Check if page has any book results at all
-            if "No results found" in page_html or len(page_html) < 5000:
+            # Neither selector matched. Two possibilities: Kobo genuinely
+            # has no results (expected for obscure authors), or Kobo changed
+            # their DOM again and our selectors are stale. Distinguish the
+            # two via explicit markers before the pre-Phase-3a code's
+            # "assume the author exists" fallback — that fallback was
+            # silently masking DOM changes that would show up as empty
+            # AuthorResult objects downstream.
+            if "No results found" in page_html:
+                logger.debug(f"  Kobo: 'No results found' marker present for '{author_name}'")
+                return None
+            if len(page_html) < 5000:
+                logger.debug(f"  Kobo: short response ({len(page_html)} bytes) for '{author_name}' — likely empty/error page")
                 return None
 
-            slug = author_name.lower().replace(" ", "-").replace(".", "")
-            return AuthorResult(name=author_name, external_id=slug)
+            # Page is >5000 bytes and has no "No results" marker but NONE
+            # of our selectors matched. Almost certainly a Kobo DOM change.
+            # Emit a warning so the user sees it and can report the layout
+            # change — then return None rather than the old lenient
+            # fallback, which was constructing fake AuthorResults that
+            # caused get_author_books to fire a pointless follow-up fetch.
+            logger.warning(
+                f"  Kobo: {len(page_html)} bytes returned for '{author_name}' "
+                f"but no result selectors matched — Kobo may have changed their DOM"
+            )
+            return None
 
         except Exception as e:
             logger.error(f"Kobo search error '{author_name}': {e}")
             return None
 
-    async def get_author_books(self, author_slug: str, **kw) -> Optional[AuthorResult]:
+    async def get_author_books(self, author_name: str, **kw) -> Optional[AuthorResult]:
+        # author_name arrives from search_author's external_id, which is
+        # now the ORIGINAL user-provided name (Phase 3a) — not a slug that
+        # would need lossy .title() reconstruction. Old param name was
+        # `author_slug`; renamed for accuracy.
         try:
-            author_name = author_slug.replace("-", " ").title()
             search_url = f"{BASE}/us/en/search?query={author_name.replace(' ', '%20')}&fcsearchfield=Author&numrecords=60"
             page_html = await self._fetch(search_url)
             if not page_html:
@@ -104,6 +132,8 @@ class KoboSource(BaseSource):
             if not items:
                 # Old format
                 items = page.xpath("//h2[@class='title product-field']/a")
+            if not items:
+                logger.debug(f"  Kobo: no book items matched on get_author_books page for '{author_name}' ({len(page_html)} bytes)")
 
             for item in items:
                 title = item.text_content().strip()
@@ -129,9 +159,17 @@ class KoboSource(BaseSource):
                 if href:
                     kobo_url = href if href.startswith("http") else f"https://www.kobo.com{href}"
 
+                # Language left as None: Kobo's search-result page doesn't
+                # expose a language field, and hardcoding "English" was a
+                # Phase 3a correctness bug — the `/us/en/` storefront happens
+                # to return English titles today but that's a property of
+                # the URL, not a guarantee about individual books. lookup.py
+                # `_lang_ok()` treats None as "unknown, assume ok", so the
+                # behavior for English-only users is unchanged, and
+                # multi-language users no longer get mis-tagged books.
                 br = BookResult(
                     title=title, cover_url=cover,
-                    external_id=kobo_id, source="kobo", language="English",
+                    external_id=kobo_id, source="kobo",
                     source_url=kobo_url,
                 )
                 books.append(br)
@@ -139,11 +177,11 @@ class KoboSource(BaseSource):
             logger.info(f"  Kobo: found {len(books)} books for '{author_name}'")
 
             return AuthorResult(
-                name=author_name, external_id=author_slug,
+                name=author_name, external_id=author_name,
                 books=books, series=list(series_map.values()),
             )
         except Exception as e:
-            logger.error(f"Kobo author books error '{author_slug}': {e}")
+            logger.error(f"Kobo author books error '{author_name}': {e}")
             return None
 
     async def close(self):

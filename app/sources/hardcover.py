@@ -29,6 +29,7 @@ fragment EditionData on editions {
   image: cached_image
   reading_format_id
   release_date
+  pages
   users_count
   language { code3 }
 }
@@ -124,23 +125,61 @@ class HardcoverSource(BaseSource):
         self._client = None  # Next client access will trigger _get_client()
 
     async def _query(self, query: str, variables: dict = None) -> dict:
+        """POST a GraphQL query with retry on transient failures.
+
+        Before Phase 3a this was a single-shot request — one transient 5xx
+        or a momentary connection reset would skip the entire author scan
+        silently. Goodreads (via BaseSource) retries; Hardcover didn't.
+        This retries up to 3 times with a 2s → 4s backoff on:
+          - httpx.TransportError (network-layer failures, connection reset)
+          - httpx.ReadTimeout / WriteTimeout / ConnectTimeout
+          - HTTP 5xx responses (server-side errors)
+        GraphQL-level errors (HTTP 200 + "errors" key) are NOT retried —
+        those usually mean the query is bad, which won't fix itself. Same
+        for 4xx (auth/bad request) — retrying won't help and would waste
+        the user's rate budget.
+        """
         if not self.api_key:
             return {}
         payload = {"query": query}
         if variables:
             payload["variables"] = variables
-        try:
-            resp = await self.client.post(API, json=payload)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Hardcover HTTP {e.response.status_code}: {e}")
-            return {}
-        data = resp.json()
-        if "errors" in data:
-            msgs = [e.get("message", "?") for e in data["errors"]]
-            logger.warning(f"Hardcover GraphQL errors: {msgs}")
-            return {}
-        return data.get("data", {})
+
+        last_err = None
+        for attempt in range(3):
+            try:
+                resp = await self.client.post(API, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                if "errors" in data:
+                    msgs = [e.get("message", "?") for e in data["errors"]]
+                    logger.warning(f"Hardcover GraphQL errors: {msgs}")
+                    return {}
+                return data.get("data", {})
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                last_err = e
+                if status >= 500 and attempt < 2:
+                    delay = 2.0 * (attempt + 1)
+                    logger.warning(f"Hardcover HTTP {status} — retry {attempt+1}/2 in {delay}s")
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error(f"Hardcover HTTP {status}: {e}")
+                return {}
+            except (httpx.TransportError, httpx.TimeoutException) as e:
+                last_err = e
+                if attempt < 2:
+                    delay = 2.0 * (attempt + 1)
+                    logger.warning(f"Hardcover transport error ({type(e).__name__}) — retry {attempt+1}/2 in {delay}s")
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error(f"Hardcover transport error after 3 attempts: {type(e).__name__}: {e}")
+                return {}
+        # Unreachable in practice (loop either returns or logs+returns), but
+        # keep as a guard so the function always returns a dict.
+        if last_err:
+            logger.error(f"Hardcover query exhausted retries: {last_err}")
+        return {}
 
     async def search_author(self, author_name: str, owned_titles: list = None) -> Optional[AuthorResult]:
         """Search for author by searching their known books, then finding all books by same author."""
@@ -304,14 +343,60 @@ class HardcoverSource(BaseSource):
                     cover = cached_img.get("url")
                 elif cached_img and isinstance(cached_img, str):
                     cover = cached_img
-                
+
+                # Language: code3 is an ISO 639-2 3-letter code (e.g. "eng").
+                # Map "eng"/"en" → "English" so downstream _lang_ok() and
+                # UI display work consistently with the other sources (which
+                # emit the human-readable form). Leave others as the raw code
+                # so multi-language users can filter meaningfully.
+                lang_obj = edition.get("language") or {}
+                lang_code = (lang_obj.get("code3") if isinstance(lang_obj, dict) else "") or ""
+                if lang_code.lower() in ("eng", "en"):
+                    lang_name = "English"
+                else:
+                    lang_name = lang_code or None
+
+                # Pages — Hardcover editions.pages is a nullable int. Coerce
+                # defensively because GraphQL Int can come back as a string
+                # for very large values in some client paths.
+                pages_raw = edition.get("pages")
+                page_count = None
+                if pages_raw is not None:
+                    try:
+                        page_count = int(pages_raw)
+                    except (ValueError, TypeError):
+                        page_count = None
+
+                # Unreleased detection: compare release_date to today. If
+                # it's in the future, the book is upcoming, so move the date
+                # to expected_date and clear pub_date (matching the exact
+                # pattern Goodreads uses at goodreads.py:122-126). This is
+                # what makes Upcoming-tab entries appear from Hardcover.
+                release_date = edition.get("release_date")
+                pub_date = release_date
+                expected_date = None
+                is_unreleased = False
+                if release_date:
+                    try:
+                        from datetime import datetime
+                        if datetime.strptime(release_date[:10], "%Y-%m-%d") > datetime.now():
+                            is_unreleased = True
+                            expected_date = release_date
+                            pub_date = None
+                    except (ValueError, TypeError):
+                        pass  # unparseable date — leave as-is, let lookup.py handle
+
                 slug = book.get("slug", "")
                 br = BookResult(
                     title=book.get("title", ""),
                     isbn=edition.get("isbn_13"),
                     cover_url=cover,
-                    pub_date=edition.get("release_date"),
+                    pub_date=pub_date,
+                    expected_date=expected_date,
+                    is_unreleased=is_unreleased,
                     description=book.get("description"),
+                    page_count=page_count,
+                    language=lang_name,
                     external_id=str(book.get("id")),
                     source="hardcover",
                     source_url=f"https://hardcover.app/books/{slug}" if slug else None,
@@ -379,6 +464,23 @@ class HardcoverSource(BaseSource):
             logger.error(f"Hardcover error for '{author_name}': {e}")
             return None
 
-    async def get_author_books(self, author_id: str) -> Optional[AuthorResult]:
-        """For Hardcover, search_author already returns full results."""
-        return None  # Already handled in search_author
+    async def get_author_books(self, author_id: str, **kw) -> Optional[AuthorResult]:
+        """No-op override: Hardcover's search_author() already returns a
+        fully-populated AuthorResult (books + series + metadata) in one
+        GraphQL round-trip, so lookup.py's two-phase
+        search_author → get_author_books flow collapses into phase 1.
+
+        lookup.py `_try_source()` checks `has_data = len(found.books) > 0 or
+        len(found.series) > 0` and takes the fast path when true, which is
+        always the case for Hardcover. This stub exists only to satisfy
+        the BaseSource contract — removing it would raise NotImplementedError
+        if the code ever reaches the slow path (e.g. for an author whose
+        search returned an external_id but zero books). Returning None
+        here degrades gracefully: the caller logs "No books returned" and
+        moves to the next source in the priority chain.
+
+        The `**kw` accepts lookup.py's `existing_titles`/`owned_titles`
+        kwargs without blowing up — the try/except TypeError fallback in
+        `_try_source` is therefore never triggered for Hardcover.
+        """
+        return None

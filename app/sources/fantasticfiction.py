@@ -8,6 +8,31 @@ from typing import Optional
 from lxml import html
 from app.sources.base import BaseSource, AuthorResult, BookResult, SeriesResult
 
+# Series-index extraction patterns. FantasticFiction lists books inside a
+# series section in several formats over the years; we try all of them and
+# take the first hit. Each pattern captures a float (supports "1.5" for
+# novella entries like "Book 2.5 of Series").
+#
+#   "Title (Series Name, book 3)"      → pattern 1
+#   "Title (#3)"                        → pattern 1
+#   "3. Title"                          → pattern 2 (leading ordinal)
+#   "Title — Book 3"                    → pattern 3 (em-dash separated)
+_RX_FF_IDX_PAREN = re.compile(r'\((?:[^)]*?,\s*)?(?:book|#)\s*(\d+(?:\.\d+)?)\s*\)', re.IGNORECASE)
+_RX_FF_IDX_LEAD  = re.compile(r'^\s*(\d+(?:\.\d+)?)[\.)]\s+')
+_RX_FF_IDX_DASH  = re.compile(r'[—\-–]\s*book\s*(\d+(?:\.\d+)?)\s*$', re.IGNORECASE)
+
+
+def _extract_ff_series_index(raw_text: str) -> Optional[float]:
+    """Try each of the known FF index patterns on `raw_text`; return float or None."""
+    for rx in (_RX_FF_IDX_PAREN, _RX_FF_IDX_LEAD, _RX_FF_IDX_DASH):
+        m = rx.search(raw_text)
+        if m:
+            try:
+                return float(m.group(1))
+            except (ValueError, TypeError):
+                continue
+    return None
+
 logger = logging.getLogger("athenascout.fantasticfiction")
 BASE = "https://www.fantasticfiction.com"
 
@@ -124,7 +149,6 @@ class FantasticFictionSource(BaseSource):
             for el in page.xpath("//*"):
                 tag = el.tag
                 cls = el.get("class", "")
-                text = el.text_content().strip() if el.text else ""
 
                 # Detect series headings
                 if tag in ("h3", "h2") or "sectionheading" in cls:
@@ -150,10 +174,31 @@ class FantasticFictionSource(BaseSource):
                         if yt and re.match(r'\d{4}$', yt):
                             pub_date = f"{yt}-01-01"
 
+                    # Series index extraction. FantasticFiction is a
+                    # series-tracking site by design — it's the strongest
+                    # source for "which book in the series is this?", but
+                    # the pre-Phase-3a code never parsed the index at all.
+                    # We look at the link text itself and the parent element
+                    # text (which often includes "(Series, book 3)" suffixes
+                    # that aren't part of the link) and take the first match
+                    # from any of the known FF patterns.
+                    #
+                    # Left None on miss — the merge logic in lookup.py will
+                    # accept None and leave series_index null; a higher-
+                    # priority source can fill it in later.
+                    series_index = _extract_ff_series_index(title)
+                    if series_index is None:
+                        parent = el.getparent()
+                        if parent is not None:
+                            ptext = parent.text_content().strip()
+                            if ptext and ptext != title:
+                                series_index = _extract_ff_series_index(ptext)
+
                     ext_id = re.search(r'/([^/]+)\.htm$', href)
                     ff_url = f"https://www.fantasticfiction.com{href}" if href and not href.startswith("http") else href
                     br = BookResult(
                         title=title, pub_date=pub_date,
+                        series_index=series_index,
                         external_id=ext_id.group(1) if ext_id else None,
                         source="fantasticfiction", language="English",
                         source_url=ff_url,
@@ -168,7 +213,19 @@ class FantasticFictionSource(BaseSource):
                         books.append(br)
 
             total = len(books) + sum(len(s.books) for s in series_map.values())
-            logger.info(f"  FantasticFiction: found {total} books for '{author_name}'")
+            if total == 0:
+                # Author page loaded successfully (>1000 bytes, no CF
+                # challenge) but our XPath extraction produced nothing.
+                # Almost always means FF changed their markup or the page
+                # uses a different structure than the one the scraper
+                # recognizes — log the size so the user can compare to
+                # a known-good scan.
+                logger.warning(
+                    f"  FantasticFiction: loaded /{author_path}/ ({len(page_html)} bytes) "
+                    f"but parsed 0 books — FF may have changed their HTML structure"
+                )
+            else:
+                logger.info(f"  FantasticFiction: found {total} books for '{author_name}'")
 
             return AuthorResult(
                 name=author_name, external_id=author_path,
