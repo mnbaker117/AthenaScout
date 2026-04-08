@@ -27,6 +27,15 @@ _RX_PARENS = re.compile(r'\s*\([^)]*\)\s*')
 _RX_SUBTITLE = re.compile(r'\s*:.*$')
 _RX_NONWORD = re.compile(r'[^\w\s]')
 _RX_SPACES = re.compile(r'\s+')
+# Word-joining punctuation that needs to become a SPACE before _RX_NONWORD
+# strips it. Without this, "The Dragon's Path/Leviathan Wakes" normalized
+# to "dragons pathleviathan wakes" (no space between "path" and "leviathan"
+# because the slash got eaten as a non-word char), which then matched
+# "leviathan wakes" via substring containment — a false positive that
+# linked "Leviathan Wakes" to a Daniel Abraham anthology containing an
+# ARC of it. Slashes, ampersands, and explicit ' and ' are the typical
+# joiners between bound-edition titles.
+_RX_TITLE_JOINERS = re.compile(r'\s*[/&+]\s*')
 _RX_FOREIGN_ACCENTS = re.compile(
     r'[àáâãäåæçèéêëìíîïðñòóôõöùúûüýþÿąćęłńóśźżšžřůďťňĺľŕäöüß]',
     re.I,
@@ -71,6 +80,7 @@ def _normalize(t: str) -> str:
     t = _RX_LEADING_ARTICLE.sub('', t)
     t = _RX_PARENS.sub(' ', t)  # Remove parenthetical
     t = _RX_SUBTITLE.sub('', t)  # Remove subtitle after colon
+    t = _RX_TITLE_JOINERS.sub(' ', t)  # "/" "&" "+" between titles → space
     t = _RX_NONWORD.sub('', t)
     t = _RX_SPACES.sub(' ', t)
     return t.strip()
@@ -85,19 +95,58 @@ def _normalize_light(t: str) -> str:
 
 
 def _fuzzy_match(a: str, b: str) -> bool:
-    """Relaxed title matching using normalization + sequence matching."""
+    """Relaxed title matching using normalization + sequence matching.
+
+    Substring-containment branches require a length ratio of at least
+    0.75 — the shorter title must be ≥75% of the longer. Without this
+    guard, three documented false positives slipped through:
+
+      - "Leviathan Wakes" (15) vs "Dragons Path Leviathan Wakes" (28),
+        ratio 0.54 — a Daniel Abraham anthology containing an ARC of
+        the Corey book. Wrongly linked the user's Corey book to the
+        Abraham anthology page on Goodreads.
+      - "Pride and Prejudice" (19) vs "Pride and Prejudice and Zombies"
+        (31), ratio 0.61 — a parody is a different book.
+      - "Foundation" (10) vs "Foundation Trilogy" (18), ratio 0.55 —
+        an omnibus is a different cataloged work.
+
+    Legitimate matches almost always go through the exact-normalized
+    path (the prefilter dict in _merge_result), so the substring branch
+    is a tiebreaker for cases like "Title: Subtitle" where the user's
+    Calibre has the bare title. 0.75 is the same threshold the
+    SequenceMatcher branch already uses, which keeps the two paths in
+    sync. The trade-off: very-short-title vs very-long-extended-subtitle
+    cases ("Foo" vs "Foo, A Tale of Bar and Baz") won't auto-link via
+    substring; they'd need either exact normalization (which usually
+    works thanks to subtitle stripping) or manual linking.
+    """
+    def _len_ratio_ok(short_len: int, long_len: int) -> bool:
+        if long_len == 0:
+            return False
+        return (short_len / long_len) >= 0.75
+
     na, nb = _normalize(a), _normalize(b)
     if na == nb: return True
-    if na in nb or nb in na: return True
+    if na in nb and _len_ratio_ok(len(na), len(nb)): return True
+    if nb in na and _len_ratio_ok(len(nb), len(na)): return True
     # Also check with light normalization (keeps subtitles)
     la, lb = _normalize_light(a), _normalize_light(b)
     if la == lb: return True
-    if la in lb or lb in la: return True
-    # Fuzzy ratio check for close matches (try both normalizations)
+    if la in lb and _len_ratio_ok(len(la), len(lb)): return True
+    if lb in la and _len_ratio_ok(len(lb), len(la)): return True
+    # Fuzzy ratio check for close matches (try both normalizations).
+    # Threshold bumped from 0.75 → 0.85 in Phase 3a follow-up because
+    # 0.75 was admitting "Pride and Prejudice" matching "Pride and
+    # Prejudice and Zombies" (SequenceMatcher ratio 0.76 — a parody is
+    # not the same book). 0.85 still catches genuine close-matches like
+    # spelling variants ("Colour" vs "Color", ratio 0.91), light typos,
+    # and minor punctuation differences. Anything below 0.85 should
+    # either go through the exact-normalized path or be treated as a
+    # different book.
     if len(na) > 3 and len(nb) > 3:
-        if SequenceMatcher(None, na, nb).ratio() > 0.75: return True
+        if SequenceMatcher(None, na, nb).ratio() > 0.85: return True
     if len(la) > 3 and len(lb) > 3:
-        if SequenceMatcher(None, la, lb).ratio() > 0.75: return True
+        if SequenceMatcher(None, la, lb).ratio() > 0.85: return True
     return False
 
 
@@ -139,11 +188,30 @@ _SET_PATTERNS = re.compile(
     r'volumes?\s+\d+\s*[-–]\s*\d+|'
     r'\d+\s+books?\s+collection|roleplaying\s+game)\b'
 )
+# Bound-edition / anthology detector. A title like "The Dragon's Path /
+# Leviathan Wakes" is two distinct books pressed into one publishing
+# event (often an Advance Reading Copy giveaway or a publisher promo
+# pack). Source scanners return these as single books, and the fuzzy
+# matcher used to false-positive them onto the user's owned book of
+# the same name.
+#
+# We ONLY match `/` as the joiner — not `&`, `+`, or ` and `. Those
+# all appear in legitimate single-book titles ("Pride and Prejudice",
+# "War and Peace", "Beauty & the Beast", "Foundation and Empire"),
+# and rejecting them would skip thousands of real books. Forward-slash
+# is the only marker that is essentially never used in a real title.
+# It must have non-space chars on BOTH sides so we don't trip on
+# stray punctuation, and we tolerate optional whitespace around it.
+_RX_ANTHOLOGY = re.compile(r'\S\s*/\s*\S')
 
 
 def _is_book_set(title: str) -> bool:
     """Check if a title looks like a book set/collection rather than an individual book."""
-    return bool(_SET_PATTERNS.search(title))
+    if _SET_PATTERNS.search(title):
+        return True
+    if _RX_ANTHOLOGY.search(title):
+        return True
+    return False
 
 
 async def _validate_author(author_name: str, our_titles: list[str], result: AuthorResult) -> bool:
@@ -183,7 +251,17 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         up.append("last_lookup_at = ?"); pr.append(time.time()); pr.append(author_id)
         if up: await db.execute(f"UPDATE authors SET {', '.join(up)} WHERE id = ?", pr)
 
-        rows = await (await db.execute("SELECT id, title, source_url, series_id, series_index, source FROM books WHERE author_id = ?", (author_id,))).fetchall()
+        # SELECT includes pub_date, description, expected_date so the
+        # owned-book metadata logic in _update_existing can compare against
+        # what's currently stored without a second round-trip per book.
+        # The smart-description and oldest-pub_date rules need to read the
+        # current value to decide whether to overwrite.
+        rows = await (await db.execute(
+            "SELECT id, title, source_url, series_id, series_index, source, "
+            "pub_date, expected_date, description "
+            "FROM books WHERE author_id = ?",
+            (author_id,)
+        )).fetchall()
         existing = {_normalize(r["title"]) for r in rows}
         # Build an O(1) prefilter: normalized-title → row. The book-merge
         # loops below used to linearly scan all `rows` for each incoming
@@ -199,9 +277,61 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "fantasticfiction": 4, "manual": 5, "import": 5, "calibre": 0}
         
         def _update_existing(matched_row, bk, series_id=None):
-            """Build UPDATE for an existing book — URL merge always, series with priority, metadata in full_scan."""
+            """Build UPDATE for an existing book — URL merge always, series with priority, metadata in full_scan.
+
+            Calibre source-of-truth protection (Phase 3a follow-up):
+            owned-Calibre books treat each metadata field with a tailored
+            rule rather than a blanket lock. The current rules:
+
+              cover_url        : LOCKED (Calibre cover_path is authoritative)
+              title            : LOCKED (structural — never updated by sources)
+              author_id        : LOCKED (structural — never updated by sources)
+              description      : SMART (see below)
+              pub_date         : OLDEST WINS (see below)
+              expected_date    : COALESCE-fill (only if Calibre left it null)
+              page_count       : COALESCE-fill (only if Calibre left it null)
+              isbn             : COALESCE-fill (only if Calibre left it null)
+              is_unreleased    : LOCKED (almost always False for owned books)
+              series_id/index  : priority-gated (calibre=0 always wins)
+              source_url       : merged into JSON dict (additive, never destructive)
+              {source}_id      : COALESCE-fill
+
+            DESCRIPTION (smart stub-detection):
+              Calibre imports of older books often have "stub" descriptions —
+              one-sentence blurbs from a metadata source that didn't have a
+              good summary at the time. The rule is:
+                - If existing is null/empty → fill from source.
+                - If existing is < 10 words AND new is at least 3x longer
+                  in word count → overwrite (the source has a real summary).
+                - Otherwise → leave existing alone.
+              Threshold is conservative on purpose: a 9-word Calibre stub
+              upgrading to a 27-word source description is a clear win;
+              we don't want to thrash a 9-word user-curated description
+              into a 12-word source description because that's not a real
+              improvement.
+
+            PUB_DATE (oldest wins):
+              Calibre often has edition-specific dates (a 2015 paperback
+              reprint of a 1965 novel). Source scans should be allowed to
+              correct that DOWNWARD to the original publication date, but
+              never UPWARD (a more-recent edition shouldn't displace the
+              original). Rule: if the source's pub_date is strictly older
+              (lexicographic compare on ISO YYYY-MM-DD strings, which works
+              correctly for dates) than the existing pub_date, overwrite.
+              Iterates correctly across multiple sources because each one
+              compares against the current value.
+
+            For unowned/missing/discovered books (`source != 'calibre'`),
+            none of this applies — the source IS the authority for those
+            rows, so the existing full-overwrite behavior continues.
+            """
             nonlocal updated_books
             sets = []; vals = []
+
+            try: existing_source = matched_row["source"]
+            except (IndexError, KeyError): existing_source = ""
+            is_owned_calibre = (existing_source == "calibre")
+
             if bk.source_url:
                 merged = _merge_source_urls(matched_row["source_url"], source_name, bk.source_url)
                 sets.append("source_url=?"); vals.append(merged)
@@ -209,8 +339,6 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             # Series update: fill if empty, or overwrite if current source has higher priority
             if series_id:
                 existing_series = matched_row["series_id"]
-                try: existing_source = matched_row["source"]
-                except (IndexError, KeyError): existing_source = ""
                 cur_priority = SOURCE_PRIORITY.get(source_name, 5)
                 existing_priority = SOURCE_PRIORITY.get(existing_source or "", 5)
                 if not existing_series or (cur_priority < existing_priority and existing_series != series_id):
@@ -219,15 +347,57 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                     logger.debug(f"    MERGE SERIES: '{bk.title}' (id={matched_row['id']}) → series_id={series_id} #{bk.series_index} (source={source_name}, was={existing_source})")
             if full_scan:
                 fields_updated = []
-                if bk.description: sets.append("description=?"); vals.append(bk.description); fields_updated.append("description")
-                if bk.pub_date: sets.append("pub_date=?"); vals.append(bk.pub_date); fields_updated.append("pub_date")
-                if bk.expected_date: sets.append("expected_date=?"); vals.append(bk.expected_date); fields_updated.append("expected_date")
-                if bk.cover_url: sets.append("cover_url=COALESCE(cover_url,?)"); vals.append(bk.cover_url); fields_updated.append("cover_url")
-                if bk.page_count: sets.append("page_count=COALESCE(page_count,?)"); vals.append(bk.page_count); fields_updated.append("page_count")
-                if bk.isbn: sets.append("isbn=COALESCE(isbn,?)"); vals.append(bk.isbn); fields_updated.append("isbn")
-                if bk.is_unreleased is not None: sets.append("is_unreleased=?"); vals.append(1 if bk.is_unreleased else 0)
-                updated_books += 1
-                logger.debug(f"    MERGE UPDATE: '{bk.title}' (id={matched_row['id']}) fields=[{','.join(fields_updated)}]")
+                if is_owned_calibre:
+                    # ── Owned-Calibre book: per-field rules ──
+
+                    # Description: smart stub-detection
+                    if bk.description:
+                        existing_desc = (matched_row["description"] or "").strip() if "description" in matched_row.keys() else ""
+                        existing_words = len(existing_desc.split()) if existing_desc else 0
+                        new_words = len(bk.description.split())
+                        # Fill if Calibre is empty, OR if Calibre is a stub
+                        # (<10 words) AND new is at least 3x longer.
+                        if existing_words == 0:
+                            sets.append("description=?"); vals.append(bk.description); fields_updated.append("description(filled)")
+                        elif existing_words < 10 and new_words >= existing_words * 3:
+                            sets.append("description=?"); vals.append(bk.description); fields_updated.append(f"description(stub→{new_words}w)")
+
+                    # pub_date: oldest wins (lexicographic compare on ISO dates)
+                    if bk.pub_date:
+                        existing_pub = matched_row["pub_date"] if "pub_date" in matched_row.keys() else None
+                        if not existing_pub:
+                            sets.append("pub_date=?"); vals.append(bk.pub_date); fields_updated.append("pub_date(filled)")
+                        elif bk.pub_date < existing_pub:
+                            sets.append("pub_date=?"); vals.append(bk.pub_date); fields_updated.append(f"pub_date({existing_pub}→{bk.pub_date})")
+
+                    # expected_date: COALESCE-fill only
+                    if bk.expected_date:
+                        existing_exp = matched_row["expected_date"] if "expected_date" in matched_row.keys() else None
+                        if not existing_exp:
+                            sets.append("expected_date=?"); vals.append(bk.expected_date); fields_updated.append("expected_date(filled)")
+
+                    # page_count + isbn: COALESCE-fill (unchanged from Issue 2a v1)
+                    if bk.page_count: sets.append("page_count=COALESCE(page_count,?)"); vals.append(bk.page_count); fields_updated.append("page_count")
+                    if bk.isbn: sets.append("isbn=COALESCE(isbn,?)"); vals.append(bk.isbn); fields_updated.append("isbn")
+
+                    if fields_updated:
+                        updated_books += 1
+                        logger.debug(f"    MERGE UPDATE (owned): '{bk.title}' (id={matched_row['id']}) fields=[{','.join(fields_updated)}]")
+                    else:
+                        logger.debug(f"    MERGE NOOP (owned, all rules satisfied): '{bk.title}' (id={matched_row['id']})")
+                else:
+                    # Unowned / missing / discovered book: full overwrite
+                    # behavior. No user data to protect — the source IS the
+                    # authority for these rows.
+                    if bk.description: sets.append("description=?"); vals.append(bk.description); fields_updated.append("description")
+                    if bk.pub_date: sets.append("pub_date=?"); vals.append(bk.pub_date); fields_updated.append("pub_date")
+                    if bk.expected_date: sets.append("expected_date=?"); vals.append(bk.expected_date); fields_updated.append("expected_date")
+                    if bk.cover_url: sets.append("cover_url=COALESCE(cover_url,?)"); vals.append(bk.cover_url); fields_updated.append("cover_url")
+                    if bk.page_count: sets.append("page_count=COALESCE(page_count,?)"); vals.append(bk.page_count); fields_updated.append("page_count")
+                    if bk.isbn: sets.append("isbn=COALESCE(isbn,?)"); vals.append(bk.isbn); fields_updated.append("isbn")
+                    if bk.is_unreleased is not None: sets.append("is_unreleased=?"); vals.append(1 if bk.is_unreleased else 0)
+                    updated_books += 1
+                    logger.debug(f"    MERGE UPDATE: '{bk.title}' (id={matched_row['id']}) fields=[{','.join(fields_updated)}]")
             else:
                 logger.debug(f"    MERGE URL: '{bk.title}' (id={matched_row['id']}) ← {source_name}")
             vals.append(matched_row["id"])

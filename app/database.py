@@ -85,12 +85,22 @@ def match_legacy_db_to_library(libraries):
 
     _db_logger.info(f"Legacy DB has {legacy_count} Calibre-sourced books")
 
-    # Count books in each Calibre metadata.db
+    # Count books in each Calibre metadata.db. Phase 20A renamed the
+    # discovered-library dict field from `calibre_db_path` to the
+    # library-agnostic `source_db_path` (see library_apps/base.py:130);
+    # this function was missed in that rename and was raising KeyError on
+    # every library, then logging a misleading "Could not read Calibre DB"
+    # warning while silently falling back to the first library by slug
+    # ordering. Fixed in Phase 3a follow-up.
     best_slug = libraries[0]["slug"]
     best_diff = float("inf")
     for lib in libraries:
+        db_path = lib.get("source_db_path") or lib.get("calibre_db_path")  # legacy key for backwards compat
+        if not db_path:
+            _db_logger.warning(f"  Library '{lib['name']}' has no source_db_path — skipping legacy-DB matching")
+            continue
         try:
-            conn = sqlite3.connect(f"file:{lib['calibre_db_path']}?mode=ro", uri=True)
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             cal_count = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
             conn.close()
             diff = abs(legacy_count - cal_count)
@@ -99,7 +109,7 @@ def match_legacy_db_to_library(libraries):
                 best_diff = diff
                 best_slug = lib["slug"]
         except Exception as e:
-            _db_logger.warning(f"  Could not read Calibre DB for '{lib['name']}': {e}")
+            _db_logger.warning(f"  Could not read Calibre DB for '{lib['name']}' at {db_path}: {e}")
 
     _db_logger.info(f"Best match for legacy DB: '{best_slug}'")
     return best_slug

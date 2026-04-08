@@ -113,12 +113,16 @@ class BaseSource:
         """Convenience accessor for the HTTP client (lazy-initialized on first use)."""
         return self._get_client()
 
-    async def _get(self, url: str, retries: int = 1, **kwargs) -> httpx.Response:
-        """HTTP GET with rate limiting and retry logic.
+    async def _get(self, url: str, retries: int = 2, **kwargs) -> httpx.Response:
+        """HTTP GET with rate limiting and retry logic with exponential backoff.
 
-        Waits `rate_limit` seconds before each attempt, then retries up to
-        `retries` times on failure with a 3-second backoff between retries.
-        Raises the final exception if all retries fail.
+        Waits `rate_limit` seconds before each attempt. On failure, retries
+        up to `retries` times with exponentially increasing backoff:
+        3s, 6s, 12s, capped at 12s. The exponential schedule helps clear
+        Goodreads' rate-limit window (~6s recovery) which a fixed 3s flat
+        backoff was missing — Phase 3a-followup raised the default from 1
+        to 2 retries (3 total attempts) after a James S. A. Corey full-scan
+        showed 4 of 9 503-affected books being silently skipped.
 
         Subclasses with custom request patterns (POST, GraphQL, etc.) can
         either call this with their own URL construction or implement their
@@ -127,6 +131,7 @@ class BaseSource:
         Args:
             url: Full URL to fetch
             retries: Number of retry attempts after the initial request
+                     (default 2 → 3 total attempts)
             **kwargs: Additional arguments passed to httpx.AsyncClient.get()
                      (e.g., params, headers for per-request overrides)
 
@@ -134,7 +139,9 @@ class BaseSource:
             The httpx.Response object on success
 
         Raises:
-            Whatever httpx raises on the final failed attempt
+            Whatever httpx raises on the final failed attempt — and emits
+            a logger.warning so silent skips become visible in container
+            logs without needing verbose mode.
         """
         for attempt in range(retries + 1):
             try:
@@ -144,9 +151,18 @@ class BaseSource:
                 return resp
             except Exception as e:
                 if attempt < retries:
-                    self.logger.debug(f"  {self.name}: retry {attempt+1} for {url}: {e}")
-                    await asyncio.sleep(3)
+                    backoff = min(3 * (2 ** attempt), 12)  # 3, 6, 12, 12, ...
+                    self.logger.debug(
+                        f"  {self.name}: attempt {attempt+1}/{retries+1} failed for {url}: {e} "
+                        f"— retrying in {backoff}s"
+                    )
+                    await asyncio.sleep(backoff)
                     continue
+                # Surface terminal failure as a WARNING instead of letting
+                # it disappear silently. Caller still gets the exception.
+                self.logger.warning(
+                    f"  {self.name}: GIVING UP on {url} after {retries+1} attempts: {e}"
+                )
                 raise
 
     async def close(self):
