@@ -53,6 +53,29 @@ LANGUAGE_OPTIONS = [
     "Vietnamese", "Welsh",
 ]
 
+# ─── DEFAULT_SETTINGS — the canonical source of truth for every setting ──
+#
+# load_settings() always merges saved settings into DEFAULT_SETTINGS via
+# `{**DEFAULT_SETTINGS, **saved}`, which means any key present here is
+# guaranteed to exist on every dict returned by load_settings(). In other
+# words, `s.get("foo", fallback)` at a call site NEVER uses `fallback` —
+# the key is always there. The inline fallbacks scattered around the
+# routers (`s.get("rate_mam", 2)`, `s.get("languages", ["English"])`, etc)
+# are defensive redundancy, not drift protection.
+#
+# INVARIANT: when adding a new setting, add it here FIRST, then reference
+# it from routers. The fallback in the inline `.get()` MUST equal the
+# value here. A linter could enforce this, but a grep audit during code
+# review is cheaper; run:
+#
+#   grep -rn '\.get("foo"' app/   # replace foo with the new key
+#
+# and spot-check that every hit's fallback matches this dict. All 20+
+# inline defaults were audited during Batch D and currently match.
+#
+# DO NOT add a setting that has a different default in DEFAULT_SETTINGS
+# vs. an inline `.get()` fallback — they will silently diverge on first
+# run for users who have an old settings.json missing the new key.
 DEFAULT_SETTINGS = {
     "hardcover_api_key": "",
     "fantasticfiction_enabled": False,

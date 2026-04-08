@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useTheme } from "../theme";
 import { api } from "../api";
 import { Ic } from "../icons";
@@ -33,11 +33,27 @@ const clearData=async(type)=>{const labels={source:"source scan",mam:"MAM scan",
 const scanMam=async()=>{if(!confirm(`Run a MAM scan against ${sel.size} selected book(s)? This will re-scan even already-scanned books.`))return;setBusy(true);try{const r=await api.post("/books/scan-mam",{book_ids:[...sel]});if(r.error){alert(`MAM scan failed: ${r.error}`)}else{alert(`MAM scan complete: ${r.scanned||0} scanned, ${r.found||0} found, ${r.possible||0} possible, ${r.not_found||0} not on MAM`+(r.errors?`, ${r.errors} errors`:""));setSel(new Set());setSelMode(false);load(pg)}}catch(e){alert(`MAM scan failed: ${e.message||e}`)}setBusy(false)};
 const scanSources=async()=>{if(!confirm(`Run a source-plugin scan for the unique authors of ${sel.size} selected book(s)?\n\nNote: source plugins look up by author, so this will scan the WHOLE author for each unique author in your selection — not just the selected books.`))return;setBusy(true);try{const r=await api.post("/books/scan-sources",{book_ids:[...sel]});if(r.error){alert(`Source scan failed: ${r.error}`)}else{alert(`Source scan complete: ${r.authors_scanned||0} author(s) scanned, ${r.new_books||0} new books found`+(r.errors?`, ${r.errors} errors`:""));setSel(new Set());setSelMode(false);load(pg)}}catch(e){alert(`Source scan failed: ${e.message||e}`)}setBusy(false)};
 
-// Group books
+// Memoize the expensive grouping+sort pass. The JSX on the outside is
+// cheap and re-runs every render; what's costly is the forEach bucketing
+// + Object.entries + localeCompare sort on thousands of books, which
+// would otherwise re-run on every keystroke during search, theme change,
+// etc. Scoping deps to [bks, grp] means grouping only recomputes when
+// the book list or grouping mode actually change.
+const groupedEntries=useMemo(()=>{
+  if(grp==="author"&&bks.length>0){
+    const g={};bks.forEach(b=>{const k=b.author_name||"Unknown";if(!g[k])g[k]=[];g[k].push(b)});
+    return Object.entries(g).sort(([a],[b])=>a.localeCompare(b));
+  }
+  if(grp==="series"&&bks.length>0){
+    const g={};bks.forEach(b=>{const k=b.series_name||"Standalone";if(!g[k])g[k]=[];g[k].push(b)});
+    return Object.entries(g).sort(([a],[b])=>a==="Standalone"?1:b==="Standalone"?-1:a.localeCompare(b));
+  }
+  return null;
+},[bks,grp]);
 let content;
 const viewProps={selMode,sel,onToggleSel:toggleSel};
-if(grp==="author"&&bks.length>0){const groups={};bks.forEach(b=>{const k=b.author_name||"Unknown";if(!groups[k])groups[k]=[];groups[k].push(b)});content=Object.entries(groups).sort(([a],[b])=>a.localeCompare(b)).map(([name,books])=><Section key={name} title={name} count={books.length} defaultOpen={!allCollapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={false} {...viewProps}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} {...viewProps}/>}</Section>)}
-else if(grp==="series"&&bks.length>0){const groups={};bks.forEach(b=>{const k=b.series_name||"Standalone";if(!groups[k])groups[k]=[];groups[k].push(b)});content=Object.entries(groups).sort(([a],[b])=>a==="Standalone"?1:b==="Standalone"?-1:a.localeCompare(b)).map(([name,books])=><Section key={name} title={name} count={books.length} defaultOpen={!allCollapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} {...viewProps}/>}</Section>)}
+if(grp==="author"&&groupedEntries){content=groupedEntries.map(([name,books])=><Section key={name} title={name} count={books.length} defaultOpen={!allCollapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={false} {...viewProps}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} {...viewProps}/>}</Section>)}
+else if(grp==="series"&&groupedEntries){content=groupedEntries.map(([name,books])=><Section key={name} title={name} count={books.length} defaultOpen={!allCollapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} {...viewProps}/>}</Section>)}
 else{content=vm==="list"?<BList books={bks} onAction={onAction} onBookClick={toggleSb} showAuthor={showAuthor} {...viewProps}/>:<BGrid books={bks} onAction={onAction} onBookClick={toggleSb} {...viewProps}/>}
 
 return<div style={{display:"flex",flexDirection:"column",gap:16}}>

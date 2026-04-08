@@ -54,6 +54,10 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
 
       - name: Set up Node.js 20
         uses: actions/setup-node@v5
@@ -73,6 +77,24 @@ jobs:
         run: |
           npm ci
           npm run build
+
+      # Report bundle size once (Linux only — same frontend dist is produced
+      # on every OS matrix job, reporting three times is noise). Emits a
+      # warning if the dist crosses 1 MB so accidental bundle bloat gets
+      # caught early instead of being discovered by users on slow links.
+      - name: Report frontend bundle size
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          SIZE_KB=$(du -sk frontend/dist | cut -f1)
+          echo "## Frontend bundle size" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`frontend/dist\`: **${SIZE_KB} KB**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          du -h frontend/dist/assets/*.js frontend/dist/assets/*.css 2>/dev/null | sort -h >> $GITHUB_STEP_SUMMARY || true
+          if [ "$SIZE_KB" -gt 1024 ]; then
+            echo "::warning::Frontend dist exceeds 1 MB (${SIZE_KB} KB) — investigate accidental bloat"
+          fi
 
       - name: Build executable with PyInstaller
         run: pyinstaller athenascout.spec --noconfirm

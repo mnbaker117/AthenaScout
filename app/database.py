@@ -175,6 +175,16 @@ CREATE TABLE IF NOT EXISTS books (
     mam_torrent_id TEXT,
     mam_has_multiple INTEGER NOT NULL DEFAULT 0,
     mam_my_snatched INTEGER NOT NULL DEFAULT 0,
+    -- source_url stores a JSON dict mapping source-plugin name to URL:
+    --   {"goodreads": "https://www.goodreads.com/book/show/123",
+    --    "hardcover": "https://hardcover.app/books/slug", ...}
+    -- It's JSON because a single book can be enriched by multiple sources
+    -- over time (each scan adds its own URL via _merge_source_urls in
+    -- lookup.py). The frontend parses it in BookSidebar.jsx and
+    -- BookViews.jsx and renders one badge per source. There is no
+    -- migration that validates/repairs corrupt JSON — all writes go
+    -- through json.dumps, so corruption would only arise from direct
+    -- SQL editing or a botched import/export round-trip.
     source_url TEXT,
     first_seen_at REAL NOT NULL DEFAULT (strftime('%s','now')),
     created_at REAL NOT NULL DEFAULT (strftime('%s','now')),

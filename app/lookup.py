@@ -185,6 +185,15 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
 
         rows = await (await db.execute("SELECT id, title, source_url, series_id, series_index, source FROM books WHERE author_id = ?", (author_id,))).fetchall()
         existing = {_normalize(r["title"]) for r in rows}
+        # Build an O(1) prefilter: normalized-title → row. The book-merge
+        # loops below used to linearly scan all `rows` for each incoming
+        # source book, which was O(n*m) — 200 owned × 200 source = 40k
+        # fuzzy-match calls per author. Most matches hit on exact
+        # normalized equality (the first check inside _fuzzy_match), so
+        # checking the dict first short-circuits the common case. The
+        # linear loop stays as the fallback for substring and sequence-
+        # matching cases the dict can't catch.
+        rows_by_norm = {_normalize(r["title"]): r for r in rows}
 
         # Source priority: Goodreads can overwrite series from any other source
         SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "fantasticfiction": 4, "manual": 5, "import": 5, "calibre": 0}
@@ -239,11 +248,12 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 if _is_series_ref_title(bk.title): continue
                 if "English" in languages and _looks_foreign(bk.title): continue
                 norm = _normalize(bk.title)
-                matched_row = None
-                for r in rows:
-                    if _fuzzy_match(bk.title, r["title"]):
-                        matched_row = r
-                        break
+                matched_row = rows_by_norm.get(norm)
+                if matched_row is None:
+                    for r in rows:
+                        if _fuzzy_match(bk.title, r["title"]):
+                            matched_row = r
+                            break
                 if matched_row:
                     sql, vals = _update_existing(matched_row, bk, series_id=sid)
                     await db.execute(sql, vals)
@@ -269,11 +279,12 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if _is_series_ref_title(bk.title): continue
             if "English" in languages and _looks_foreign(bk.title): continue
             norm = _normalize(bk.title)
-            matched_row = None
-            for r in rows:
-                if _fuzzy_match(bk.title, r["title"]):
-                    matched_row = r
-                    break
+            matched_row = rows_by_norm.get(norm)
+            if matched_row is None:
+                for r in rows:
+                    if _fuzzy_match(bk.title, r["title"]):
+                        matched_row = r
+                        break
             if matched_row:
                 sql, vals = _update_existing(matched_row, bk)
                 await db.execute(sql, vals)

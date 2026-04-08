@@ -43,7 +43,11 @@ const[activeLib,setActiveLib]=useState(()=>{try{return localStorage.getItem("cl_
 useEffect(()=>{if(!authState.authenticated)return;api.get("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{})},[authState.authenticated]);
 // Check if this is a first-run scenario (setup wizard needed). Skipped until authenticated.
 useEffect(()=>{if(!authState.authenticated)return;api.get("/platform").then(r=>setFirstRun(r.first_run===true)).catch(()=>setFirstRun(false))},[authState.authenticated]);
-useEffect(()=>{if(!authState.authenticated)return;api.get("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{})},[pg,authState.authenticated]); // null, "manual", "url", "choose"
+// MAM status is refetched on login and on explicit "athenascout:mam-state-changed"
+// events dispatched by SettingsPage when the user toggles MAM. It used to
+// refetch on every `pg` change (page nav) as a lazy refresh trigger, which
+// cost 1 API call per nav click. Event-driven is surgical and free.
+useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{});refresh();window.addEventListener("athenascout:mam-state-changed",refresh);return()=>window.removeEventListener("athenascout:mam-state-changed",refresh)},[authState.authenticated]);
   const theme=THEMES[tn]||THEMES.dark;
   const nav=(p,a=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
   useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);
