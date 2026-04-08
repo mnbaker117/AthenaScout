@@ -263,7 +263,7 @@ class KoboSource(BaseSource):
             logger.error(f"Kobo search error '{author_name}': {e}")
             return None
 
-    async def get_author_books(self, author_name: str, existing_titles: set = None, **kw) -> Optional[AuthorResult]:
+    async def get_author_books(self, author_name: str, existing_titles: set = None, owned_only: bool = False, **kw) -> Optional[AuthorResult]:
         # author_name arrives from search_author's external_id, which is
         # now the ORIGINAL user-provided name (Phase 3a) — not a slug that
         # would need lossy .title() reconstruction. Old param name was
@@ -275,6 +275,13 @@ class KoboSource(BaseSource):
         # title + cover. To keep scan time bounded, books that already
         # exist in the DB get a minimal BookResult (URL backfill only,
         # no detail fetch). Same pattern as goodreads.py.
+        #
+        # Post-3b refinement: in `owned_only` mode (Library-only source
+        # scans), books that don't match `existing_titles` would be
+        # silently dropped by _merge_result anyway. Skip the detail
+        # fetch for those — the Sanderson 3b-K1 verification scan spent
+        # ~3.4 minutes of its ~4.7-minute total fetching 68 detail pages
+        # whose results were ultimately discarded by the merge layer.
         if existing_titles is None:
             existing_titles = set()
         try:
@@ -421,7 +428,22 @@ class KoboSource(BaseSource):
 
             existing_norm = {_norm(t) for t in existing_titles}
             skipped_known = 0
+            skipped_unowned = 0
             enriched = 0
+            # Phase 3b post-3b: secondary ISBN dedupe. Kobo sometimes
+            # has multiple distinct kobo_id store listings for what is
+            # actually the same edition by ISBN (regional storefronts,
+            # admin duplicates, etc.). The Phase 3b-K1 Sanderson scan
+            # surfaced two such pairs: 'For Glory and Honor' and 'The
+            # Scarlet Circus', each fetched twice. The kobo_id-keyed
+            # raw-results dedupe at line ~370 can't catch these because
+            # the store IDs are genuinely different — only the ISBN
+            # reveals them as the same book. We can't avoid the wasted
+            # fetch (we need the detail page to learn the ISBN), but we
+            # can keep the duplicate out of the merge pass and the
+            # final book count.
+            seen_isbns = set()
+            dupe_isbns = 0
 
             for i, rb in enumerate(raw_books):
                 norm = _norm(rb["title"])
@@ -448,9 +470,37 @@ class KoboSource(BaseSource):
                     books.append(br)
                     continue
 
+                # owned_only optimization: in Library-only mode, books
+                # that don't match existing_titles will be dropped by
+                # _merge_result anyway (lookup.py:542,573). Skip the
+                # detail fetch entirely for those — saves ~3s per book
+                # at the rate limit, which dominates total scan time
+                # for prolific authors.
+                if owned_only:
+                    skipped_unowned += 1
+                    logger.debug(f"    SKIP-UNOWNED (library-only): '{rb['title']}'")
+                    continue
+
                 # Unknown book — visit the detail page for full metadata
                 details = await self._get_book_details(rb["kobo_url"])
                 enriched += 1
+
+                # ISBN dedupe (see seen_isbns comment above): if we've
+                # already created a BookResult for this ISBN, drop the
+                # second occurrence. The fetch is wasted (we needed the
+                # detail page to learn the ISBN), but the merge layer
+                # and final count stay clean.
+                isbn = details.get("isbn")
+                if isbn and isbn in seen_isbns:
+                    dupe_isbns += 1
+                    logger.debug(
+                        f"    DUPE-ISBN: '{rb['title']}' (isbn={isbn}) — "
+                        f"already seen, skipping BookResult"
+                    )
+                    continue
+                if isbn:
+                    seen_isbns.add(isbn)
+
                 logger.debug(
                     f"    DETAIL: '{rb['title']}' → series={details.get('series_name')}"
                     f"#{details.get('series_index')}, date={details.get('pub_date')},"
@@ -483,7 +533,9 @@ class KoboSource(BaseSource):
 
             logger.info(
                 f"  Kobo: found {len(books) + sum(len(s.books) for s in series_map.values())} "
-                f"books for '{author_name}' ({enriched} enriched, {skipped_known} URL-backfill)"
+                f"books for '{author_name}' ({enriched} enriched, {skipped_known} URL-backfill"
+                f"{f', {skipped_unowned} skipped (library-only)' if skipped_unowned else ''}"
+                f"{f', {dupe_isbns} ISBN-dupes dropped' if dupe_isbns else ''})"
             )
 
             return AuthorResult(

@@ -78,8 +78,11 @@ async def trigger_lookup():
     cutoff = time.time() - cache_sec
     db = await get_db()
     try:
+        # Match what run_full_lookup() actually iterates: skip orphan
+        # authors so the "due count" estimate isn't inflated by authors
+        # that the lookup loop will silently filter out.
         row = await (await db.execute(
-            "SELECT COUNT(*) c FROM authors WHERE COALESCE(last_lookup_at,0) < ?",
+            "SELECT COUNT(*) c FROM authors WHERE COALESCE(last_lookup_at,0) < ? AND id IN (SELECT DISTINCT author_id FROM books)",
             (cutoff,),
         )).fetchone()
         due_count = row["c"] if row else 0

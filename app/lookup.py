@@ -623,12 +623,23 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
             scan_existing = set() if full_scan else (existing_titles or set())
             try:
                 full = await source.get_author_books(
-                    found.external_id, 
+                    found.external_id,
                     existing_titles=scan_existing,
                     owned_titles=our_titles or [],
+                    owned_only=owned_only,
                 )
             except TypeError:
-                full = await source.get_author_books(found.external_id)
+                # Fallback: source has an older signature without owned_only.
+                # Behavior is unchanged (still slow on library-only scans for
+                # those sources) until they adopt the kwarg.
+                try:
+                    full = await source.get_author_books(
+                        found.external_id,
+                        existing_titles=scan_existing,
+                        owned_titles=our_titles or [],
+                    )
+                except TypeError:
+                    full = await source.get_author_books(found.external_id)
         
         if not full:
             logger.info(f"  [{source_name}] No books returned")
@@ -731,7 +742,11 @@ async def run_full_lookup(on_progress=None):
     try:
         cur = await db.execute("INSERT INTO sync_log (sync_type, started_at) VALUES (?, ?)", ("lookup", start))
         sid = cur.lastrowid; await db.commit()
-        rows = await (await db.execute("SELECT id, name FROM authors WHERE COALESCE(last_lookup_at,0) < ? ORDER BY COALESCE(last_lookup_at,0) ASC", (time.time() - cache_sec,))).fetchall()
+        # Skip orphan authors (no linked books). These are typically
+        # secondary co-authors of multi-author Calibre entries — see
+        # routers/authors.py:get_authors() docstring. Scanning them
+        # wastes time on a lookup that has no books to merge into.
+        rows = await (await db.execute("SELECT id, name FROM authors WHERE COALESCE(last_lookup_at,0) < ? AND id IN (SELECT DISTINCT author_id FROM books) ORDER BY COALESCE(last_lookup_at,0) ASC", (time.time() - cache_sec,))).fetchall()
         authors = list(rows)
         total = 0; checked = 0
         for a in authors:
@@ -769,7 +784,8 @@ async def run_full_rescan(on_progress=None):
     try:
         cur = await db.execute("INSERT INTO sync_log (sync_type, started_at) VALUES (?, ?)", ("full_rescan", start))
         sid = cur.lastrowid; await db.commit()
-        rows = await (await db.execute("SELECT id, name FROM authors ORDER BY sort_name ASC")).fetchall()
+        # Skip orphan authors — same reasoning as run_full_lookup above.
+        rows = await (await db.execute("SELECT id, name FROM authors WHERE id IN (SELECT DISTINCT author_id FROM books) ORDER BY sort_name ASC")).fetchall()
         authors = list(rows)
         total = 0; checked = 0
         for a in authors:

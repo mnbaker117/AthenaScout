@@ -17,7 +17,23 @@ router = APIRouter(prefix="/api", tags=["authors"])
 
 
 @router.get("/authors")
-async def get_authors(search: str = Query(None), sort: str = Query("name"), sort_dir: str = Query("asc"), has_missing: bool = Query(None), book_type: str = Query(None)):
+async def get_authors(search: str = Query(None), sort: str = Query("name"), sort_dir: str = Query("asc"), has_missing: bool = Query(None), book_type: str = Query(None), include_orphans: bool = Query(False)):
+    """List authors for the Authors page browse view.
+
+    By default, "orphan" authors with zero linked book rows are hidden.
+    These are typically secondary co-authors of multi-author books in
+    the user's Calibre library: calibre_sync.py:170-194 creates an
+    author row for every author of every book, but :225-230 only
+    links the book to its primary (`book["authors"][0]`) author. The
+    secondary authors get DB rows but no books, which clutters the
+    Authors page browse with names the user has nothing by.
+
+    The orphan rows are kept (not deleted) so multi-author series
+    cross-references still resolve and so an author auto-reappears in
+    the browse list as soon as the user acquires their first book by
+    them. `?include_orphans=true` is the escape hatch for debugging
+    and admin scripts that need to see the full set.
+    """
     db = await get_db()
     try:
         q = f"SELECT a.*, COUNT(DISTINCT CASE WHEN {HF} THEN b.id END) as total_books, SUM(CASE WHEN b.owned=1 AND {HF} THEN 1 ELSE 0 END) as owned_count, SUM(CASE WHEN b.owned=0 AND {HF} THEN 1 ELSE 0 END) as missing_count, SUM(CASE WHEN b.is_new=1 AND b.owned=0 AND {HF} THEN 1 ELSE 0 END) as new_count, COUNT(DISTINCT b.series_id) as series_count FROM authors a LEFT JOIN books b ON a.id=b.author_id"
@@ -27,7 +43,13 @@ async def get_authors(search: str = Query(None), sort: str = Query("name"), sort
         elif book_type == "standalone": c.append("b.series_id IS NULL")
         if c: q += " WHERE " + " AND ".join(c)
         q += " GROUP BY a.id"
-        if has_missing: q += " HAVING missing_count > 0"
+        having = []
+        if not include_orphans:
+            having.append("total_books > 0")
+        if has_missing:
+            having.append("missing_count > 0")
+        if having:
+            q += " HAVING " + " AND ".join(having)
         d = "DESC" if sort_dir == "desc" else "ASC"
         q += {"missing": f" ORDER BY missing_count {d}, a.sort_name ASC", "new": f" ORDER BY new_count {d}, a.sort_name ASC", "total": f" ORDER BY total_books {d}, a.sort_name ASC"}.get(sort, f" ORDER BY a.sort_name {d}")
         return {"authors": [dict(r) for r in await (await db.execute(q, p)).fetchall()]}

@@ -247,8 +247,16 @@ class GoodreadsSource(BaseSource):
             logger.error(f"Goodreads search error '{author_name}': {e}")
             return None
 
-    async def get_author_books(self, author_id: str, existing_titles: set = None, owned_titles: list = None) -> Optional[AuthorResult]:
-        """Scrape author's books. Validates author identity before visiting individual pages."""
+    async def get_author_books(self, author_id: str, existing_titles: set = None, owned_titles: list = None, owned_only: bool = False) -> Optional[AuthorResult]:
+        """Scrape author's books. Validates author identity before visiting individual pages.
+
+        Post-3b refinement: in `owned_only` mode (Library-only source
+        scans), books that don't match `existing_titles` would be
+        silently dropped by _merge_result anyway. Skip the per-book
+        page visit for those — same optimization as kobo.py. Goodreads
+        is the slower of the two for prolific authors so this is even
+        more impactful (~2s per saved fetch via the rate limiter).
+        """
         if existing_titles is None:
             existing_titles = set()
         if owned_titles is None:
@@ -460,6 +468,15 @@ class GoodreadsSource(BaseSource):
                             books.append(br)
                         continue
 
+                # owned_only optimization: skip detail fetches for books
+                # that won't survive the merge layer in library-only mode.
+                # See get_author_books() docstring for the rationale.
+                if owned_only:
+                    skipped.setdefault("unowned", 0)
+                    skipped["unowned"] += 1
+                    logger.debug(f"    SKIP-UNOWNED (library-only): '{rb['title']}'")
+                    continue
+
                 # Log progress every 10 books
                 if (i + 1) % 10 == 0 or i == 0:
                     logger.info(f"  Goodreads: checking book {i+1}/{total}...")
@@ -523,6 +540,7 @@ class GoodreadsSource(BaseSource):
                 if skipped.get("set"): parts.append(f"{skipped['set']} sets")
                 if skipped.get("translation"): parts.append(f"{skipped['translation']} translations")
                 if skipped.get("contributor"): parts.append(f"{skipped['contributor']} contributor-only")
+                if skipped.get("unowned"): parts.append(f"{skipped['unowned']} unowned (library-only)")
                 logger.info(f"  Goodreads: skipped {', '.join(parts)}")
 
             return AuthorResult(
