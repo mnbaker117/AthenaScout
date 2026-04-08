@@ -325,7 +325,11 @@ async def lifespan(app: FastAPI):
                 await db.close()
             last_scan_at = time.time()
 
-    asyncio.create_task(_mam_scheduler())
+    # Use supervised_task so an uncaught exception inside the scheduler loop
+    # gets logged with full traceback AND auto-restarts after a short delay,
+    # instead of silently killing the scheduler for the rest of the process
+    # lifetime (the default `create_task` behavior).
+    state.supervised_task(_mam_scheduler, name="mam_scheduler")
     scheduler.start()
     yield
     scheduler.shutdown()

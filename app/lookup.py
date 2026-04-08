@@ -201,7 +201,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if series_id:
                 existing_series = matched_row["series_id"]
                 try: existing_source = matched_row["source"]
-                except: existing_source = ""
+                except (IndexError, KeyError): existing_source = ""
                 cur_priority = SOURCE_PRIORITY.get(source_name, 5)
                 existing_priority = SOURCE_PRIORITY.get(existing_source or "", 5)
                 if not existing_series or (cur_priority < existing_priority and existing_series != series_id):

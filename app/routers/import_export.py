@@ -55,7 +55,7 @@ async def export_books(filter: str = Query("missing"), format: str = Query("csv"
                 # Return first available if none match priority
                 for src, url in urls.items():
                     return src, url
-            except:
+            except (ValueError, TypeError):
                 pass
             return "", ""
 
@@ -117,7 +117,7 @@ async def _fetch_goodreads_book(book_id: str) -> dict:
             if ld.get("datePublished"): result["pub_date"] = ld["datePublished"][:10]
             if ld.get("isbn"): result["isbn"] = ld["isbn"]
             if ld.get("numberOfPages"): result["page_count"] = int(ld["numberOfPages"])
-        except: pass
+        except (ValueError, TypeError, AttributeError): pass
     desc_el = soup.find("div", {"data-testid": "description"})
     if desc_el:
         spans = desc_el.find_all("span", class_=re.compile("Formatted"))
@@ -129,7 +129,7 @@ async def _fetch_goodreads_book(book_id: str) -> dict:
             if sm:
                 result["series_name"] = sm.group(1).strip()
                 try: result["series_index"] = float(sm.group(2))
-                except: pass
+                except (ValueError, TypeError): pass
                 break
     pub_el = soup.find("p", {"data-testid": "publicationInfo"})
     if pub_el:
@@ -141,7 +141,7 @@ async def _fetch_goodreads_book(book_id: str) -> dict:
                 try:
                     result["expected_date"] = datetime.strptime(re.sub(r'(\d+)(?:st|nd|rd|th)', r'\1', em.group(1).strip()), fmt).strftime("%Y-%m-%d")
                     break
-                except: pass
+                except ValueError: pass
     return result
 
 
@@ -413,7 +413,7 @@ async def import_add_books(data: dict = Body(...)):
                             old_urls.update(new_urls)
                             await db.execute("UPDATE books SET source_url=? WHERE id=?", (json.dumps(old_urls), existing["id"]))
                             updated += 1
-                        except: pass
+                        except (ValueError, TypeError): pass
                 else:
                     # Find/create series
                     sid = None

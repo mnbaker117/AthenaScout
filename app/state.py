@@ -19,8 +19,60 @@ For REASSIGNMENT (e.g., `state._lookup_task = new_task`), you MUST use the
 module attribute form. Bare assignment `_lookup_task = new_task` inside a
 function only rebinds a local variable — the shared state is not updated.
 """
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable, Awaitable
 import asyncio
+import logging
+
+_log = logging.getLogger("athenascout")
+
+
+def supervised_task(
+    coro_factory: Callable[[], Awaitable[None]],
+    *,
+    name: str,
+    restart_on_crash: bool = True,
+    restart_delay: float = 5.0,
+) -> asyncio.Task:
+    """Wrap a long-running background coroutine with exception logging.
+
+    The problem: `asyncio.create_task(some_coro())` silently loses exceptions
+    unless the task is awaited. For fire-and-forget schedulers (`_mam_scheduler`,
+    etc) a crash shows up as a one-line "Task exception was never retrieved"
+    at interpreter shutdown — no traceback in normal logs, no restart, no
+    visible failure mode.
+
+    Wrap the coroutine in an outer try/except that logs the full traceback
+    through the project logger, and optionally restarts after a delay so a
+    transient failure (DB lock, network hiccup) doesn't silently take a
+    scheduler out of service for the rest of the process lifetime.
+
+    `coro_factory` is a zero-arg callable that RETURNS a fresh coroutine —
+    not a coroutine object — because restarting requires building a new one
+    on each crash (coroutines can only be awaited once).
+
+    Cancellation is propagated: if the caller cancels the returned task,
+    CancelledError bubbles out without being logged or restarted.
+    """
+    async def _runner():
+        while True:
+            try:
+                await coro_factory()
+                _log.info(f"supervised task {name!r} completed normally")
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _log.exception(f"supervised task {name!r} crashed")
+                if not restart_on_crash:
+                    return
+                _log.warning(
+                    f"supervised task {name!r} restarting in {restart_delay}s"
+                )
+                try:
+                    await asyncio.sleep(restart_delay)
+                except asyncio.CancelledError:
+                    raise
+    return asyncio.create_task(_runner(), name=name)
 
 
 # ─── Library discovery cache ─────────────────────────────────

@@ -39,7 +39,7 @@ def _parse_date(text: str) -> Optional[str]:
 def _is_future(d: str) -> bool:
     try:
         return datetime.strptime(d[:10], "%Y-%m-%d") > datetime.now()
-    except:
+    except (ValueError, TypeError):
         return False
 
 
@@ -111,7 +111,7 @@ class GoodreadsSource(BaseSource):
                         details["language"] = data["inLanguage"]
                     if data.get("image"):
                         details["cover_url"] = data["image"]
-                except:
+                except (ValueError, TypeError, AttributeError):
                     pass
 
             # Fallback: check for "not yet published" text

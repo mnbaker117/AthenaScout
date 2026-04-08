@@ -38,8 +38,8 @@ api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{});
 },[]);
 
 // Load section data
-const load=useCallback((page=1)=>{setLd(true);const p=new URLSearchParams({section:tab,search:q,sort,page:String(page),per_page:String(perPage)});api.get(`/mam/books?${p}`).then(d=>{setBooks(d.books||[]);setTotal(d.total||0);setPg(page);setLd(false)}).catch(()=>setLd(false))},[tab,q,sort]);
-useEffect(()=>{load(1)},[load]);
+const load=useCallback((page=1,signal)=>{setLd(true);const p=new URLSearchParams({section:tab,search:q,sort,page:String(page),per_page:String(perPage)});api.get(`/mam/books?${p}`,signal).then(d=>{setBooks(d.books||[]);setTotal(d.total||0);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[tab,q,sort]);
+useEffect(()=>{const c=new AbortController();load(1,c.signal);return()=>c.abort()},[load]);
 
 // Scan polling
 useEffect(()=>{if(!mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running){clearInterval(iv);api.get("/mam/status").then(r2=>{if(r2.stats)setCounts({upload:r2.stats.upload_candidates||0,download:r2.stats.available_to_download||0,missing:r2.stats.missing_everywhere||0,unscanned:r2.stats.total_unscanned||0})}).catch(()=>{});load(1)}}).catch(()=>{})},5000);return()=>clearInterval(iv)},[mamScan?.running]);

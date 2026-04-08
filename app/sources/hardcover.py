@@ -225,7 +225,7 @@ class HardcoverSource(BaseSource):
                     try:
                         import json as jn
                         return jn.loads(raw)
-                    except:
+                    except (ValueError, TypeError):
                         return [{"name": raw}]
                 return []
             
