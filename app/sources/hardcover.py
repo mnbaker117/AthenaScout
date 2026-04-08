@@ -492,6 +492,11 @@ class HardcoverSource(BaseSource):
             elif len(id_to_books) == 1:
                 winning_id = next(iter(id_to_books))
                 author_id = winning_id
+                logger.debug(
+                    f"  Hardcover: disambiguation pass: 1 candidate ID for "
+                    f"'{author_name}' (id={winning_id}, "
+                    f"{len(id_to_books[winning_id])} books) — no filter needed"
+                )
             # else: no contributions[] IDs found at all — fall through
             # to the legacy edition-contributor path below, which
             # accepts books by name match without an ID.
