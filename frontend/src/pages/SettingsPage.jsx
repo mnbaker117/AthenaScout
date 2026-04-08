@@ -29,8 +29,10 @@ function SSection({title,defaultOpen=true,children}){const t=useTheme();const[op
 
 // ─── Settings ───────────────────────────────────────────────
 export default function SettingsPage(){const t=useTheme();const[s,setS]=useState(null);const[sv,setSv]=useState(false);const[msg,setMsg]=useState("");
-const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState(null);const[fsStatus,setFsStatus]=useState(null);const[dragIdx,setDragIdx]=useState(null);const[testRun,setTestRun]=useState(false);const[testRes,setTestRes]=useState(null);const[newSrcPath,setNewSrcPath]=useState("");const[newSrcType,setNewSrcType]=useState("root");const[newSrcApp,setNewSrcApp]=useState("calibre");const[pathVld,setPathVld]=useState(false);const[pathRes,setPathRes]=useState(null);useEffect(()=>{api.get("/settings").then(setS).catch(console.error)},[]);
-useEffect(()=>{if(!s?.mam_enabled)return;const poll=()=>api.get("/mam/full-scan/status").then(setFsStatus).catch(()=>{});poll();const iv=setInterval(poll,10000);return()=>clearInterval(iv)},[s?.mam_enabled]);
+const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState(null);const[dragIdx,setDragIdx]=useState(null);const[testRun,setTestRun]=useState(false);const[testRes,setTestRes]=useState(null);const[newSrcPath,setNewSrcPath]=useState("");const[newSrcType,setNewSrcType]=useState("root");const[newSrcApp,setNewSrcApp]=useState("calibre");const[pathVld,setPathVld]=useState(false);const[pathRes,setPathRes]=useState(null);useEffect(()=>{api.get("/settings").then(setS).catch(console.error)},[]);
+// Phase 3d-1 (post-feedback): Full scan polling moved out of Settings.
+// The Dashboard's app-level scan poller now surfaces full scan progress
+// in the unified scan widget — no need for a separate Settings poll.
 // Debounced author search for the "Clear scan data by author" field. The old inline
 // onChange fired a fetch on every keystroke — typing "Tobias S. Buckell" triggered 18
 // separate API calls in ~2 seconds when only the last one mattered. Waits 300ms after
@@ -39,9 +41,7 @@ useEffect(()=>{if(!s?.mam_enabled)return;const poll=()=>api.get("/mam/full-scan/
 useEffect(()=>{const q=s?._scanClearQ||"";if(q.length<2){setS(o=>o&&o._scanClearResults?.length?{...o,_scanClearResults:[]}:o);return}const tm=setTimeout(()=>{api.get(`/authors?search=${encodeURIComponent(q)}`).then(r=>setS(o=>o?{...o,_scanClearResults:r.authors||[]}:o)).catch(()=>{})},300);return()=>clearTimeout(tm)},[s?._scanClearQ]);
 const save=async()=>{setSv(true);setMsg("");try{const toSave={...s};if(s._editingKey&&s._newKey){toSave.hardcover_api_key=s._newKey}delete toSave._editingKey;delete toSave._newKey;delete toSave._editingMam;delete toSave._newMam;delete toSave._scanClearQ;delete toSave._scanClearResults;delete toSave._scanClearSel;delete toSave.hardcover_api_key_set;delete toSave.language_options;delete toSave._discovered_libraries;delete toSave._extra_mount_paths;delete toSave._newSrcApp;await api.post("/settings",toSave);setMsg("Saved!");upd("_editingKey",false);upd("_newKey","");const fresh=await api.get("/settings");setS(fresh);setTimeout(()=>setMsg(""),2000)}catch(e){setMsg("Error")}setSv(false)};
 const doValidate=async()=>{setMamVld(true);setMamRes(null);try{const r=await api.post("/mam/validate");setMamRes(r);if(r.success){const fresh=await api.get("/settings");setS(fresh)}}catch(e){setMamRes({success:false,message:"Network error"})}setMamVld(false)};
-const startFullScan=async()=>{try{const r=await api.post("/mam/full-scan");if(r.error){setMsg(r.error);setTimeout(()=>setMsg(""),3000)}else{const st=await api.get("/mam/full-scan/status");setFsStatus(st)}}catch{}};
-const cancelFullScan=async()=>{try{await api.post("/mam/full-scan/cancel");const st=await api.get("/mam/full-scan/status");setFsStatus(st)}catch{}};
-const resetMam=async()=>{if(!confirm("Reset all MAM scan data? This clears mam_url and mam_status on every book. You will need to re-scan."))return;try{await api.post("/mam/reset");setFsStatus(null);setMsg("MAM data cleared!");setTimeout(()=>setMsg(""),2000)}catch{}};
+const resetMam=async()=>{if(!confirm("Reset all MAM scan data? This clears mam_url and mam_status on every book. You will need to re-scan."))return;try{await api.post("/mam/reset");setMsg("MAM data cleared!");setTimeout(()=>setMsg(""),2000)}catch{}};
 const reorderFmt=(from,to)=>{if(from===to)return;const arr=[...(s.mam_format_priority||[])];const[item]=arr.splice(from,1);arr.splice(to,0,item);upd("mam_format_priority",arr)};
 const doTestScan=async()=>{setTestRun(true);setTestRes(null);try{const r=await api.post("/mam/test-scan");setTestRes(r)}catch(e){setTestRes({error:"Network error"})}setTestRun(false)};
 // Phase 22B.3 Stage 2A — logout. Best-effort POST to clear the cookie
@@ -61,7 +61,7 @@ return<div style={{paddingBottom:40}}>
 <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
 <Btn variant="accent" onClick={save} disabled={sv}>{sv?<Spin/>:"Save settings"}</Btn>
 <Btn onClick={doLogout} title="Sign out of AthenaScout">Sign Out</Btn>
-{msg&&<span style={{fontSize:13,color:msg==="Saved!"||msg==="Settings reset!"||msg==="MAM data cleared!"||msg==="Token saved!"||msg==="Key saved!"||msg==="Source data cleared!"||msg==="MAM data cleared!"||msg==="All data cleared!"?t.grnt:t.redt}}>{msg}</span>}
+{msg&&<span style={{fontSize:13,color:["Saved!","Settings reset!","MAM data cleared!","Token saved!","Key saved!","Source data cleared!","All data cleared!","Libraries rescanned!"].includes(msg)?t.grnt:t.redt}}>{msg}</span>}
 </div></div>
 
 <div className="settings-grid" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,alignItems:"start"}}>
@@ -154,32 +154,42 @@ return<div style={{paddingBottom:40}}>
 {testRes?<div style={{background:t.bg4,borderRadius:8,padding:"10px 14px",fontSize:13}}>{testRes.error?<span style={{color:t.redt}}>{testRes.error}</span>:<div style={{display:"flex",gap:16,flexWrap:"wrap",color:t.text2}}><span>Scanned: <b>{testRes.scanned||0}</b></span><span style={{color:t.grnt}}>Found: <b>{testRes.found||0}</b></span><span style={{color:t.ylwt}}>Possible: <b>{testRes.possible||0}</b></span><span style={{color:t.redt}}>Not found: <b>{testRes.not_found||0}</b></span>{testRes.errors>0?<span style={{color:t.red}}>Errors: <b>{testRes.errors}</b></span>:null}</div>}</div>:null}
 </div>
 
-<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Full Library Scan</div>
-{fsStatus?.active?<div style={{padding:"12px 0"}}>
-<div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}><span>Scanning... {fsStatus.scanned} of {fsStatus.total_books} books ({fsStatus.progress_pct}%)</span><span>Batch size: {fsStatus.batch_size}</span></div>
-<div style={{height:8,borderRadius:4,background:t.bg4,overflow:"hidden"}}><div style={{width:`${fsStatus.progress_pct||0}%`,height:"100%",borderRadius:4,background:t.accent,transition:"width 0.5s"}}/></div>
-<div style={{display:"flex",gap:8,marginTop:10}}><Btn size="sm" onClick={cancelFullScan} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Cancel scan</Btn></div>
-</div>:null}
-{fsStatus&&!fsStatus.active&&fsStatus.status?<div style={{padding:"8px 0",fontSize:12,color:fsStatus.status==="complete"?t.grnt:fsStatus.status==="cancelled"?t.ylwt:t.redt}}>Last scan: {fsStatus.status}{fsStatus.status==="complete"?` — ${fsStatus.scanned} books scanned`:""}</div>:null}
-{!fsStatus?.active?<div style={{display:"flex",gap:8,padding:"8px 0"}}>
-<Btn size="sm" variant="accent" onClick={startFullScan}>Start full scan</Btn>
-<Btn size="sm" onClick={resetMam} style={{color:t.redt}}>Reset scan data</Btn>
-</div>:null}
+{/* Reset / wipe operations moved to the full-width Data Management
+    section at the bottom of the page so all destructive operations
+    live in one visually-distinct place. The MAM Full Library Scan
+    trigger lives on the Dashboard under Heavy Tasks. */}
 
 </>:null}
 
 </SSection>
 
-{/* ── APP ── */}
-<SSection title="App">
+{/* ── SCANNING ── */}
+<SSection title="Scanning">
 
-<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"6px 0"}}>Scanning Controls</div>
 <SF label="Author scanning" desc="Enable source scanning for authors (Goodreads, Hardcover, etc). Disabling cancels any running scan."><STog on={s.author_scanning_enabled!==false} onToggle={async()=>{try{const r=await api.post("/scanning/author/toggle");upd("author_scanning_enabled",r.enabled)}catch{}}}/></SF>
 <SF label="Library-only source scans" desc="Only enrich metadata on books you already own — never add Missing or Upcoming books from source scans. Useful for polishing your existing library before turning the discovery firehose on. Series links and metadata still update on owned books."><STog on={s.author_scan_owned_only===true} onToggle={()=>upd("author_scan_owned_only",!s.author_scan_owned_only)}/></SF>
 <SF label="MAM scanning" desc={s.mam_scanning_enabled!==false?"MAM scans active — disable to stop all MAM scanning":"MAM scanning disabled — MAM features (badges, pages) still work"}>{s.mam_enabled?<STog on={s.mam_scanning_enabled!==false} onToggle={async()=>{try{const r=await api.post("/scanning/mam/toggle");upd("mam_scanning_enabled",r.enabled)}catch{}}}/>:<span style={{fontSize:12,color:t.tg}}>MAM not enabled</span>}</SF>
-<div style={{padding:"8px 0",fontSize:12,color:t.tg,fontStyle:"italic"}}>Disabling a scan type cancels any running scan and prevents future scans. MAM features (badges, pages) remain visible when MAM scanning is off. Set scan intervals to 0 to disable only scheduled scans.</div>
+<SF label="Verbose logging" desc="Show detailed debug output in Docker logs. Logs individual book decisions, page visit details, and merge operations."><STog on={!!s.verbose_logging} onToggle={()=>upd("verbose_logging",!s.verbose_logging)}/></SF>
+<div style={{padding:"10px 0 0",fontSize:12,color:t.tg,fontStyle:"italic"}}>Disabling a scan type cancels any running scan and prevents future scans. MAM features (badges, pages) remain visible when MAM scanning is off. Set scan intervals to 0 to disable only scheduled scans.</div>
 
-<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Manage Scan Data</div>
+</SSection>
+
+</div>
+
+</div>
+
+{/* ═══════════ FULL-WIDTH SECTIONS BELOW ═══════════
+    Destructive operations live here in their own visually distinct
+    sections so they don't get mixed with config toggles above. Two
+    sections: Data Management for the per-author and bulk wipes,
+    Danger Zone for the full-app reset. */}
+
+{/* ── DATA MANAGEMENT ── */}
+<div style={{marginTop:20}}>
+<SSection title="Data Management" defaultOpen={false}>
+
+<div style={{padding:"4px 0 10px",fontSize:12,color:t.tg,fontStyle:"italic"}}>Per-author and bulk cleanup operations. The MAM Full Library Scan and Sources Full Re-Scan triggers live on the Dashboard under Heavy Tasks — this section is just for clearing existing data.</div>
+
 <SF label="Clear scan data by author" desc={s.mam_enabled?"Search for authors, then clear their source or MAM scan data":"Search for authors, then clear their source scan data (enable MAM to also clear MAM data)"}>
 <div style={{display:"flex",flexDirection:"column",gap:8,minWidth:220}}>
 <div style={{position:"relative"}}>
@@ -199,19 +209,29 @@ return<div style={{paddingBottom:40}}>
 </div>:null}
 </div>
 </SF>
-<SF label="Reset ALL source scan data" desc="Wipe every discovered (non-Calibre, non-owned) book and reset every author's last-scanned timestamp. Owned books and MAM data are kept. Use this for a full source clean-slate.">
-<Btn size="sm" onClick={async()=>{if(!confirm("Reset ALL source scan data?\n\nThis will DELETE every discovered book across the entire library and reset every author's last-scanned timestamp so future scans treat them as never-scanned.\n\nOwned books and MAM data are NOT affected.\n\nThis cannot be undone."))return;setSv(true);try{const r=await api.post("/sources/reset");setMsg(`Source data reset — ${r.books_deleted||0} books deleted`);setTimeout(()=>setMsg(""),4000)}catch(e){setMsg(`Error: ${e.message||e}`)}setSv(false)}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Reset all source data</Btn>
+
+<SF label="Wipe ALL source scan data" desc="Delete every discovered (non-Calibre, non-owned) book and reset every author's last-scanned timestamp. Owned books and MAM data are kept. Use this for a full source clean-slate.">
+<Btn size="sm" onClick={async()=>{if(!confirm("Reset ALL source scan data?\n\nThis will DELETE every discovered book across the entire library and reset every author's last-scanned timestamp so future scans treat them as never-scanned.\n\nOwned books and MAM data are NOT affected.\n\nThis cannot be undone."))return;setSv(true);try{const r=await api.post("/sources/reset");setMsg(`Source data reset — ${r.books_deleted||0} books deleted`);setTimeout(()=>setMsg(""),4000)}catch(e){setMsg(`Error: ${e.message||e}`)}setSv(false)}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Wipe all source data</Btn>
 </SF>
 
-<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Logging</div>
-<SF label="Verbose logging" desc="Show detailed debug output in Docker logs. Logs individual book decisions, page visit details, and merge operations."><STog on={!!s.verbose_logging} onToggle={()=>upd("verbose_logging",!s.verbose_logging)}/></SF>
-
-<div style={{borderTop:`1px solid ${t.borderL}`,marginTop:12,paddingTop:12}}>
-<Btn onClick={async()=>{if(!confirm("Reset ALL settings to defaults?\n\nThis will clear your API keys, MAM session, Calibre URLs, source toggles, and all other customizations.\n\nYou will need to re-enter any values — Docker environment variables are only used for initial setup and will not be restored.\n\nThis cannot be undone."))return;setSv(true);try{await api.post("/settings/reset");const fresh=await api.get("/settings");setS(fresh);setMamRes(null);setTestRes(null);setFsStatus(null);setMsg("Settings reset!")}catch{setMsg("Error")}setSv(false)}} style={{color:t.redt}}>Reset all settings</Btn>
-</div>
+{s.mam_enabled?<SF label="Wipe ALL MAM scan data" desc="Clear mam_url and mam_status on every book. Every book becomes 'unscanned' and will be re-checked on the next MAM scan.">
+<Btn size="sm" onClick={resetMam} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`}}>Wipe all MAM data</Btn>
+</SF>:null}
 
 </SSection>
+</div>
 
+{/* ── DANGER ZONE ── */}
+<div style={{marginTop:20}}>
+<div style={{background:t.bg2,border:`1px solid ${t.red}44`,borderRadius:12}}>
+<div style={{display:"flex",alignItems:"center",gap:8,padding:"14px 20px",borderBottom:`1px solid ${t.red}22`}}>
+<span style={{fontSize:13,fontWeight:600,color:t.redt,textTransform:"uppercase",letterSpacing:"0.05em",display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:14}}>⚠</span> Danger Zone</span>
+</div>
+<div style={{padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+<div style={{flex:"1 1 300px"}}><div style={{fontSize:14,fontWeight:500,color:t.text2}}>Reset everything</div><div style={{fontSize:12,color:t.tf,marginTop:2}}>Clears API keys, MAM session, Calibre URLs, source toggles, and every other customization. You'll need to re-enter all values — Docker environment variables are only used for initial setup and will not be restored.</div></div>
+<Btn onClick={async()=>{if(!confirm("Reset ALL settings to defaults?\n\nThis will clear your API keys, MAM session, Calibre URLs, source toggles, and all other customizations.\n\nYou will need to re-enter any values — Docker environment variables are only used for initial setup and will not be restored.\n\nThis cannot be undone."))return;setSv(true);try{await api.post("/settings/reset");const fresh=await api.get("/settings");setS(fresh);setMamRes(null);setTestRes(null);setMsg("Settings reset!")}catch{setMsg("Error")}setSv(false)}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,fontWeight:600,whiteSpace:"nowrap"}}>Reset all settings to defaults</Btn>
 </div>
 </div>
+</div>
+
 </div>}

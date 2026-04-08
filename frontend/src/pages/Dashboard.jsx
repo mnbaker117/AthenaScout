@@ -59,21 +59,60 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 {d.mam.total_unscanned>0?<div style={{marginLeft:"auto",fontSize:12,color:t.ylwt,fontStyle:"italic"}}>{d.mam.total_unscanned} unscanned</div>:null}
 </div>:null}
 
-{/* Actions */}
-<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:20,display:"flex",gap:20,flexWrap:"wrap"}}>
+{/* ── Actions ──
+    Three logical groupings:
+      1. Quick Actions: routine, fast operations (Sync Library, Scan
+         Sources, MAM Scan). The "do this often" trio.
+      2. Heavy Tasks: bounded but long-running, full-rescan style
+         operations (Sources Full Re-Scan, MAM Full Library Scan). Lifted
+         out of the regular row and given a cautionary amber sub-box so
+         users intuit "this will take a while" without a popup.
+      3. Unified scan progress: shared widget that surfaces every
+         active/recent scan, regardless of which trigger started it.
+    External link buttons (Calibre Web/Library/Hidden) stay on the right. */}
+<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:20}}>
+
+{/* Top row: Quick Actions (left) + external links (right) */}
+<div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
 <div style={{flex:"1 1 320px"}}>
-<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>Actions</div>
+<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>Quick Actions</div>
 <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
 {(()=>{const lookup=scans.find(s=>s.kind==="lookup");const mam=scans.find(s=>s.kind==="mam");const lookupType=lookup?.type;const mamRunning=mam?.running;return<>
 <Btn variant="accent" onClick={async()=>{setSy(true);try{await api.post("/sync/calibre");toast.success("Library synced")}catch(e){toast.error(e.message||"Sync failed")}setSy(false);api.get("/stats").then(setD)}} disabled={sy}>{sy?<Spin/>:Ic.sync} Sync Library</Btn>
 <Btn onClick={async()=>{try{const r=await api.post("/sync/lookup");if(r.error)toast.warn(r.error);else if(r.due===0)toast.info(r.message||"No authors due for scanning");else{toast.info(`Source scan started — ${r.due||0} authors`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"Scan failed to start")}}} disabled={lookupRunning}>{lookupRunning&&lookupType==="lookup"?<Spin/>:Ic.search} Scan Sources</Btn>
-<Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;try{const r=await api.post("/sync/full-rescan");if(r.error)toast.warn(r.error);else{toast.info("Full re-scan started");window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"Full re-scan failed to start")}}} disabled={lookupRunning}>{lookupRunning&&lookupType==="full_rescan"?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
-{d.mam_enabled&&d.mam_scanning_enabled!==false?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error)toast.warn(r.error);else if(r.status==="complete")toast.info(r.message||"No books need scanning");else{toast.info(`MAM scan started — ${r.total||0} books`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"MAM scan failed to start")}}} disabled={mamRunning}>{mamRunning?<Spin/>:Ic.search} MAM Scan</Btn>:null}
+{d.mam_enabled&&d.mam_scanning_enabled!==false?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error)toast.warn(r.error);else if(r.status==="complete")toast.info(r.message||"No books need scanning");else{toast.info(`MAM scan started — ${r.total||0} books`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"MAM scan failed to start")}}} disabled={mamRunning&&mam?.type!=="full_scan"}>{mamRunning&&mam?.type!=="full_scan"?<Spin/>:Ic.search} MAM Scan</Btn>:null}
 </>})()}
 </div>
 <div style={{display:"flex",gap:16,marginTop:12,fontSize:12,color:t.tg}}>
 <span>{d.last_calibre_check?.at?`Last checked: ${timeAgo(d.last_calibre_check.at)}${d.last_calibre_check.synced?" (synced)":" (no changes)"}`:`Last sync: ${timeAgo(d.last_calibre_sync?.finished_at)}`}</span>
 <span>Last lookup: {timeAgo(d.last_lookup?.finished_at)}</span>
+</div>
+</div>
+<div style={{flex:"0 0 auto",display:"flex",flexDirection:"column",gap:6,borderLeft:`1px solid ${t.borderL}`,paddingLeft:20,justifyContent:"center"}}>
+{d.calibre_web_url?<button onClick={()=>window.open(d.calibre_web_url,"_blank")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.accent+"18",border:`1px solid ${t.accent}33`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.accent,whiteSpace:"nowrap"}}>📖 Calibre Web <span style={{fontSize:10,opacity:0.6}}>↗</span></button>:null}
+{d.calibre_url?<button onClick={()=>window.open(d.calibre_url,"_blank")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.pur+"18",border:`1px solid ${t.pur}33`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.purt,whiteSpace:"nowrap"}}>📚 Calibre Library <span style={{fontSize:10,opacity:0.6}}>↗</span></button>:null}
+<button onClick={()=>onNav("hidden")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.td,whiteSpace:"nowrap"}}>{Ic.hide} Hidden ({d.hidden_books||0})</button>
+</div>
+</div>
+
+{/* ── Heavy Tasks ──
+    Visually recessed amber sub-box. The amber tint + ⚠ icon + bold
+    border on each button signal "this is a long bounded job, click
+    deliberately". No confirmation popup — the styling carries the
+    cautionary weight. Buttons are full-width Btn instances styled
+    inline so we can use the amber theme color without adding a new
+    Btn variant. */}
+<div style={{marginTop:18,padding:"14px 16px",background:t.ylw+"0c",border:`1px solid ${t.ylw}33`,borderRadius:10}}>
+<div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:10,flexWrap:"wrap",gap:8}}>
+<div style={{fontSize:12,fontWeight:700,color:t.ylwt,textTransform:"uppercase",letterSpacing:"0.06em",display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:14}}>⚠</span> Heavy Tasks</div>
+<div style={{fontSize:11,color:t.tg,fontStyle:"italic"}}>These run for a long time and re-process every eligible book — only kick off when you're ready.</div>
+</div>
+<div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+{(()=>{const lookup=scans.find(s=>s.kind==="lookup");const mam=scans.find(s=>s.kind==="mam");const lookupType=lookup?.type;const mamRunningFull=mam?.running&&mam?.type==="full_scan";const heavyStyle={background:t.ylw+"22",color:t.ylwt,border:`1.5px solid ${t.ylw}77`,fontWeight:600};return<>
+<Btn onClick={async()=>{try{const r=await api.post("/sync/full-rescan");if(r.error)toast.warn(r.error);else{toast.info("Sources full re-scan started — this will take a while");window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"Full re-scan failed to start")}}} disabled={lookupRunning} style={heavyStyle}>{lookupRunning&&lookupType==="full_rescan"?<Spin/>:Ic.refresh} Sources Full Re-Scan</Btn>
+{d.mam_enabled&&d.mam_scanning_enabled!==false?<Btn onClick={async()=>{try{const r=await api.post("/mam/full-scan");if(r.error)toast.warn(r.error);else{toast.info(`MAM Full Library Scan started — ${r.total_books||0} books, runs over multiple batches`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"MAM full scan failed to start")}}} disabled={mamRunningFull} style={heavyStyle}>{mamRunningFull?<Spin/>:Ic.refresh} MAM Full Library Scan</Btn>:null}
+</>})()}
+</div>
 </div>
 
 {/* ── Phase 3d-1: Unified Scan Progress ── One row per active or recently-completed
@@ -81,9 +120,9 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
      so multiple scan types (lookup + MAM) can show side-by-side when both are
      running concurrently. The widget auto-hides entirely when nothing has run.
      Per-row Stop buttons route cancellation to the right kind-specific endpoint. */}
-{scans.map(scan=>{const isLookup=scan.kind==="lookup";const isMam=scan.kind==="mam";const ex=scan.extra||{};const pctVal=scan.total>0?Math.round((scan.current/scan.total)*100):0;const cancelEndpoint=isLookup?"/lookup/cancel":"/mam/scan/cancel";return<div key={scan.kind} style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{scan.running?<div>
+{scans.map(scan=>{const isLookup=scan.kind==="lookup";const isMam=scan.kind==="mam";const ex=scan.extra||{};const pctVal=scan.total>0?Math.round((scan.current/scan.total)*100):0;const cancelEndpoint=isLookup?"/lookup/cancel":scan.type==="full_scan"?"/mam/full-scan/cancel":"/mam/scan/cancel";return<div key={scan.kind} style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{scan.running?<div>
 <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}>
-<span><b style={{color:t.text2}}>{scan.label}</b>{scan.status==="paused"?" — Paused, resuming in 5 min":scan.status==="waiting (author scan running)"?" — Waiting for author scan...":scan.current_label?` — ${scan.current_label}`:""}</span>
+<span><b style={{color:t.text2}}>{scan.label}</b>{scan.status==="paused"?" — Paused, resuming soon":scan.status==="waiting (calibre sync running)"?" — Waiting for Calibre sync...":scan.current_label?` — ${scan.current_label}`:""}</span>
 <span style={{fontSize:11,color:t.tg}}>{scan.current} of {scan.total} {isLookup?"authors":"books"}{isMam&&ex.remaining?(()=>{const rem=ex.remaining-(scan.current||0);return rem>0?` (${rem.toLocaleString()} total remaining)`:""})():""}</span></div>
 <div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${pctVal}%`,height:"100%",borderRadius:3,background:scan.status==="paused"?t.ylw:t.accent,transition:"width 0.5s"}}/></div>
 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -91,13 +130,6 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <Btn size="sm" onClick={async()=>{try{const r=await api.post(cancelEndpoint);toast.info(r.message||"Cancellation requested");window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}catch(e){toast.error(e.message||"Cancel failed")}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
 </div>:<div style={{fontSize:13,color:scan.status==="complete"?t.grnt:t.redt}}>{scan.status==="complete"?<>{scan.label} Complete — {isLookup?`${scan.current} authors checked, ${ex.new_books||0} new books found`:(()=>{const rem=ex.remaining!=null?ex.remaining-(scan.current||0):(scan.total||0)-(scan.current||0);return`${scan.current} scanned: ${ex.found||0} found, ${ex.possible||0} possible, ${ex.not_found||0} not found${ex.errors>0?`, ${ex.errors} errors`:""}${rem>0?` · ${rem.toLocaleString()} unscanned`:""}`})()}</>:`${scan.label}: ${scan.status}`}</div>}</div>})}
 
-{d.mam_enabled?<div style={{fontSize:11,color:t.tg,marginTop:6,fontStyle:"italic"}}>MAM Scan checks all books missing MAM data (100 per batch, 5-min pauses between batches).</div>:null}
-</div>
-<div style={{flex:"0 0 auto",display:"flex",flexDirection:"column",gap:6,borderLeft:`1px solid ${t.borderL}`,paddingLeft:20,justifyContent:"center"}}>
-{d.calibre_web_url?<button onClick={()=>window.open(d.calibre_web_url,"_blank")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.accent+"18",border:`1px solid ${t.accent}33`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.accent,whiteSpace:"nowrap"}}>📖 Calibre Web <span style={{fontSize:10,opacity:0.6}}>↗</span></button>:null}
-{d.calibre_url?<button onClick={()=>window.open(d.calibre_url,"_blank")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.pur+"18",border:`1px solid ${t.pur}33`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.purt,whiteSpace:"nowrap"}}>📚 Calibre Library <span style={{fontSize:10,opacity:0.6}}>↗</span></button>:null}
-<button onClick={()=>onNav("hidden")} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:t.bg4,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:500,color:t.td,whiteSpace:"nowrap"}}>{Ic.hide} Hidden ({d.hidden_books||0})</button>
-</div>
 </div>
 
 {/* Quick nav */}

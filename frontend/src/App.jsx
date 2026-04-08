@@ -136,7 +136,11 @@ input,select{font-family:inherit}
 {pg==="dashboard"?<div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:theme.accent,borderRadius:1}}/>:null}
 </button>
 <div className="nav-items" style={{display:"flex",alignItems:"center",gap:2,overflowX:"auto",flex:1,minWidth:0}}>
-{NAV.filter(n=>(n.id!=="mam"||mamOn)&&(n.id!=="suggestions"||sugCount>0)).map(n=><button key={n.id} onClick={()=>nav(n.id)} style={{padding:"8px 14px",borderRadius:8,fontSize:14,fontWeight:500,border:"none",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,height:36,whiteSpace:"nowrap",flexShrink:0,background:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.bg4:"transparent",color:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.accent:theme.tf}}>
+{/* Suggestions nav stays permanent (3d-2 follow-up) so users can
+    reach previously-ignored items and delete them to let the next
+    scan re-suggest. The badge bubble at line below only appears when
+    sugCount>0 — empty state shows just the icon+label. */}
+{NAV.filter(n=>(n.id!=="mam"||mamOn)).map(n=><button key={n.id} onClick={()=>nav(n.id)} style={{padding:"8px 14px",borderRadius:8,fontSize:14,fontWeight:500,border:"none",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,height:36,whiteSpace:"nowrap",flexShrink:0,background:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.bg4:"transparent",color:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.accent:theme.tf}}>
 <span style={{fontSize:15,lineHeight:1}}>{n.icon}</span>{n.label}
 {n.id==="suggestions"&&sugCount>0?<span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:18,height:18,padding:"0 5px",borderRadius:9,fontSize:11,fontWeight:700,background:theme.accent,color:theme.bg,marginLeft:2}}>{sugCount}</span>:null}
 </button>)}
