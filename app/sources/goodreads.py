@@ -71,10 +71,17 @@ class GoodreadsSource(BaseSource):
             page_text = soup.get_text(" ", strip=True)
 
             # --- Language ---
-            # Look for "Language\s+English" pattern in book details
-            lang_m = re.search(r'Language\s+(\w+)', page_text)
-            if lang_m:
-                details["language"] = lang_m.group(1)
+            # JSON-LD `inLanguage` is the authoritative source and is parsed
+            # below in the JSON-LD block. We only fall back to a text-regex
+            # scan if JSON-LD didn't yield a language, and even then the
+            # regex is restricted to a known allowlist of language names —
+            # the previous loose `Language\s+(\w+)` was matching the word
+            # "and" out of body text like "...this language and that..."
+            # which was appearing somewhere on the Leviathan Wakes (8855321)
+            # page before the actual Language detail row, causing the real
+            # book to be skipped as "foreign" and leaving only the wrong
+            # Dragon's Path/Leviathan Wakes anthology in the result set.
+            # Fix: defer to JSON-LD; allowlist text fallback.
 
             # --- Translator detection ---
             if "(translator)" in page_text.lower() or "translator" in page_text.lower()[:2000]:
@@ -108,11 +115,33 @@ class GoodreadsSource(BaseSource):
                         except (ValueError, TypeError):
                             pass
                     if data.get("inLanguage") and not details["language"]:
+                        # Goodreads sometimes encodes language as a code
+                        # ("en", "en-US") and sometimes as a full name
+                        # ("English"). lookup.py's _lang_ok() handles both.
                         details["language"] = data["inLanguage"]
                     if data.get("image"):
                         details["cover_url"] = data["image"]
                 except (ValueError, TypeError, AttributeError):
                     pass
+
+            # Allowlisted text-regex fallback for language. Only runs if
+            # JSON-LD didn't supply one. Restricted to a known set of
+            # language names to prevent false positives like the previous
+            # `Language\s+(\w+)` matching "and" out of body text.
+            if not details["language"]:
+                lang_m = re.search(
+                    r'Language\s+(English|Spanish|French|German|Italian|Portuguese|Dutch|'
+                    r'Russian|Chinese|Japanese|Korean|Polish|Czech|Swedish|Norwegian|'
+                    r'Danish|Finnish|Greek|Turkish|Arabic|Hebrew|Hindi|Thai|Vietnamese|'
+                    r'Indonesian|Croatian|Serbian|Romanian|Hungarian|Bulgarian|Ukrainian|'
+                    r'Catalan|Latin|Esperanto|Welsh|Irish|Gaelic|Slovak|Slovenian|'
+                    r'Estonian|Latvian|Lithuanian|Icelandic|Albanian|Macedonian|Bosnian|'
+                    r'Persian|Farsi|Urdu|Bengali|Tamil|Malay|Filipino|Tagalog|Swahili|'
+                    r'Afrikaans)\b',
+                    page_text,
+                )
+                if lang_m:
+                    details["language"] = lang_m.group(1)
 
             # Fallback: check for "not yet published" text
             if "not yet published" in page_text.lower():
