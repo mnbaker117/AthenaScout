@@ -265,6 +265,16 @@ class GoodreadsSource(BaseSource):
             r = await self._get(f"{BASE}/author/list/{author_id}", retries=2, params={"per_page": 100})
             soup = BeautifulSoup(r.text, "lxml")
 
+            # Goodreads always 301-redirects /author/list/{id} →
+            # /author/list/{id}.{Author_Slug}. httpx auto-follows so the
+            # first request still works, but it costs an extra round-trip
+            # PER pagination page. Capture the resolved URL from the first
+            # response and reuse its path for subsequent pages so each
+            # additional fetch is a single 200 instead of 301→200. The
+            # Sanderson 4-page list went from 8 requests (4×301 + 4×200)
+            # to 5 requests after this change.
+            list_path = str(r.url).split("?", 1)[0]
+
             nm_el = soup.select_one("a.authorName span")
             author_name = nm_el.get_text(strip=True) if nm_el else "Unknown"
 
@@ -305,7 +315,7 @@ class GoodreadsSource(BaseSource):
                 page_num += 1
                 logger.debug(f"  Goodreads: fetching author list page {page_num}...")
                 try:
-                    r = await self._get(f"{BASE}/author/list/{author_id}", retries=1,
+                    r = await self._get(list_path, retries=1,
                                         params={"per_page": 100, "page": page_num})
                     soup = BeautifulSoup(r.text, "lxml")
                     new_rows = _parse_book_rows(soup)
