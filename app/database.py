@@ -260,7 +260,13 @@ async def get_db(slug=None) -> aiosqlite.Connection:
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
-    await db.execute("PRAGMA busy_timeout=5000")
+    # 30s busy_timeout gives background tasks (MAM scan batches, UI
+    # queries) plenty of room to wait out a Calibre bulk-sync that's
+    # holding the write lock. Previously 5s, which was too short — a
+    # 2700-book Calibre sync takes ~15s and was causing "database is
+    # locked" errors on concurrent writers. WAL mode keeps *readers*
+    # unblocked entirely; this only matters for writer↔writer contention.
+    await db.execute("PRAGMA busy_timeout=30000")
     return db
 
 

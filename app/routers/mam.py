@@ -97,17 +97,35 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                           "found": 0, "possible": 0, "not_found": 0, "errors": 0,
                           "status": "scanning", "type": "manual"}
 
+    async def _wait_for_other_writers():
+        """Yield to other background writers before grabbing the write lock.
+
+        Waits for (a) an in-flight author/source scan to finish, and
+        (b) a Calibre library sync to finish. Both hold the SQLite write
+        lock for extended periods and used to collide with MAM batches —
+        a live incident at 22:33 showed a MAM batch racing a scheduled
+        Calibre sync and hitting "database is locked" after the 5-second
+        busy_timeout. We now wait them out gracefully instead.
+        """
+        if state._lookup_progress.get("running"):
+            state._mam_scan_progress["status"] = "waiting (author scan running)"
+            logger.info("MAM scan waiting for author scan to finish...")
+            while state._lookup_progress.get("running"):
+                await asyncio.sleep(30)
+            logger.info("Author scan finished — MAM scan resuming")
+        if state._calibre_sync_in_progress:
+            state._mam_scan_progress["status"] = "waiting (calibre sync running)"
+            logger.info("MAM scan waiting for Calibre sync to finish...")
+            while state._calibre_sync_in_progress:
+                await asyncio.sleep(5)
+            logger.info("Calibre sync finished — MAM scan resuming")
+        state._mam_scan_progress["status"] = "scanning"
+
     async def _do_scan():
         batch_num = 0
         while True:
-            # Wait for any author scan before starting next batch
-            if state._lookup_progress.get("running"):
-                state._mam_scan_progress["status"] = "waiting (author scan running)"
-                logger.info("MAM scan waiting for author scan to finish...")
-                while state._lookup_progress.get("running"):
-                    await asyncio.sleep(30)
-                logger.info("Author scan finished — MAM scan resuming")
-                state._mam_scan_progress["status"] = "scanning"
+            # Wait for any author scan or Calibre sync before starting next batch
+            await _wait_for_other_writers()
             cs = load_settings()
             if not cs.get("mam_enabled") or not cs.get("mam_session_id"):
                 state._mam_scan_progress.update({"status": "stopped (MAM disabled)", "running": False})
@@ -174,14 +192,8 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
             state._mam_scan_progress["status"] = "paused"
             logger.info(f"MAM scan batch {batch_num} done ({state._mam_scan_progress['scanned']}/{state._mam_scan_progress['total']}), pausing 5 min")
             await asyncio.sleep(300)
-            # Wait for any author scan to finish before resuming
-            if state._lookup_progress.get("running"):
-                state._mam_scan_progress["status"] = "waiting (author scan running)"
-                logger.info("MAM scan waiting for author scan to finish...")
-                while state._lookup_progress.get("running"):
-                    await asyncio.sleep(30)
-                logger.info("Author scan finished — MAM scan resuming")
-            state._mam_scan_progress["status"] = "scanning"
+            # Wait for any author scan or Calibre sync to finish before resuming
+            await _wait_for_other_writers()
 
     state._mam_scan_task = asyncio.create_task(_do_scan())
     return {"status": "started", "total": total}

@@ -128,7 +128,14 @@ def get_extra_mount_paths():
     # Also include legacy CALIBRE_EXTRA_PATHS for backward compat
     if CALIBRE_EXTRA_PATHS:
         for p in [x.strip() for x in CALIBRE_EXTRA_PATHS.split(",") if x.strip()]:
-            if Path(p).exists() and p not in all_paths:
+            try:
+                exists = Path(p).exists()
+            except (PermissionError, OSError):
+                # Python 3.12+ raises rather than returning False on
+                # permission errors; treat as "not visible" so a single
+                # unreadable extra path doesn't crash startup.
+                exists = False
+            if exists and p not in all_paths:
                 all_paths.append(p)
     return all_paths
 
@@ -178,7 +185,14 @@ def discover_libraries(settings=None):
                     _add_library(lib)
             elif src_type == "direct":
                 mdb = Path(src_path)
-                if mdb.exists() and mdb.name == app.db_filename:
+                try:
+                    mdb_exists = mdb.exists()
+                except (PermissionError, OSError) as e:
+                    _cfg_logger.warning(
+                        f"Direct library path unreadable (permission denied): {src_path} ({e})"
+                    )
+                    mdb_exists = False
+                if mdb_exists and mdb.name == app.db_filename:
                     _add_library({
                         "name": mdb.parent.name,
                         "slug": slugify(mdb.parent.name),
@@ -207,7 +221,14 @@ def discover_libraries(settings=None):
     # Priority 3: Legacy CALIBRE_DB_PATH (single direct path)
     if CALIBRE_DB_PATH:
         legacy_mdb = Path(CALIBRE_DB_PATH)
-        if legacy_mdb.exists():
+        try:
+            legacy_exists = legacy_mdb.exists()
+        except (PermissionError, OSError) as e:
+            _cfg_logger.warning(
+                f"Legacy CALIBRE_DB_PATH unreadable: {CALIBRE_DB_PATH} ({e})"
+            )
+            legacy_exists = False
+        if legacy_exists:
             _add_library({
                 "name": legacy_mdb.parent.name,
                 "slug": slugify(legacy_mdb.parent.name),

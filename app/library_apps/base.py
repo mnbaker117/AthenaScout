@@ -56,7 +56,16 @@ class LibraryApp(ABC):
         paths = [p.strip() for p in raw.split(",") if p.strip()]
         valid = []
         for p in paths:
-            if Path(p).exists():
+            try:
+                exists = Path(p).exists()
+            except (PermissionError, OSError) as e:
+                # Py 3.12+ raises on permission errors; treat as "invisible"
+                # so startup doesn't crash on a single unreadable extra path.
+                logger.warning(
+                    f"{self.display_name}: extra path unreadable ({e}): {p}"
+                )
+                exists = False
+            if exists:
                 valid.append(p)
             else:
                 logger.warning(f"{self.display_name}: extra path does not exist: {p}")
@@ -66,6 +75,18 @@ class LibraryApp(ABC):
         """Discover libraries under a root path.
 
         Scans one level deep for directories containing self.db_filename.
+
+        Must be robust to directories the runtime user cannot read — in
+        Python 3.12+ `Path.exists()` *propagates* PermissionError rather
+        than silently returning False, so a single unreadable child
+        (e.g. `/calibre/.dbus/` owned by a different host user) will
+        crash the entire scan unless we catch it here. This bit us
+        immediately after switching the container to a non-root user.
+
+        Also skips hidden directories (names starting with `.`) because
+        they're never legitimate libraries and reliably trigger
+        permission traps from apps that leave state in appdata trees
+        (.dbus, .cache, .Trash, .config, etc).
 
         Args:
             root_path: Directory to scan
@@ -80,8 +101,14 @@ class LibraryApp(ABC):
         seen_slugs = set()
         root = Path(root_path)
 
-        if not root.exists():
-            logger.warning(f"{self.display_name}: root path does not exist: {root_path}")
+        try:
+            if not root.exists():
+                logger.warning(f"{self.display_name}: root path does not exist: {root_path}")
+                return []
+        except PermissionError:
+            logger.warning(
+                f"{self.display_name}: cannot stat root path (permission denied): {root_path}"
+            )
             return []
 
         def _add(mdb_path):
@@ -104,16 +131,48 @@ class LibraryApp(ABC):
                 "library_path": str(parent),
             })
 
+        def _safe_db_exists(db_file: Path) -> bool:
+            """Stat a candidate DB file, swallowing permission errors.
+
+            Python 3.12+ made Path.exists() propagate PermissionError; we
+            treat those as 'not a library here' and move on rather than
+            aborting the whole discovery scan.
+            """
+            try:
+                return db_file.exists()
+            except (PermissionError, OSError) as e:
+                logger.debug(
+                    f"{self.display_name}: skipping {db_file} (unreadable: {e})"
+                )
+                return False
+
         # Scan immediate subdirectories
-        for child in sorted(root.iterdir()):
-            if child.is_dir():
+        try:
+            children = sorted(root.iterdir())
+        except (PermissionError, OSError) as e:
+            logger.warning(
+                f"{self.display_name}: cannot list {root_path} ({e}) — "
+                "returning empty library list"
+            )
+            return []
+
+        for child in children:
+            # Skip hidden/dot directories — never real libraries, often
+            # unreadable as a non-root user (.dbus, .cache, .Trash, ...).
+            if child.name.startswith("."):
+                continue
+            try:
+                is_dir = child.is_dir()
+            except (PermissionError, OSError):
+                continue
+            if is_dir:
                 db_file = child / self.db_filename
-                if db_file.exists():
+                if _safe_db_exists(db_file):
                     _add(db_file)
 
         # Check root itself
         root_db = root / self.db_filename
-        if root_db.exists():
+        if _safe_db_exists(root_db):
             _add(root_db)
 
         return libraries

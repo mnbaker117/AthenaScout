@@ -28,6 +28,9 @@ router = APIRouter(prefix="/api", tags=["scan"])
 async def trigger_sync():
     active_slug = get_active_library()
     lib = next((l for l in state._discovered_libraries if l["slug"] == active_slug), None)
+    # Flag the sync so background writers (MAM scanner) yield to us
+    # instead of racing on the write lock. Always cleared in finally.
+    state._calibre_sync_in_progress = True
     try:
         if lib:
             app_instance = get_app(lib.get("app_type", "calibre"))
@@ -48,6 +51,8 @@ async def trigger_sync():
         return {"status": "ok", **result}
     except Exception as e:
         raise HTTPException(500, str(e))
+    finally:
+        state._calibre_sync_in_progress = False
 
 
 @router.post("/sync")

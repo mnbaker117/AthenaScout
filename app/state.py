@@ -33,6 +33,14 @@ _discovered_libraries: List[dict] = []
 # Displayed on dashboard via /api/stats
 _last_calibre_check: Dict[str, Any] = {"at": None, "synced": False}
 
+# True while a Calibre library sync is actively running (manual or
+# scheduled). MAM scan batches and other write-heavy background tasks
+# check this flag before grabbing the DB write lock, so they yield
+# cleanly instead of racing against the bulk upsert and getting hit
+# with "database is locked" errors after the busy_timeout expires.
+# Always cleared in a try/finally block — never leave this stuck True.
+_calibre_sync_in_progress: bool = False
+
 
 # ─── Author lookup scan state ────────────────────────────────
 _lookup_task: Optional[asyncio.Task] = None

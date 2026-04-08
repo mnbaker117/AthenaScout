@@ -172,29 +172,37 @@ async def lifespan(app: FastAPI):
         st = load_settings()
         mtimes = st.get("calibre_mtimes", {})
         any_synced = False
-        for lib in state._discovered_libraries:
-            try:
-                set_active_library(lib["slug"])
-                current_mtime = os.path.getmtime(lib["source_db_path"])
-                last_mtime = mtimes.get(lib["slug"])
-                if last_mtime is not None and current_mtime == last_mtime:
-                    logger.debug(f"Scheduled sync: '{lib['name']}' metadata.db unchanged, skipping")
-                    continue
-                lib_app = get_app(lib.get("app_type", "calibre"))
-                logger.info(f"Scheduled sync: '{lib['name']}' {lib_app.db_filename if lib_app else 'database'} changed, syncing...")
-                if lib_app:
-                    await lib_app.sync(lib["source_db_path"], lib["library_path"])
-                else:
-                    await sync_calibre(lib["source_db_path"], lib["library_path"])
-                mtimes[lib["slug"]] = current_mtime
-                st["calibre_mtimes"] = mtimes
-                save_settings(st)
-                any_synced = True
-            except Exception as e:
-                logger.warning(f"Scheduled sync failed for '{lib['name']}': {e}")
-        set_active_library(current_active)
-        state._last_calibre_check["at"] = time.time()
-        state._last_calibre_check["synced"] = any_synced
+        # Signal background writers (MAM scanner, etc.) that a bulk sync
+        # is in flight so they yield gracefully instead of racing us.
+        # try/finally ensures the flag ALWAYS clears — a crash mid-sync
+        # must not leave background tasks permanently paused.
+        state._calibre_sync_in_progress = True
+        try:
+            for lib in state._discovered_libraries:
+                try:
+                    set_active_library(lib["slug"])
+                    current_mtime = os.path.getmtime(lib["source_db_path"])
+                    last_mtime = mtimes.get(lib["slug"])
+                    if last_mtime is not None and current_mtime == last_mtime:
+                        logger.debug(f"Scheduled sync: '{lib['name']}' metadata.db unchanged, skipping")
+                        continue
+                    lib_app = get_app(lib.get("app_type", "calibre"))
+                    logger.info(f"Scheduled sync: '{lib['name']}' {lib_app.db_filename if lib_app else 'database'} changed, syncing...")
+                    if lib_app:
+                        await lib_app.sync(lib["source_db_path"], lib["library_path"])
+                    else:
+                        await sync_calibre(lib["source_db_path"], lib["library_path"])
+                    mtimes[lib["slug"]] = current_mtime
+                    st["calibre_mtimes"] = mtimes
+                    save_settings(st)
+                    any_synced = True
+                except Exception as e:
+                    logger.warning(f"Scheduled sync failed for '{lib['name']}': {e}")
+            set_active_library(current_active)
+            state._last_calibre_check["at"] = time.time()
+            state._last_calibre_check["synced"] = any_synced
+        finally:
+            state._calibre_sync_in_progress = False
 
     if sync_min and sync_min > 0:
         if state._discovered_libraries:
@@ -242,6 +250,11 @@ async def lifespan(app: FastAPI):
                 continue
             if state._lookup_progress.get("running"):
                 continue  # Author scan has priority
+            if state._calibre_sync_in_progress:
+                # Calibre bulk sync holds the SQLite write lock; defer
+                # this scheduled MAM scan tick and try again next cycle.
+                logger.debug("MAM scheduled scan deferred — Calibre sync in progress")
+                continue
             last_val = s.get("last_mam_validated_at") or 0
             if time.time() - last_val > 86400:
                 logger.info("MAM daily validation check...")

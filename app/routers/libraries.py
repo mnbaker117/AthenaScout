@@ -146,17 +146,41 @@ async def validate_library_path(body: dict = Body(...)):
     app_instance = get_app(app_type)
     db_filename = app_instance.db_filename if app_instance else "metadata.db"
 
+    def _safe_exists(pth: Path) -> bool:
+        """Stat a path, treating PermissionError/OSError as 'not found'.
+
+        Py 3.12+ made Path.exists() propagate permission errors. Since
+        this endpoint runs under the non-root container user, unreadable
+        subdirs must not crash the whole validate/rescan flow.
+        """
+        try:
+            return pth.exists()
+        except (PermissionError, OSError):
+            return False
+
     found = []
     if path_type == "root":
         root = Path(path)
-        for child in sorted(root.iterdir()):
-            if child.is_dir():
-                db_file = child / db_filename
-                if db_file.exists():
-                    found.append({"name": child.name, "path": str(db_file)})
+        try:
+            children = sorted(root.iterdir())
+        except (PermissionError, OSError) as e:
+            return {"valid": False, "error": f"Cannot list directory ({e})"}
+        for child in children:
+            # Skip hidden directories — .dbus, .cache, .Trash, etc are
+            # never real libraries and are often unreadable as uid 1000.
+            if child.name.startswith("."):
+                continue
+            try:
+                if not child.is_dir():
+                    continue
+            except (PermissionError, OSError):
+                continue
+            db_file = child / db_filename
+            if _safe_exists(db_file):
+                found.append({"name": child.name, "path": str(db_file)})
         # codeql[py/path-injection] -- see validate_library_path() docstring
         root_db = root / db_filename
-        if root_db.exists():
+        if _safe_exists(root_db):
             found.append({"name": root.name, "path": str(root_db)})
         if not found:
             return {"valid": False, "error": f"No {db_filename} files found in subdirectories"}
@@ -165,10 +189,10 @@ async def validate_library_path(body: dict = Body(...)):
     elif path_type == "direct":
         # codeql[py/path-injection] -- see validate_library_path() docstring
         p = Path(path)
-        if p.name == db_filename and p.exists():
+        if p.name == db_filename and _safe_exists(p):
             return {"valid": True, "libraries_found": 1, "details": [{"name": p.parent.name, "path": str(p)}]}
         # codeql[py/path-injection] -- see validate_library_path() docstring
-        elif (p / db_filename).exists():
+        elif _safe_exists(p / db_filename):
             return {"valid": True, "libraries_found": 1, "details": [{"name": p.name, "path": str(p / db_filename)}]}
         else:
             return {"valid": False, "error": f"No {db_filename} found at this path"}
