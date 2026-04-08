@@ -122,7 +122,6 @@ CREATE TABLE IF NOT EXISTS authors (
     calibre_id INTEGER,
     hardcover_id TEXT,
     goodreads_id TEXT,
-    fantasticfiction_id TEXT,
     kobo_id TEXT,
     fictiondb_id TEXT,
     image_url TEXT,
@@ -139,7 +138,6 @@ CREATE TABLE IF NOT EXISTS series (
     author_id INTEGER NOT NULL,
     hardcover_id TEXT,
     goodreads_id TEXT,
-    fantasticfiction_id TEXT,
     kobo_id TEXT,
     fictiondb_id TEXT,
     total_books INTEGER,
@@ -159,7 +157,6 @@ CREATE TABLE IF NOT EXISTS books (
     isbn TEXT,
     hardcover_id TEXT,
     goodreads_id TEXT,
-    fantasticfiction_id TEXT,
     fictiondb_id TEXT,
     kobo_id TEXT,
     cover_url TEXT,
@@ -265,6 +262,20 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status)",
     "ALTER TABLE books ADD COLUMN mam_my_snatched INTEGER NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS idx_books_author_owned ON books(author_id, owned)",
+    # ── FantasticFiction removal ─────────────────────────────────
+    # FF was dropped as a source entirely (it duplicated coverage of
+    # Goodreads/Hardcover/Kobo and was Cloudflare-blocked anyway). Null
+    # any leftover IDs first, then drop the columns. SQLite 3.35+ is
+    # required for DROP COLUMN; the migration loop tolerates "no such
+    # column" and other expected errors via its existing exception
+    # handling, so re-running on a fresh DB (where columns were never
+    # added) is safe.
+    "UPDATE authors SET fantasticfiction_id = NULL",
+    "UPDATE series SET fantasticfiction_id = NULL",
+    "UPDATE books SET fantasticfiction_id = NULL",
+    "ALTER TABLE authors DROP COLUMN fantasticfiction_id",
+    "ALTER TABLE series DROP COLUMN fantasticfiction_id",
+    "ALTER TABLE books DROP COLUMN fantasticfiction_id",
 ]
 
 
@@ -338,7 +349,8 @@ async def init_db(slug=None):
                     # tolerate those, but log anything else as a warning so
                     # real migration failures don't disappear.
                     msg = str(e).lower()
-                    if "duplicate column" in msg or "already exists" in msg:
+                    if ("duplicate column" in msg or "already exists" in msg
+                            or "no such column" in msg):
                         continue
                     _db_logger.warning(
                         f"Migration #{i} failed unexpectedly: {e} "

@@ -17,7 +17,6 @@ Built for readers who want to know: *"What am I missing?"*
 - **Goodreads** (Primary) — Web scraping with two-pass author/book resolution. Series detection, publication dates, language filtering
 - **Hardcover** — GraphQL API with `book_series` relation for accurate series data. Requires free API key
 - **Kobo** — Web scraping for ebook availability
-- **FantasticFiction** — Web scraping for genre fiction (currently limited by Cloudflare)
 - Source priority system: Goodreads data always wins conflicts with lower-priority sources
 
 **Smart Scanning**
@@ -159,7 +158,6 @@ This directory survives container restarts and image updates. Back it up if you 
 | **Goodreads** | None | 1 (Primary) | Two-pass scraping: author list page → individual book pages. Most reliable for series data and dates |
 | **Hardcover** | API key (free) | 2 | GraphQL API with `book_series` relation. Get key from [hardcover.app](https://hardcover.app) → Account → API. Include `Bearer ` prefix |
 | **Kobo** | None | 3 | Web scraping. Results may be incomplete for some authors |
-| **FantasticFiction** | None | 4 | Currently blocked by Cloudflare. Disabled by default |
 
 Sources are checked in priority order. When the same book is found across multiple sources, Goodreads metadata wins. Source URLs from all sources are preserved as clickable badges.
 
@@ -189,8 +187,7 @@ athena-scout/
 │       ├── base.py           # BookResult/SeriesResult models
 │       ├── goodreads.py      # Goodreads scraper
 │       ├── hardcover.py      # Hardcover GraphQL client
-│       ├── kobo.py           # Kobo scraper
-│       └── fantasticfiction.py
+│       └── kobo.py           # Kobo scraper
 ├── frontend/
 │   ├── src/App.jsx           # Single-file React SPA
 │   ├── index.html

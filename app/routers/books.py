@@ -276,7 +276,7 @@ async def clear_book_scan_data(data: dict = Body(...)):
 async def scan_books_sources(data: dict = Body(...)):
     """Run a source-plugin lookup for the unique authors of the given books.
 
-    Source plugins (Goodreads, Hardcover, Kobo, FantasticFiction) work at the
+    Source plugins (Goodreads, Hardcover, Kobo) work at the
     author level — there's no per-book source lookup. So when the user picks
     book IDs from a Books-page selection, we resolve them to the distinct set
     of author IDs and run lookup_author on each. The frontend tooltip warns

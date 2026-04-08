@@ -12,7 +12,7 @@
   <Support/>
   <Project>https://github.com/mnbaker117/AthenaScout</Project>
   <Overview>
-    AthenaScout is a self-hosted book library completionist tracker. Point it at one or more Calibre libraries and it will cross-reference your collection against metadata sources like Goodreads, Hardcover, Kobo, and FantasticFiction to find books you're missing from authors and series you already collect.
+    AthenaScout is a self-hosted book library completionist tracker. Point it at one or more Calibre libraries and it will cross-reference your collection against metadata sources like Goodreads, Hardcover, and Kobo to find books you're missing from authors and series you already collect.
 
     Features include multi-library discovery, multi-source scanning, MyAnonamouse cross-referencing, import/export, series intelligence, Calibre-Web deep linking, single-admin authentication, and a responsive web UI with dark/dim/light themes. Built on a library-app framework so additional source applications (audiobookshelf, etc.) can be added in future releases.
   </Overview>
@@ -26,7 +26,7 @@
   <DonateLink/>
   <DonateImg/>
   <Description>
-    Self-hosted book library completionist tracker. Discovers Calibre libraries automatically, finds missing books via Goodreads/Hardcover/Kobo/FantasticFiction, and cross-references against MyAnonamouse availability. Single-admin auth, multi-library, multi-theme, responsive UI.
+    Self-hosted book library completionist tracker. Discovers Calibre libraries automatically, finds missing books via Goodreads/Hardcover/Kobo, and cross-references against MyAnonamouse availability. Single-admin auth, multi-library, multi-theme, responsive UI.
   </Description>
 
   <!-- ─── Web UI ────────────────────────────────────────────── -->

@@ -39,7 +39,7 @@ async def export_books(filter: str = Query("missing"), format: str = Query("csv"
         )).fetchall()
 
         # Priority order for "best" URL
-        url_priority = ["goodreads", "hardcover", "kobo", "fantasticfiction"]
+        url_priority = ["goodreads", "hardcover", "kobo"]
 
         def _best_url(source_url_json):
             """Extract the best URL and its source name from JSON."""

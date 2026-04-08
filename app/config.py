@@ -78,7 +78,8 @@ LANGUAGE_OPTIONS = [
 # run for users who have an old settings.json missing the new key.
 DEFAULT_SETTINGS = {
     "hardcover_api_key": "",
-    "fantasticfiction_enabled": False,
+    "goodreads_enabled": True,
+    "hardcover_enabled": True,
     "kobo_enabled": True,
     "theme": "dark",
     "languages": ["English"],
@@ -86,7 +87,6 @@ DEFAULT_SETTINGS = {
     "calibre_sync_interval_minutes": 60,
     "rate_goodreads": 2,
     "rate_hardcover": 1,
-    "rate_fantasticfiction": 2,
     "rate_kobo": 3,
     "verbose_logging": False,
     "author_scanning_enabled": True,
@@ -119,7 +119,7 @@ def apply_logging(verbose: bool = False):
     import logging
     level = logging.DEBUG if verbose else logging.INFO
     # Set source loggers
-    for name in ["athenascout", "athenascout.goodreads", "athenascout.hardcover", "athenascout.fantasticfiction",
+    for name in ["athenascout", "athenascout.goodreads", "athenascout.hardcover",
                  "athenascout.kobo", "athenascout.lookup", "athenascout.calibre_sync", "athenascout.mam"]:
         logging.getLogger(name).setLevel(level)
     # Keep httpx at INFO always (too noisy at DEBUG)
@@ -301,8 +301,10 @@ def load_settings() -> dict:
                 old_rate = merged.pop("rate_limit_delay_seconds", 2)
                 merged["rate_goodreads"] = old_rate
                 merged["rate_hardcover"] = max(1, old_rate - 1)
-                merged["rate_fantasticfiction"] = old_rate
                 merged["rate_kobo"] = old_rate + 1
+            # Strip orphaned FantasticFiction settings if present in old settings.json
+            for k in ("fantasticfiction_enabled", "rate_fantasticfiction"):
+                merged.pop(k, None)
             # Env vars only seed on first run — settings.json is source of truth
             _settings_cache["data"] = merged
             _settings_cache["mtime"] = cur_mtime

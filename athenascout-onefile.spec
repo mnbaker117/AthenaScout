@@ -28,7 +28,6 @@ hiddenimports = [
     'app.sources.goodreads',
     'app.sources.kobo',
     'app.sources.hardcover',
-    'app.sources.fantasticfiction',
     'app.sources.mam',
     'uvicorn.lifespan.on',
     'uvicorn.lifespan.off',

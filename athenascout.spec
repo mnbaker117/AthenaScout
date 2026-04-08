@@ -40,7 +40,6 @@ hiddenimports = [
     'app.sources.goodreads',
     'app.sources.kobo',
     'app.sources.hardcover',
-    'app.sources.fantasticfiction',
     'app.sources.mam',
 
     # Uvicorn protocol/lifespan handlers — auto-selected at runtime

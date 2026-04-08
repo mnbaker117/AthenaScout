@@ -8,7 +8,7 @@ Depends:
 Description: Self-hosted book library completionist tracker
  AthenaScout syncs Calibre libraries with metadata sources to identify
  missing books from collected authors and series. Supports Goodreads,
- Hardcover, Kobo, FantasticFiction, and MyAnonamouse integration.
+ Hardcover, Kobo, and MyAnonamouse integration.
  .
  Web UI accessible at http://localhost:8787 after launching.
 Homepage: https://github.com/mnbaker117/AthenaScout

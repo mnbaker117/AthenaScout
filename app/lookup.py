@@ -1,5 +1,5 @@
 """
-Lookup Engine — Goodreads → Hardcover → FantasticFiction → Kobo
+Lookup Engine — Goodreads → Hardcover → Kobo
 Features: author validation (relaxed matching), language filtering, caching.
 """
 import asyncio, time, re, logging, json
@@ -8,7 +8,6 @@ from app.config import load_settings
 from app.database import get_db
 from app.sources.hardcover import HardcoverSource
 from app.sources.goodreads import GoodreadsSource
-from app.sources.fantasticfiction import FantasticFictionSource
 from app.sources.kobo import KoboSource
 from app.sources.base import AuthorResult
 
@@ -97,16 +96,14 @@ def _merge_source_urls(existing_json: str, source_name: str, new_url: str) -> st
 
 hardcover = HardcoverSource()
 goodreads = GoodreadsSource()
-fantasticfiction = FantasticFictionSource()
 kobo = KoboSource()
 
 
 def reload_sources():
-    global hardcover, goodreads, fantasticfiction, kobo
+    global hardcover, goodreads, kobo
     s = load_settings()
     hardcover = HardcoverSource(api_key=s.get("hardcover_api_key", ""))
     goodreads = GoodreadsSource(rate_limit=s.get("rate_goodreads", 2))
-    fantasticfiction = FantasticFictionSource(rate_limit=s.get("rate_fantasticfiction", 2))
     kobo = KoboSource(rate_limit=s.get("rate_kobo", 3))
 
 
@@ -388,7 +385,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         rows_by_norm = {_normalize(r["title"]): r for r in rows}
 
         # Source priority: Goodreads can overwrite series from any other source
-        SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "fantasticfiction": 4, "manual": 5, "import": 5, "calibre": 0}
+        SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "manual": 5, "import": 5, "calibre": 0}
         
         def _update_existing(matched_row, bk, series_id=None):
             """Build UPDATE for an existing book — URL merge always, series with priority, metadata in full_scan.
@@ -698,20 +695,17 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         await db.close()
 
     # 1. Goodreads (PRIMARY)
-    total += await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
+    if settings.get("goodreads_enabled", True):
+        total += await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
 
     # 2. Hardcover
-    if settings.get("hardcover_api_key"):
+    if settings.get("hardcover_api_key") and settings.get("hardcover_enabled", True):
         hardcover.update_api_key(settings["hardcover_api_key"])
         hardcover._owned_titles = our_titles
         hardcover._owned_series_names = our_series_names
         total += await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
 
-    # 3. FantasticFiction
-    if settings.get("fantasticfiction_enabled", False):
-        total += await _try_source(fantasticfiction, author_name, author_id, our_titles, languages, "fantasticfiction", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
-
-    # 4. Kobo
+    # 3. Kobo
     if settings.get("kobo_enabled", True):
         total += await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only)
 
