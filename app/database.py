@@ -210,6 +210,11 @@ CREATE INDEX IF NOT EXISTS idx_books_new ON books(is_new);
 CREATE INDEX IF NOT EXISTS idx_books_hidden ON books(hidden);
 CREATE INDEX IF NOT EXISTS idx_authors_name ON authors(name);
 CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status);
+-- Composite index for the most common combined filter across the app:
+-- "all owned (or missing) books for a given author". Used heavily by
+-- the author-detail page and the lookup-merge pass that runs once per
+-- author during source scans.
+CREATE INDEX IF NOT EXISTS idx_books_author_owned ON books(author_id, owned);
 """
 
 # Migrations for existing databases
@@ -239,6 +244,7 @@ MIGRATIONS = [
     "ALTER TABLE books ADD COLUMN mam_has_multiple INTEGER NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status)",
     "ALTER TABLE books ADD COLUMN mam_my_snatched INTEGER NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS idx_books_author_owned ON books(author_id, owned)",
 ]
 
 

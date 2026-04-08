@@ -221,7 +221,32 @@ def discover_libraries(settings=None):
     return libraries
 
 
+# ─── Settings cache ──────────────────────────────────────────
+# `load_settings()` used to open+parse the JSON file on every call. The
+# MAM scheduler, lookup engine, and most routers call it multiple times
+# per request (lookup.py alone hits it 4+ times per author during scans),
+# so we were doing dozens of disk reads per second on large scans.
+#
+# Now we cache the parsed dict keyed by the file's mtime. Any call site
+# that calls `save_settings()` will bump the mtime, which invalidates the
+# cache on the next `load_settings()` call automatically — no explicit
+# invalidation hook required. Handles the first-run case (no file yet)
+# by caching under mtime=None until the file appears.
+_settings_cache: dict = {"mtime": object(), "data": None}
+
+
 def load_settings() -> dict:
+    # Stat the settings file once per call. Cheap (single syscall) and
+    # lets us serve the cached dict without re-reading when nothing has
+    # changed since last call.
+    try:
+        cur_mtime = SETTINGS_PATH.stat().st_mtime if SETTINGS_PATH.exists() else None
+    except OSError:
+        cur_mtime = None
+
+    if _settings_cache["data"] is not None and cur_mtime == _settings_cache["mtime"]:
+        return _settings_cache["data"]
+
     if SETTINGS_PATH.exists():
         try:
             with open(SETTINGS_PATH) as f:
@@ -235,6 +260,8 @@ def load_settings() -> dict:
                 merged["rate_fantasticfiction"] = old_rate
                 merged["rate_kobo"] = old_rate + 1
             # Env vars only seed on first run — settings.json is source of truth
+            _settings_cache["data"] = merged
+            _settings_cache["mtime"] = cur_mtime
             return merged
         except Exception:
             pass
@@ -242,6 +269,12 @@ def load_settings() -> dict:
     settings = dict(DEFAULT_SETTINGS)
     _apply_env_overrides(settings)
     save_settings(settings)
+    # save_settings() bumps the mtime; re-stat so the cache key matches.
+    try:
+        _settings_cache["mtime"] = SETTINGS_PATH.stat().st_mtime
+    except OSError:
+        _settings_cache["mtime"] = None
+    _settings_cache["data"] = settings
     return settings
 
 
@@ -264,3 +297,12 @@ def _apply_env_overrides(settings: dict):
 def save_settings(settings: dict):
     with open(SETTINGS_PATH, "w") as f:
         json.dump(settings, f, indent=2)
+    # Warm the cache with the just-saved dict so an immediate subsequent
+    # load_settings() in the same process returns fresh data without
+    # relying on mtime precision (some filesystems are 1-second granular
+    # and rapid save→load sequences could otherwise serve stale data).
+    try:
+        _settings_cache["mtime"] = SETTINGS_PATH.stat().st_mtime
+    except OSError:
+        _settings_cache["mtime"] = None
+    _settings_cache["data"] = dict(settings)

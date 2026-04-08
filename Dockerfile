@@ -3,7 +3,12 @@ FROM node:20-slim AS frontend-build
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+# Use `npm ci` not `npm install`: refuses to mutate the lockfile, errors
+# on lockfile drift, and produces byte-identical installs across runs.
+# This is the standard pattern for reproducible Docker builds and plays
+# nicely with the layer cache above (only re-runs when the lockfile or
+# package.json actually changes).
+RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
@@ -22,7 +27,22 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY --from=frontend-build /frontend/dist ./frontend/dist/
 
-RUN mkdir -p /app/data
+# ─── Non-root User ───────────────────────────────────────────
+# Defense-in-depth hardening: create a dedicated unprivileged user and
+# hand ownership of /app + /app/data to it before switching. The data
+# directory must be owned by the runtime user because AthenaScout writes
+# per-library SQLite databases, the auth secret file (0600), the auth
+# users DB, and settings.json into it. UID 1000 matches the default
+# Docker / Unraid convention so host-mounted volumes stay consistent.
+#
+# MIGRATION NOTE for existing deployments: if your host-mounted data
+# directory was created by a root-run container, you'll need to `chown
+# -R 1000:1000 /path/to/data` on the host once to hand it over to the
+# new runtime user. Fresh deployments need no action.
+RUN mkdir -p /app/data && \
+    useradd --create-home --uid 1000 athenascout && \
+    chown -R athenascout:athenascout /app /app/data
+USER athenascout
 
 LABEL org.opencontainers.image.title="AthenaScout"
 LABEL org.opencontainers.image.description="A self-hosted book library completionist tracker"

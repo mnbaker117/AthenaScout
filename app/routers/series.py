@@ -21,7 +21,26 @@ async def get_series(sid: int):
         if not r:
             raise HTTPException(404)
         s = dict(r)
-        s["books"] = [dict(b) for b in await (await db.execute(f"SELECT b.*, a.name as author_name, sr.name as series_name, (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series sr ON b.series_id=sr.id WHERE b.series_id=? AND {HF} ORDER BY COALESCE(b.series_index,999), b.pub_date ASC", (sid,))).fetchall()]
+        # Pre-aggregated series_total via LEFT JOIN (same refactor as
+        # routers/books.py) — avoids a correlated COUNT firing per returned
+        # row. For this endpoint all returned rows share the same
+        # series_id (the query is WHERE b.series_id=?), so every row's
+        # series_total is identical — the old code computed it N times.
+        s["books"] = [dict(b) for b in await (await db.execute(f"""
+            SELECT b.*, a.name as author_name, sr.name as series_name,
+                COALESCE(st.series_total, 0) as series_total
+            FROM books b
+            JOIN authors a ON b.author_id=a.id
+            LEFT JOIN series sr ON b.series_id=sr.id
+            LEFT JOIN (
+                SELECT series_id, COUNT(*) AS series_total
+                FROM books
+                WHERE hidden=0 AND series_id IS NOT NULL
+                GROUP BY series_id
+            ) st ON st.series_id = b.series_id
+            WHERE b.series_id=? AND {HF}
+            ORDER BY COALESCE(b.series_index,999), b.pub_date ASC
+        """, (sid,))).fetchall()]
         return s
     finally:
         await db.close()

@@ -6,10 +6,7 @@ apscheduler==3.10.4
 beautifulsoup4==4.12.3
 lxml==5.2.0
 pydantic==2.8.0
-jinja2==3.1.6
-python-multipart==0.0.22
 cloudscraper==1.2.71
-aiohttp==3.13.5
 requests==2.33.1
 bcrypt==4.2.1
 itsdangerous==2.2.0

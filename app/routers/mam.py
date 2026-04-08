@@ -375,10 +375,18 @@ async def mam_books_endpoint(section: str = "upload", search: str = "",
         total = count_row[0][0] if count_row else 0
 
         offset = (page - 1) * per_page
+        # Pre-aggregated series_total (same refactor as routers/books.py) —
+        # replaces a correlated COUNT(*) that fired once per returned row.
         data_sql = f"""SELECT b.*, a.name as author_name, s.name as series_name,
-            (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total
+            COALESCE(st.series_total, 0) as series_total
             FROM books b JOIN authors a ON b.author_id=a.id
             LEFT JOIN series s ON b.series_id=s.id
+            LEFT JOIN (
+                SELECT series_id, COUNT(*) AS series_total
+                FROM books
+                WHERE hidden=0 AND series_id IS NOT NULL
+                GROUP BY series_id
+            ) st ON st.series_id = b.series_id
             WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?"""
         rows = await db.execute_fetchall(data_sql, params + [per_page, offset])
         books = [dict(r) for r in rows]

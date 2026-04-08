@@ -13,6 +13,36 @@ logger = logging.getLogger("athenascout")
 
 router = APIRouter(prefix="/api", tags=["books"])
 
+# ─── Shared SELECT fragments ────────────────────────────────
+# `SERIES_TOTAL_JOIN` pre-aggregates visible-book counts per series in a
+# single subquery instead of the old correlated-subquery-per-row pattern.
+# The old code ran `(SELECT COUNT(*) ... WHERE series_id=b.series_id)`
+# once for every row returned — a 60-book page did 60 sub-COUNTs. This
+# version does ONE scan, then LEFT JOINs against the result.
+#
+# Preserves the original semantics: standalone books (series_id IS NULL)
+# get series_total=0 via COALESCE, matching what the old correlated
+# subquery returned for them. The inner filter is fixed at hidden=0 —
+# series_total always represents "visible books in this series" even
+# when include_hidden=True on the outer query (matches prior behavior).
+_SERIES_TOTAL_JOIN = """
+LEFT JOIN (
+    SELECT series_id, COUNT(*) AS series_total
+    FROM books
+    WHERE hidden=0 AND series_id IS NOT NULL
+    GROUP BY series_id
+) st ON st.series_id = b.series_id
+""".strip()
+
+_BOOKS_SELECT = (
+    "SELECT b.*, a.name as author_name, s.name as series_name, "
+    "COALESCE(st.series_total, 0) as series_total "
+    "FROM books b "
+    "JOIN authors a ON b.author_id=a.id "
+    "LEFT JOIN series s ON b.series_id=s.id "
+    f"{_SERIES_TOTAL_JOIN}"
+)
+
 
 # ─── Books ───────────────────────────────────────────────────
 @router.get("/books")
@@ -37,7 +67,7 @@ async def get_books(search: str = Query(None), author_id: int = Query(None), ser
         d = "DESC" if sort_dir == "desc" else "ASC"
         o = {"title": f"b.title {d}", "author": f"a.sort_name {d}, b.title ASC", "series": f"COALESCE(s.name,'zzz') {d}, b.series_index ASC", "date": f"b.pub_date {d}", "added": f"b.first_seen_at {d}"}.get(sort, f"b.title {d}")
         off = (page-1)*per_page
-        rows = await (await db.execute(f"SELECT b.*, a.name as author_name, s.name as series_name, (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w} ORDER BY {o} LIMIT ? OFFSET ?", p+[per_page, off])).fetchall()
+        rows = await (await db.execute(f"{_BOOKS_SELECT} WHERE {w} ORDER BY {o} LIMIT ? OFFSET ?", p+[per_page, off])).fetchall()
         return {"books": [dict(r) for r in rows], "total": cnt, "page": page, "per_page": per_page, "pages": max(1, (cnt+per_page-1)//per_page)}
     finally: await db.close()
 
@@ -62,7 +92,7 @@ async def get_upcoming(search: str = Query(None), sort: str = Query("date"), sor
         d = "DESC" if sort_dir == "desc" else "ASC"
         o = {"date": f"COALESCE(b.expected_date, '9999') {d}", "title": f"b.title {d}", "author": f"a.sort_name {d}"}.get(sort, f"COALESCE(b.expected_date, '9999') {d}")
         off = (page-1)*per_page
-        rows = await (await db.execute(f"SELECT b.*, a.name as author_name, s.name as series_name, (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE {w} ORDER BY {o} LIMIT ? OFFSET ?", p+[per_page, off])).fetchall()
+        rows = await (await db.execute(f"{_BOOKS_SELECT} WHERE {w} ORDER BY {o} LIMIT ? OFFSET ?", p+[per_page, off])).fetchall()
         return {"books": [dict(r) for r in rows], "total": cnt, "page": page, "per_page": per_page, "pages": max(1, (cnt+per_page-1)//per_page)}
     finally: await db.close()
 
@@ -94,7 +124,7 @@ async def unhide(bid: int):
 async def get_hidden():
     db = await get_db()
     try:
-        rows = await (await db.execute("SELECT b.*, a.name as author_name, s.name as series_name, (SELECT COUNT(*) FROM books b2 WHERE b2.series_id=b.series_id AND b2.hidden=0) as series_total FROM books b JOIN authors a ON b.author_id=a.id LEFT JOIN series s ON b.series_id=s.id WHERE b.hidden=1 ORDER BY a.sort_name, b.title")).fetchall()
+        rows = await (await db.execute(f"{_BOOKS_SELECT} WHERE b.hidden=1 ORDER BY a.sort_name, b.title")).fetchall()
         return {"books": [dict(r) for r in rows]}
     finally:
         await db.close()

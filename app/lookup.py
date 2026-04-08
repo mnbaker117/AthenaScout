@@ -15,6 +15,28 @@ from app.sources.base import AuthorResult
 logger = logging.getLogger("athenascout.lookup")
 
 
+# ─── Pre-compiled regex patterns ─────────────────────────────
+# Hoisted to module scope so `_normalize`, `_normalize_light`,
+# `_looks_foreign`, and `_is_series_ref_title` don't re-lookup (and in
+# the worst case recompile) the same patterns thousands of times per
+# scan. Python's built-in regex LRU is only 512 entries and can thrash
+# with inline literal patterns in hot loops — explicit compilation is
+# faster AND makes the patterns visible at the top of the file.
+_RX_LEADING_ARTICLE = re.compile(r'^(the|a|an)\s+')
+_RX_PARENS = re.compile(r'\s*\([^)]*\)\s*')
+_RX_SUBTITLE = re.compile(r'\s*:.*$')
+_RX_NONWORD = re.compile(r'[^\w\s]')
+_RX_SPACES = re.compile(r'\s+')
+_RX_FOREIGN_ACCENTS = re.compile(
+    r'[àáâãäåæçèéêëìíîïðñòóôõöùúûüýþÿąćęłńóśźżšžřůďťňĺľŕäöüß]',
+    re.I,
+)
+_RX_FOREIGN_UNICODE = re.compile(
+    r'[\u0400-\u04ff\u3000-\u9fff\u0600-\u06ff\uac00-\ud7af]'
+)
+_RX_SERIES_REF_TITLE = re.compile(r'^.+\s+#\d+\s*$')
+
+
 def _merge_source_urls(existing_json: str, source_name: str, new_url: str) -> str:
     """Merge a new source URL into the JSON dict stored in source_url column."""
     if not new_url:
@@ -46,19 +68,19 @@ def reload_sources():
 
 def _normalize(t: str) -> str:
     t = t.lower().strip()
-    t = re.sub(r'^(the|a|an)\s+', '', t)
-    t = re.sub(r'\s*\([^)]*\)\s*', ' ', t)  # Remove parenthetical
-    t = re.sub(r'\s*:.*$', '', t)  # Remove subtitle after colon
-    t = re.sub(r'[^\w\s]', '', t)
-    t = re.sub(r'\s+', ' ', t)
+    t = _RX_LEADING_ARTICLE.sub('', t)
+    t = _RX_PARENS.sub(' ', t)  # Remove parenthetical
+    t = _RX_SUBTITLE.sub('', t)  # Remove subtitle after colon
+    t = _RX_NONWORD.sub('', t)
+    t = _RX_SPACES.sub(' ', t)
     return t.strip()
 
 def _normalize_light(t: str) -> str:
     """Light normalization — keeps subtitles, just cleans punctuation."""
     t = t.lower().strip()
-    t = re.sub(r'\s*\([^)]*\)\s*', ' ', t)
-    t = re.sub(r'[^\w\s]', ' ', t)
-    t = re.sub(r'\s+', ' ', t)
+    t = _RX_PARENS.sub(' ', t)
+    t = _RX_NONWORD.sub(' ', t)
+    t = _RX_SPACES.sub(' ', t)
     return t.strip()
 
 
@@ -89,9 +111,9 @@ def _lang_ok(book_lang: str, allowed: list[str]) -> bool:
 
 def _looks_foreign(title: str) -> bool:
     """Detect titles that are likely non-English."""
-    if re.search(r'[àáâãäåæçèéêëìíîïðñòóôõöùúûüýþÿąćęłńóśźżšžřůďťňĺľŕäöüß]', title, re.I):
+    if _RX_FOREIGN_ACCENTS.search(title):
         return True
-    if re.search(r'[\u0400-\u04ff\u3000-\u9fff\u0600-\u06ff\uac00-\ud7af]', title):
+    if _RX_FOREIGN_UNICODE.search(title):
         return True
     # Common foreign words in translated titles
     tl = title.lower()
@@ -104,7 +126,7 @@ def _looks_foreign(title: str) -> bool:
 
 def _is_series_ref_title(title: str) -> bool:
     """Detect titles like 'The Expanse #3' or 'New Novella #2' — series position refs, not real titles."""
-    return bool(re.match(r'^.+\s+#\d+\s*$', title.strip()))
+    return bool(_RX_SERIES_REF_TITLE.match(title.strip()))
 
 
 # Patterns that indicate a book set/collection

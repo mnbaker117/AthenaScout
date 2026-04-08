@@ -65,7 +65,7 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: |
-          npm install
+          npm ci
           npm run build
 
       - name: Build executable with PyInstaller
