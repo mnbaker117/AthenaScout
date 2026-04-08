@@ -7,22 +7,23 @@ import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
 
-export default function Dashboard({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[lookupScan,setLookupScan]=useState(null);const[mamScan,setMamScan]=useState(null);const[sugCount,setSugCount]=useState(0);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
+export default function Dashboard({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[scans,setScans]=useState([]);const[sugCount,setSugCount]=useState(0);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
 // Phase 3c: pending suggestions count for the Dashboard card. Refetched
 // on the same "athenascout:suggestions-changed" event the navbar uses,
 // so accepting/ignoring on the SuggestionsPage immediately reflects here.
 useEffect(()=>{const refresh=()=>api.get("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[]);
-useEffect(()=>{api.get("/lookup/status").then(r=>{if(r.running||(r.status&&r.status!=="idle"))setLookupScan(r)}).catch(()=>{});api.get("/mam/scan/status").then(r=>{if(r.running||r.status==="complete")setMamScan(r)}).catch(()=>{})},[]);
-// Lookup polling (3s while running). Page Visibility API: skip the fetch when the tab is
-// hidden (saves network chatter on long-running scans left open in a background tab), and
-// fire an immediate catch-up fetch when visibility returns so the user sees fresh progress
-// without waiting a full interval tick.
-useEffect(()=>{if(!lookupScan?.running)return;const tick=()=>{if(document.hidden)return;api.get("/lookup/status").then(r=>{setLookupScan(r);if(!r.running){clearInterval(iv);api.get("/stats").then(setD)}}).catch(()=>{})};const iv=setInterval(tick,3000);const onVis=()=>{if(!document.hidden)tick()};document.addEventListener("visibilitychange",onVis);return()=>{clearInterval(iv);document.removeEventListener("visibilitychange",onVis)}},[lookupScan?.running]);
-// MAM active polling (5s while running). Same Page Visibility treatment.
-useEffect(()=>{if(!mamScan?.running)return;const tick=()=>{if(document.hidden)return;api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running)clearInterval(iv)}).catch(()=>{})};const iv=setInterval(tick,5000);const onVis=()=>{if(!document.hidden)tick()};document.addEventListener("visibilitychange",onVis);return()=>{clearInterval(iv);document.removeEventListener("visibilitychange",onVis)}},[mamScan?.running]);
-// MAM idle watchdog (30s when not running — catches scheduled scans that start while user
-// is on the dashboard). Also pauses when tab hidden.
-useEffect(()=>{if(mamScan?.running)return;const tick=()=>{if(document.hidden)return;api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{})};const iv=setInterval(tick,30000);const onVis=()=>{if(!document.hidden)tick()};document.addEventListener("visibilitychange",onVis);return()=>{clearInterval(iv);document.removeEventListener("visibilitychange",onVis)}},[mamScan?.running]);
+// Phase 3d-1: unified scan progress. Polls /api/scan-status which projects
+// _lookup_progress and _mam_scan_progress into a uniform shape, so a single
+// effect handles every kind of scan (Dashboard-triggered, Author-page,
+// BookSidebar, Settings, scheduled, bulk select). 3s while ANY scan is
+// running, 30s idle watchdog to catch scheduled jobs and remote triggers.
+// athenascout:scan-started window event causes an immediate refetch so
+// scans triggered from elsewhere appear without polling lag.
+const lookupRunning=scans.some(s=>s.kind==="lookup"&&s.running);
+const anyRunning=scans.some(s=>s.running);
+const refreshScans=()=>api.get("/scan-status").then(r=>{setScans(r.scans||[]);if(!r.scans?.some(s=>s.running))api.get("/stats").then(setD).catch(()=>{})}).catch(()=>{});
+useEffect(()=>{refreshScans();window.addEventListener("athenascout:scan-started",refreshScans);return()=>window.removeEventListener("athenascout:scan-started",refreshScans);/* eslint-disable-next-line */},[]);
+useEffect(()=>{const interval=anyRunning?3000:30000;const tick=()=>{if(document.hidden)return;refreshScans()};const iv=setInterval(tick,interval);const onVis=()=>{if(!document.hidden)tick()};document.addEventListener("visibilitychange",onVis);return()=>{clearInterval(iv);document.removeEventListener("visibilitychange",onVis)};/* eslint-disable-next-line */},[anyRunning]);
 if(!d)return<Load/>;
 const p=pct(d.owned_books,d.total_books);
 return<div style={{display:"flex",flexDirection:"column",gap:24}}>
@@ -66,32 +67,32 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <div style={{flex:"1 1 320px"}}>
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>Actions</div>
 <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+{(()=>{const lookup=scans.find(s=>s.kind==="lookup");const mam=scans.find(s=>s.kind==="mam");const lookupType=lookup?.type;const mamRunning=mam?.running;return<>
 <Btn variant="accent" onClick={async()=>{setSy(true);try{await api.post("/sync/calibre")}catch{}setSy(false);api.get("/stats").then(setD)}} disabled={sy}>{sy?<Spin/>:Ic.sync} Sync Library</Btn>
-<Btn onClick={async()=>{try{const r=await api.post("/sync/lookup");if(r.error){alert(r.error)}else if(r.due===0){const st=await api.get("/lookup/status");setLookupScan(st)}else{setLookupScan({running:true,checked:0,total:r.due||0,current_author:"",new_books:0,status:"scanning",type:"lookup"})}}catch{}}} disabled={lookupScan?.running}>{lookupScan?.running&&lookupScan?.type==="lookup"?<Spin/>:Ic.search} Scan Sources</Btn>
-<Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;try{const r=await api.post("/sync/full-rescan");if(r.error){alert(r.error)}else{setLookupScan({running:true,checked:0,total:0,current_author:"",new_books:0,status:"scanning",type:"full_rescan"})}}catch{}}} disabled={lookupScan?.running}>{lookupScan?.running&&lookupScan?.type==="full_rescan"?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
-{d.mam_enabled&&d.mam_scanning_enabled!==false?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error){alert(r.error)}else{setMamScan({running:true,scanned:0,total:r.total||0,found:0,possible:0,not_found:0,errors:0,status:"scanning",type:"manual"})}}catch{}}} disabled={mamScan?.running}>{mamScan?.running?<Spin/>:Ic.search} MAM Scan</Btn>:null}
+<Btn onClick={async()=>{try{const r=await api.post("/sync/lookup");if(r.error)alert(r.error);else{refreshScans();window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch{}}} disabled={lookupRunning}>{lookupRunning&&lookupType==="lookup"?<Spin/>:Ic.search} Scan Sources</Btn>
+<Btn variant="ghost" onClick={async()=>{if(!confirm("Full Re-Scan visits every book page to refresh all metadata. This can take several minutes for large libraries. Continue?"))return;try{const r=await api.post("/sync/full-rescan");if(r.error)alert(r.error);else{refreshScans();window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch{}}} disabled={lookupRunning}>{lookupRunning&&lookupType==="full_rescan"?<Spin/>:Ic.refresh} Full Re-Scan</Btn>
+{d.mam_enabled&&d.mam_scanning_enabled!==false?<Btn onClick={async()=>{try{const r=await api.post("/mam/scan");if(r.error)alert(r.error);else{refreshScans();window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch{}}} disabled={mamRunning}>{mamRunning?<Spin/>:Ic.search} MAM Scan</Btn>:null}
+</>})()}
 </div>
 <div style={{display:"flex",gap:16,marginTop:12,fontSize:12,color:t.tg}}>
 <span>{d.last_calibre_check?.at?`Last checked: ${timeAgo(d.last_calibre_check.at)}${d.last_calibre_check.synced?" (synced)":" (no changes)"}`:`Last sync: ${timeAgo(d.last_calibre_sync?.finished_at)}`}</span>
 <span>Last lookup: {timeAgo(d.last_lookup?.finished_at)}</span>
 </div>
 
-{/* ── Scan Progress ── */}
-{lookupScan&&lookupScan.status!=="idle"?<div style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{lookupScan.running?<div>
+{/* ── Phase 3d-1: Unified Scan Progress ── One row per active or recently-completed
+     scan, regardless of where it was triggered. Each row is keyed by scan kind
+     so multiple scan types (lookup + MAM) can show side-by-side when both are
+     running concurrently. The widget auto-hides entirely when nothing has run.
+     Per-row Stop buttons route cancellation to the right kind-specific endpoint. */}
+{scans.map(scan=>{const isLookup=scan.kind==="lookup";const isMam=scan.kind==="mam";const ex=scan.extra||{};const pctVal=scan.total>0?Math.round((scan.current/scan.total)*100):0;const cancelEndpoint=isLookup?"/lookup/cancel":"/mam/scan/cancel";return<div key={scan.kind} style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{scan.running?<div>
 <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}>
-<span>{lookupScan.type==="full_rescan"?"Full Re-Scan":"Scanning sources..."} {lookupScan.current_author?`— ${lookupScan.current_author}`:""}</span>
-<span style={{fontSize:11,color:t.tg}}>{lookupScan.checked} of {lookupScan.total} authors</span></div>
-<div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${lookupScan.total>0?Math.round(lookupScan.checked/lookupScan.total*100):0}%`,height:"100%",borderRadius:3,background:t.accent,transition:"width 0.5s"}}/></div>
-<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,color:t.tg}}>New books found: <b style={{color:t.grnt}}>{lookupScan.new_books}</b></span><Btn size="sm" onClick={async()=>{try{await api.post("/lookup/cancel");const r=await api.get("/lookup/status");setLookupScan(r)}catch{}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
-</div>:<div style={{fontSize:13,color:lookupScan.status==="complete"?t.grnt:t.redt}}>{lookupScan.status==="complete"?`${lookupScan.type==="full_rescan"?"Full Re-Scan":"Source Scan"} Complete — ${lookupScan.checked} authors checked, ${lookupScan.new_books} new books found`:`Source Scan: ${lookupScan.status}`}</div>}</div>:null}
-
-{mamScan&&mamScan.status!=="idle"?<div style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{mamScan.running?<div>
-<div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}>
-<span>{mamScan.status==="paused"?"Paused — resuming in 5 min":mamScan.status==="waiting (author scan running)"?"Waiting for author scan...":mamScan.type==="scheduled"?"Scheduled scan running...":"Scanning MAM..."}{" "}{mamScan.scanned} of {mamScan.total} books{mamScan.remaining?(()=>{const rem=mamScan.remaining-(mamScan.scanned||0);return rem>0?` (${rem.toLocaleString()} total remaining)`:""})():""}</span>
-<span style={{fontSize:11,textTransform:"capitalize",color:t.tg}}>{mamScan.type||"scan"}</span></div>
-<div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${mamScan.total>0?Math.round(mamScan.scanned/mamScan.total*100):0}%`,height:"100%",borderRadius:3,background:mamScan.status==="paused"?t.ylw:t.accent,transition:"width 0.5s"}}/></div>
-<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",gap:12,fontSize:11,color:t.tg}}><span style={{color:t.grnt}}>Found: {mamScan.found}</span><span style={{color:t.ylwt}}>Possible: {mamScan.possible}</span><span style={{color:t.redt}}>Not found: {mamScan.not_found}</span>{mamScan.errors>0?<span style={{color:t.red}}>Errors: {mamScan.errors}</span>:null}</div><Btn size="sm" onClick={async()=>{try{await api.post("/mam/scan/cancel");const r=await api.get("/mam/scan/status");setMamScan(r)}catch{}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
-</div>:<div style={{fontSize:13}}><span style={{color:mamScan.status==="complete"?t.grnt:t.redt}}>{mamScan.status==="complete"?(()=>{const rem=mamScan.remaining!=null?mamScan.remaining-(mamScan.scanned||0):(mamScan.total||0)-(mamScan.scanned||0);return`MAM Scan Complete — ${mamScan.scanned} scanned: ${mamScan.found} found, ${mamScan.possible} possible, ${mamScan.not_found} not found${mamScan.errors>0?`, ${mamScan.errors} errors`:""}${rem>0?` · ${rem.toLocaleString()} unscanned`:""}`})():`MAM Scan: ${mamScan.status}`}</span></div>}</div>:null}
+<span><b style={{color:t.text2}}>{scan.label}</b>{scan.status==="paused"?" — Paused, resuming in 5 min":scan.status==="waiting (author scan running)"?" — Waiting for author scan...":scan.current_label?` — ${scan.current_label}`:""}</span>
+<span style={{fontSize:11,color:t.tg}}>{scan.current} of {scan.total} {isLookup?"authors":"books"}{isMam&&ex.remaining?(()=>{const rem=ex.remaining-(scan.current||0);return rem>0?` (${rem.toLocaleString()} total remaining)`:""})():""}</span></div>
+<div style={{height:6,borderRadius:3,background:t.bg,overflow:"hidden",marginBottom:6}}><div style={{width:`${pctVal}%`,height:"100%",borderRadius:3,background:scan.status==="paused"?t.ylw:t.accent,transition:"width 0.5s"}}/></div>
+<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+{isLookup?<span style={{fontSize:11,color:t.tg}}>New books found: <b style={{color:t.grnt}}>{ex.new_books||0}</b></span>:<div style={{display:"flex",gap:12,fontSize:11,color:t.tg}}><span style={{color:t.grnt}}>Found: {ex.found||0}</span><span style={{color:t.ylwt}}>Possible: {ex.possible||0}</span><span style={{color:t.redt}}>Not found: {ex.not_found||0}</span>{ex.errors>0?<span style={{color:t.red}}>Errors: {ex.errors}</span>:null}</div>}
+<Btn size="sm" onClick={async()=>{try{await api.post(cancelEndpoint);refreshScans()}catch{}}} style={{background:t.red+"22",color:t.redt,border:`1px solid ${t.red}44`,padding:"2px 8px",fontSize:11}}>Stop</Btn></div>
+</div>:<div style={{fontSize:13,color:scan.status==="complete"?t.grnt:t.redt}}>{scan.status==="complete"?<>{scan.label} Complete — {isLookup?`${scan.current} authors checked, ${ex.new_books||0} new books found`:(()=>{const rem=ex.remaining!=null?ex.remaining-(scan.current||0):(scan.total||0)-(scan.current||0);return`${scan.current} scanned: ${ex.found||0} found, ${ex.possible||0} possible, ${ex.not_found||0} not found${ex.errors>0?`, ${ex.errors} errors`:""}${rem>0?` · ${rem.toLocaleString()} unscanned`:""}`})()}</>:`${scan.label}: ${scan.status}`}</div>}</div>})}
 
 {d.mam_enabled?<div style={{fontSize:11,color:t.tg,marginTop:6,fontStyle:"italic"}}>MAM Scan checks all books missing MAM data (100 per batch, 5-min pauses between batches).</div>:null}
 </div>

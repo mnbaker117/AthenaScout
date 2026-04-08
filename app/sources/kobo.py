@@ -72,7 +72,15 @@ class KoboSource(BaseSource):
             return None
         time.sleep(self.rate_limit)
         try:
-            r = session.get(url, timeout=15)
+            # 30s read timeout (was 15s). Cloudscraper-fronted Kobo
+            # detail pages occasionally take 15-25s to respond when
+            # the Cloudflare challenge resolver does extra work,
+            # especially mid-scan on prolific authors. Two consecutive
+            # post-3c Sanderson scans tripped this around books 35-55
+            # of his 85-book catalog. The rate limit (3s/req) governs
+            # how OFTEN we call; this governs how long any single
+            # response can take.
+            r = session.get(url, timeout=30)
             if r.status_code == 200:
                 return r.text
             return None

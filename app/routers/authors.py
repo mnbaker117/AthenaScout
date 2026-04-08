@@ -7,6 +7,7 @@ clear-scan-data.
 import logging
 from fastapi import APIRouter, Body, HTTPException, Query
 
+from app import state
 from app.config import load_settings
 from app.database import get_db, HF
 from app.lookup import lookup_author
@@ -85,6 +86,41 @@ async def get_author(aid: int):
         await db.close()
 
 
+async def _run_single_author_with_progress(aid: int, name: str, full_scan: bool, scan_type: str):
+    """Run lookup_author with _lookup_progress wired up.
+
+    Phase 3d-1: single-author lookups previously bypassed _lookup_progress
+    entirely, so a scan triggered from the Author page or BookSidebar
+    didn't appear in the unified Dashboard widget. This wrapper sets
+    running=True with total=1 for the duration, then marks complete (or
+    errored). It also serves as the lock — concurrent author scans
+    (whether from the Dashboard, the Authors page bulk action, or
+    another single-author trigger) are rejected via the running check.
+
+    Returns the new-book count so the caller (synchronous endpoint) can
+    surface it directly to the frontend, matching the prior behavior.
+    """
+    if state._lookup_progress.get("running"):
+        raise HTTPException(409, "An author scan is already running")
+    if state._lookup_task and not state._lookup_task.done():
+        raise HTTPException(409, "An author scan is already running")
+
+    state._lookup_progress = {
+        "running": True, "checked": 0, "total": 1, "current_author": name,
+        "new_books": 0, "status": "scanning", "type": scan_type,
+    }
+    try:
+        new_books = await lookup_author(aid, name, full_scan=full_scan)
+        state._lookup_progress.update({
+            "running": False, "checked": 1,
+            "new_books": int(new_books or 0), "status": "complete",
+        })
+        return new_books
+    except Exception as e:
+        state._lookup_progress.update({"running": False, "status": f"error: {e}"})
+        raise
+
+
 @router.post("/authors/{aid}/lookup")
 async def trigger_author_lookup(aid: int):
     s = load_settings()
@@ -97,7 +133,10 @@ async def trigger_author_lookup(aid: int):
             raise HTTPException(404)
     finally:
         await db.close()
-    return {"status": "ok", "new_books": await lookup_author(aid, dict(r)["name"])}
+    new_books = await _run_single_author_with_progress(
+        aid, dict(r)["name"], full_scan=False, scan_type="single_author",
+    )
+    return {"status": "ok", "new_books": new_books}
 
 
 @router.post("/authors/{aid}/full-rescan")
@@ -113,7 +152,10 @@ async def trigger_author_full_rescan(aid: int):
             raise HTTPException(404)
     finally:
         await db.close()
-    return {"status": "ok", "new_books": await lookup_author(aid, dict(r)["name"], full_scan=True)}
+    new_books = await _run_single_author_with_progress(
+        aid, dict(r)["name"], full_scan=True, scan_type="single_author_full",
+    )
+    return {"status": "ok", "new_books": new_books}
 
 
 @router.post("/authors/clear-scan-data")
@@ -187,18 +229,40 @@ async def scan_authors_sources(data: dict = Body(...)):
     if not rows:
         return {"error": "No matching authors found"}
 
+    # Phase 3d-1: surface this bulk action in the unified Dashboard
+    # widget. Same lock as single-author lookups and the full scan —
+    # only one author scan of any flavor at a time.
+    if state._lookup_progress.get("running"):
+        raise HTTPException(409, "An author scan is already running")
+    if state._lookup_task and not state._lookup_task.done():
+        raise HTTPException(409, "An author scan is already running")
+
+    state._lookup_progress = {
+        "running": True, "checked": 0, "total": len(rows), "current_author": "",
+        "new_books": 0, "status": "scanning", "type": "bulk_authors",
+    }
     total_new = 0
     scanned = 0
     errors = 0
-    for row in rows:
-        aid, name = row[0], row[1]
-        try:
-            new_books = await lookup_author(aid, name)
-            total_new += int(new_books or 0)
-            scanned += 1
-        except Exception as e:
-            logger.error(f"Bulk source scan error for author {aid} ({name}): {e}")
-            errors += 1
+    try:
+        for row in rows:
+            aid, name = row[0], row[1]
+            state._lookup_progress.update({"current_author": name})
+            try:
+                new_books = await lookup_author(aid, name)
+                total_new += int(new_books or 0)
+                scanned += 1
+            except Exception as e:
+                logger.error(f"Bulk source scan error for author {aid} ({name}): {e}")
+                errors += 1
+            state._lookup_progress.update({
+                "checked": scanned + errors,
+                "new_books": total_new,
+            })
+        state._lookup_progress.update({"running": False, "status": "complete"})
+    except Exception as e:
+        state._lookup_progress.update({"running": False, "status": f"error: {e}"})
+        raise
     return {"status": "complete", "scanned": scanned, "new_books": total_new, "errors": errors}
 
 

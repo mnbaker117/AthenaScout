@@ -135,6 +135,101 @@ async def lookup_status():
     return dict(state._lookup_progress)
 
 
+# ─── Phase 3d-1: unified scan status ─────────────────────────
+# A single endpoint the Dashboard can poll instead of fanning out to
+# /lookup/status and /mam/scan/status separately. Each progress dict
+# is projected into a uniform shape with `current`/`total` (the actual
+# numerator/denominator the dict tracks under different field names),
+# a `kind`/`type`/`label` triple, and a `extra` bag for kind-specific
+# numbers like new_books or MAM found/possible counts. The frontend
+# maps over `scans` and renders one row per active scan.
+#
+# We project rather than restructure the underlying state to keep the
+# legacy /lookup/status and /mam/scan/status endpoints working for the
+# MAMPage and SettingsPage, which still consume them directly.
+def _label_for(kind: str, scan_type: str) -> str:
+    """Human-readable label for a (kind, type) pair."""
+    if kind == "lookup":
+        return {
+            "lookup":             "Source Scan",
+            "full_rescan":        "Full Re-Scan",
+            "scheduled_lookup":   "Scheduled Source Scan",
+            "single_author":      "Author Scan",
+            "single_author_full": "Author Full Re-Scan",
+            "bulk_authors":       "Bulk Author Scan",
+            "bulk_books":         "Bulk Book Scan",
+        }.get(scan_type, "Source Scan")
+    if kind == "mam":
+        return {
+            "manual":    "MAM Scan",
+            "scheduled": "Scheduled MAM Scan",
+            "full_scan": "MAM Full Scan",
+        }.get(scan_type, "MAM Scan")
+    return scan_type or kind
+
+
+def _project_lookup() -> dict:
+    """Project _lookup_progress into the unified shape."""
+    p = state._lookup_progress
+    return {
+        "kind": "lookup",
+        "type": p.get("type", "none"),
+        "label": _label_for("lookup", p.get("type", "none")),
+        "running": bool(p.get("running")),
+        "current": p.get("checked", 0),
+        "total": p.get("total", 0),
+        "current_label": p.get("current_author", "") or None,
+        "status": p.get("status", "idle"),
+        "extra": {
+            "new_books": p.get("new_books", 0),
+        },
+    }
+
+
+def _project_mam() -> dict:
+    """Project _mam_scan_progress into the unified shape."""
+    p = state._mam_scan_progress
+    return {
+        "kind": "mam",
+        "type": p.get("type", "none"),
+        "label": _label_for("mam", p.get("type", "none")),
+        "running": bool(p.get("running")),
+        "current": p.get("scanned", 0),
+        "total": p.get("total", 0),
+        "current_label": None,
+        "status": p.get("status", "idle"),
+        "extra": {
+            "found":     p.get("found", 0),
+            "possible":  p.get("possible", 0),
+            "not_found": p.get("not_found", 0),
+            "errors":    p.get("errors", 0),
+            "remaining": p.get("remaining"),
+        },
+    }
+
+
+@router.get("/scan-status")
+async def scan_status():
+    """Unified scan progress for the Dashboard widget.
+
+    Returns every tracked scan in a uniform shape regardless of whether
+    it's an author lookup, full re-scan, MAM scan, scheduled job, or a
+    single-author trigger from the Author page. The frontend renders
+    one row per scan with running > complete > idle ordering. A scan
+    in 'idle' state with type='none' is filtered out so the widget
+    auto-hides when nothing has run yet.
+    """
+    out = []
+    for proj in (_project_lookup(), _project_mam()):
+        # Hide entries that are pristine idle (never ran). Keep complete
+        # ones so the user sees the result of the last scan even after
+        # it finishes.
+        if proj["status"] == "idle" and proj["type"] == "none":
+            continue
+        out.append(proj)
+    return {"scans": out}
+
+
 @router.post("/sync/full-rescan")
 async def trigger_full_rescan():
     s = load_settings()

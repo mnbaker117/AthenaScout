@@ -7,6 +7,7 @@ import logging
 import re
 from fastapi import APIRouter, Body, HTTPException, Query
 
+from app import state
 from app.database import get_db, HF
 
 logger = logging.getLogger("athenascout")
@@ -301,18 +302,40 @@ async def scan_books_sources(data: dict = Body(...)):
     if not rows:
         return {"error": "No matching authors found"}
 
+    # Phase 3d-1: surface in unified Dashboard widget. Same global
+    # author-scan lock as the other lookup paths — only one running
+    # at a time across all entry points.
+    if state._lookup_progress.get("running"):
+        raise HTTPException(409, "An author scan is already running")
+    if state._lookup_task and not state._lookup_task.done():
+        raise HTTPException(409, "An author scan is already running")
+
+    state._lookup_progress = {
+        "running": True, "checked": 0, "total": len(rows), "current_author": "",
+        "new_books": 0, "status": "scanning", "type": "bulk_books",
+    }
     total_new = 0
     scanned = 0
     errors = 0
-    for row in rows:
-        aid, name = row["id"], row["name"]
-        try:
-            new_books = await lookup_author(aid, name)
-            total_new += int(new_books or 0)
-            scanned += 1
-        except Exception as e:
-            logger.error(f"Bulk source scan error for author {aid} ({name}): {e}")
-            errors += 1
+    try:
+        for row in rows:
+            aid, name = row["id"], row["name"]
+            state._lookup_progress.update({"current_author": name})
+            try:
+                new_books = await lookup_author(aid, name)
+                total_new += int(new_books or 0)
+                scanned += 1
+            except Exception as e:
+                logger.error(f"Bulk source scan error for author {aid} ({name}): {e}")
+                errors += 1
+            state._lookup_progress.update({
+                "checked": scanned + errors,
+                "new_books": total_new,
+            })
+        state._lookup_progress.update({"running": False, "status": "complete"})
+    except Exception as e:
+        state._lookup_progress.update({"running": False, "status": f"error: {e}"})
+        raise
     return {"status": "complete", "authors_scanned": scanned, "new_books": total_new, "errors": errors}
 
 

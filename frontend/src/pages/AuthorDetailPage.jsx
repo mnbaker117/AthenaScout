@@ -31,7 +31,7 @@ useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const loadA=useCallback((signal)=>{setLd(true);api.get(`/authors/${authorId}`,signal).then(d=>{setA(d);setLd(false)}).catch(e=>{if(!api.isAbort(e))console.error(e)})},[authorId]);useEffect(()=>{const c=new AbortController();loadA(c.signal);return()=>c.abort()},[loadA]);
-const refresh=async(full=false)=>{setRef(true);try{await api.post(`/authors/${authorId}/${full?"full-rescan":"lookup"}`);await loadA();setRk(k=>k+1)}catch(e){console.error(e)}setRef(false)};
+const refresh=async(full=false)=>{setRef(true);window.dispatchEvent(new CustomEvent("athenascout:scan-started"));try{await api.post(`/authors/${authorId}/${full?"full-rescan":"lookup"}`);await loadA();setRk(k=>k+1)}catch(e){console.error(e)}setRef(false);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))};
 const scanMam=async()=>{if(mamRef)return;setMamRef(true);try{const r=await api.post(`/mam/scan-author/${authorId}`);if(r.error){alert(`MAM scan failed: ${r.error}`)}else{alert(`MAM scan complete: ${r.scanned||0} scanned, ${r.found||0} found, ${r.possible||0} possible, ${r.not_found||0} not on MAM`);await loadA();setRk(k=>k+1)}}catch(e){alert(`MAM scan failed: ${e.message||e}`)}setMamRef(false)};
 const onAction=async(act,id)=>{if(act==="hide")await api.post(`/books/${id}/hide`);if(act==="dismiss")await api.post(`/books/${id}/dismiss`);if(act==="delete")await api.del(`/books/${id}`);loadA()};
 if(ld)return<Load/>;if(!a)return<div style={{color:t.tf}}>Not found</div>;
