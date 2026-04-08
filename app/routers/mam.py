@@ -289,15 +289,10 @@ async def mam_full_scan_start():
         return {"error": "A MAM scan is already running — wait for it to finish"}
     # Phase 3d-1 (post-feedback): no longer rejecting on a concurrent
     # author scan — they're allowed to run side-by-side now. See the
-    # _wait_for_other_writers comment in /api/mam/scan above.
-    #
-    # TODO (post-3d): the full MAM scan still re-queries
-    # `WHERE mam_status IS NULL` each batch, so books added by a
-    # concurrent author scan WILL get picked up mid-run (unlike the
-    # manual /api/mam/scan path, which now snapshots IDs at start).
-    # Fixing requires adding a book_ids snapshot column to the
-    # mam_scan_log table — a schema migration that's worth doing as
-    # part of 3d-2 cleanup, not in this round.
+    # _wait_for_other_writers comment in /api/mam/scan above. The
+    # full MAM scan also snapshots its book IDs at start (via the
+    # book_ids_snapshot column on mam_scan_log) so concurrent author
+    # scans don't grow its queue.
 
     db = await get_db()
     try:
