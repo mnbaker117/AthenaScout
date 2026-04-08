@@ -352,9 +352,20 @@ class HardcoverSource(BaseSource):
             if not books:
                 return None
             
+            # Pre-normalize owned titles for the disambiguation tiebreaker.
+            # Same shape lookup.py uses (lowercased, punctuation stripped).
+            owned_title_norms = set()
+            for ot in (owned_titles or []):
+                if not ot:
+                    continue
+                tn = re.sub(r'[^\w\s]', '', ot.lower()).strip()
+                tn = re.sub(r'\s+', ' ', tn)
+                if tn:
+                    owned_title_norms.add(tn)
+
             # Extract author info from cached_contributors
             author_id = None
-            
+
             def _check_contributor(c, target_name):
                 """Check if a contributor matches our author name."""
                 target = target_name.lower().strip()
@@ -400,29 +411,91 @@ class HardcoverSource(BaseSource):
                         return [{"name": raw}]
                 return []
             
+            # ── Phase 3b-H1: namesake disambiguation ──────────────────
+            # Hardcover often has multiple authors who share a name
+            # ("David Burke" returns 3 distinct people on hardcover.app:
+            # a LitRPG writer with 32 books, a music journalist with 7,
+            # and a Cold War espionage writer with 3). The bare name
+            # search and owned-title searches are both name-based, so
+            # the accumulated book set can mix all three. Without
+            # filtering, AthenaScout would silently glue another David
+            # Burke's non-fiction back catalog onto the user's LitRPG
+            # author.
+            #
+            # Strategy: tally each book.contributions[].author.id whose
+            # name matches our target, vote-rank them, then keep only
+            # books contributed by the winning ID. Tiebreaks favor the
+            # ID with the most overlap against the user's owned titles
+            # (the owned-title search expansion at line 317 reliably
+            # surfaces that ID with extra book matches). When only one
+            # candidate ID exists — the common case — no filtering
+            # happens and behavior is unchanged from before this fix.
+            id_to_books = {}  # author_id (str) → [book dict, ...]
+            id_to_name = {}   # author_id (str) → display name
             for book in books:
-                # Check book-level contributions first
                 for contrib in book.get("contributions", []):
                     author_obj = contrib.get("author", {})
-                    if isinstance(author_obj, dict):
-                        aname = author_obj.get("name", "")
-                        matched, _, _ = _check_contributor({"name": aname}, author_name)
-                        if matched:
-                            author_id = str(author_obj.get("id", "matched"))
-                            break
-                if author_id:
-                    break
-                # Fall back to edition contributors
-                for edition in book.get("editions", []):
-                    contribs = _parse_contributors(edition.get("contributors"))
-                    for c in contribs:
-                        matched, cname, cid = _check_contributor(c, author_name)
-                        if matched:
-                            author_id = str(cid) if cid else "matched"
-                            break
-                if author_id:
-                    break
-            
+                    if not isinstance(author_obj, dict):
+                        continue
+                    aname = author_obj.get("name", "")
+                    matched, _, _ = _check_contributor({"name": aname}, author_name)
+                    if not matched:
+                        continue
+                    aid_raw = author_obj.get("id")
+                    if aid_raw is None:
+                        # Skip ID-less matches for the vote — they'd
+                        # collapse all unknown authors into one bucket
+                        # and wreck the tally.
+                        continue
+                    aid = str(aid_raw)
+                    id_to_books.setdefault(aid, []).append(book)
+                    id_to_name.setdefault(aid, aname)
+                    break  # one vote per book per ID
+
+            winning_id = None
+            if len(id_to_books) >= 2:
+                def _vote_score(item):
+                    aid, blist = item
+                    base = len(blist)
+                    # Tiebreaker: how many of this ID's books overlap
+                    # the user's owned titles? Normalized comparison
+                    # mirrors lookup.py's _normalize style.
+                    overlap = 0
+                    if owned_title_norms:
+                        for b in blist:
+                            t = b.get("title", "") or ""
+                            tn = re.sub(r'[^\w\s]', '', t.lower()).strip()
+                            tn = re.sub(r'\s+', ' ', tn)
+                            if tn and tn in owned_title_norms:
+                                overlap += 1
+                    # Score: book count × 10 + overlap × 100. Owned
+                    # overlap dominates because a single confirmed
+                    # match is much stronger evidence than +5 random
+                    # books — but book count still breaks ties when
+                    # neither candidate has any owned overlap.
+                    return overlap * 100 + base * 10
+
+                ranked = sorted(id_to_books.items(), key=_vote_score, reverse=True)
+                winning_id = ranked[0][0]
+                summary = ", ".join(
+                    f"{aid} ({id_to_name.get(aid,'?')}): {len(blist)} books"
+                    for aid, blist in ranked
+                )
+                logger.info(
+                    f"  Hardcover: namesake disambiguation for '{author_name}' — "
+                    f"{len(id_to_books)} candidate IDs [{summary}] → picked {winning_id}"
+                )
+                # Filter the working set to only the winner's books
+                winner_book_ids = {id(b) for b in id_to_books[winning_id]}
+                books = [b for b in books if id(b) in winner_book_ids]
+                author_id = winning_id
+            elif len(id_to_books) == 1:
+                winning_id = next(iter(id_to_books))
+                author_id = winning_id
+            # else: no contributions[] IDs found at all — fall through
+            # to the legacy edition-contributor path below, which
+            # accepts books by name match without an ID.
+
             # Build result from found books
             series_map = {}
             standalone = []
