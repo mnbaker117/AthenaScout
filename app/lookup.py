@@ -863,6 +863,18 @@ async def _compute_series_suggestions(author_id, series_collector):
 
             largest_key, largest_members = max(groups.items(), key=_group_score)
 
+            # Per-book consensus diagnostic. Useful when investigating
+            # why a specific book did or didn't produce a suggestion.
+            # Logs the post-fold groups, the winner, and the current
+            # stored value side by side. DEBUG level so it's only on
+            # during verbose scans.
+            logger.debug(
+                f"    CONSENSUS '{book_title}' (book_id={book_id}): "
+                f"current=({cur_name!r}, {cur_idx}) "
+                f"groups={ {k: [m[0] for m in v] for k, v in groups.items()} } "
+                f"winner={largest_key} ({len(largest_members)} src)"
+            )
+
             # Threshold: need at least 2 sources to call it a consensus.
             if len(largest_members) < 2:
                 # Check if there's a stale suggestion to clean up:
@@ -943,6 +955,10 @@ async def _compute_series_suggestions(author_id, series_collector):
 
             # Existing row — branch on status
             if ex["status"] == "applied":
+                logger.debug(
+                    f"    SUGGESTION SKIP (status=applied): '{book_title}' "
+                    f"(book_id={book_id})"
+                )
                 continue  # user already accepted; never re-suggest
 
             ex_norm_name = _norm_consensus_series(ex["suggested_series_name"])
@@ -954,6 +970,10 @@ async def _compute_series_suggestions(author_id, series_collector):
 
             if ex["status"] == "ignored":
                 if same_as_existing:
+                    logger.debug(
+                        f"    SUGGESTION SKIP (status=ignored, same): "
+                        f"'{book_title}' (book_id={book_id})"
+                    )
                     continue  # respect the ignore
                 # Different consensus → reset to pending. The user's
                 # ignore was for the OLD values, not these.
