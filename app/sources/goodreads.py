@@ -471,11 +471,23 @@ class GoodreadsSource(BaseSource):
                 # owned_only optimization: skip detail fetches for books
                 # that won't survive the merge layer in library-only mode.
                 # See get_author_books() docstring for the rationale.
+                #
+                # IMPORTANT: in full_scan mode, lookup.py intentionally
+                # passes `existing_titles=set()` so the URL-backfill
+                # branch above doesn't fire and we revisit pages for
+                # fresh metadata. That means we cannot trust
+                # existing_titles to tell us which books are owned —
+                # we must consult `owned_titles` (passed separately) here.
+                # Without this check, full_scan + owned_only would skip
+                # ALL books including owned ones, which is what happened
+                # on Sanderson before this fix (Goodreads merged 0
+                # books while Hardcover correctly merged 16).
                 if owned_only:
-                    skipped.setdefault("unowned", 0)
-                    skipped["unowned"] += 1
-                    logger.debug(f"    SKIP-UNOWNED (library-only): '{rb['title']}'")
-                    continue
+                    if not (owned_titles and any(_title_match(ot, rb["title"]) for ot in owned_titles)):
+                        skipped.setdefault("unowned", 0)
+                        skipped["unowned"] += 1
+                        logger.debug(f"    SKIP-UNOWNED (library-only): '{rb['title']}'")
+                        continue
 
                 # Log progress every 10 books
                 if (i + 1) % 10 == 0 or i == 0:

@@ -324,6 +324,16 @@ MIGRATIONS = [
         updated_at REAL,
         FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
     )""",
+    # ── Orphan series cleanup ────────────────────────────────────
+    # Existing databases accumulated phantom series rows because the
+    # pre-fix _merge_result inserted a series row BEFORE processing any
+    # books in that series. In owned_only (library-only) scans, all the
+    # books then got filtered out, leaving the series row pointing at
+    # nothing. On the user's live container this was 649 of 1324 series
+    # rows (~49%). Lazy upsert in lookup.py prevents NEW orphans; this
+    # one-shot DELETE kills the existing ones. Idempotent — running it
+    # twice deletes nothing the second time.
+    "DELETE FROM series WHERE id NOT IN (SELECT DISTINCT series_id FROM books WHERE series_id IS NOT NULL)",
 ]
 
 

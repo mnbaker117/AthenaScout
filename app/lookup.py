@@ -525,14 +525,68 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             return f"UPDATE books SET {', '.join(sets)} WHERE id=?", vals
 
         for sr in result.series:
-            # Look for series globally first (supports multi-author series)
-            row = await (await db.execute("SELECT id FROM series WHERE LOWER(name) = LOWER(?)", (sr.name,))).fetchone()
-            if row:
-                sid = row["id"]
-                await db.execute("UPDATE series SET last_lookup_at = ? WHERE id = ?", (time.time(), sid))
-            else:
-                cur = await db.execute("INSERT INTO series (name, author_id, total_books, last_lookup_at) VALUES (?,?,?,?)", (sr.name, author_id, sr.total_books, time.time()))
-                sid = cur.lastrowid
+            # ── Lazy series upsert (orphan-row prevention) ───────────
+            # Previously the series row was created here, before any
+            # book in the series had been processed. In owned_only
+            # mode, the inner book loop then skipped every non-matched
+            # book, leaving the series row pointing at nothing — 649
+            # such orphans on the user's container before this fix.
+            # Now we defer the upsert until the first book in the
+            # inner loop actually needs the series_id. If no book
+            # needs it (all filtered/skipped), no row is created.
+            sid = None  # populated lazily by _ensure_series()
+
+            async def _ensure_series(_sr=sr):
+                """Upsert the series row on first call; return cached id thereafter.
+
+                Bug B prevention: the SELECT first looks for an exact
+                LOWER(name) match (matches today's behavior), then for
+                a normalized-name match against any existing row for
+                this author so canonical-form variants like "Mistborn"
+                vs "The Mistborn Saga" collapse to one row instead of
+                duplicating. First-source-wins on the stored name —
+                if a later scan brings a more canonical version, it
+                still links to the existing row but doesn't rename it.
+                Manual rename via the Series page is the escape hatch.
+                """
+                nonlocal sid
+                if sid is not None:
+                    return sid
+                row = await (await db.execute(
+                    "SELECT id FROM series WHERE LOWER(name) = LOWER(?)",
+                    (_sr.name,),
+                )).fetchone()
+                if row:
+                    sid = row["id"]
+                else:
+                    # Normalized fallback: search this author's existing
+                    # series for a normalized-name match before inserting.
+                    # _norm_consensus_series mirrors _norm_series in
+                    # hardcover.py — strips leading articles, trailing
+                    # tail words ("saga", "series", etc.), punctuation.
+                    target_norm = _norm_consensus_series(_sr.name)
+                    if target_norm:
+                        author_series = await (await db.execute(
+                            "SELECT id, name FROM series WHERE author_id = ?",
+                            (author_id,),
+                        )).fetchall()
+                        for ar in author_series:
+                            if _norm_consensus_series(ar["name"]) == target_norm:
+                                sid = ar["id"]
+                                break
+                if sid is not None:
+                    await db.execute(
+                        "UPDATE series SET last_lookup_at = ? WHERE id = ?",
+                        (time.time(), sid),
+                    )
+                else:
+                    cur = await db.execute(
+                        "INSERT INTO series (name, author_id, total_books, last_lookup_at) VALUES (?,?,?,?)",
+                        (_sr.name, author_id, _sr.total_books, time.time()),
+                    )
+                    sid = cur.lastrowid
+                return sid
+
             for bk in sr.books:
                 if not _lang_ok(bk.language, languages): continue
                 if _is_book_set(bk.title): continue
@@ -546,7 +600,10 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                             matched_row = r
                             break
                 if matched_row:
-                    sql, vals = _update_existing(matched_row, bk, series_id=sid)
+                    # Lazy series upsert: only create the series row
+                    # now that we know a real book is going to link to it.
+                    sid_use = await _ensure_series()
+                    sql, vals = _update_existing(matched_row, bk, series_id=sid_use)
                     await db.execute(sql, vals)
                     # Phase 3c: record this source's series claim for the
                     # matched book so consensus can be computed at the
@@ -559,17 +616,20 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                         series_collector.setdefault(matched_row["id"], {})[source_name] = (sr.name, bk.series_index)
                     continue
                 if owned_only:
-                    # Library-only scan: don't add discovered series books that
-                    # we don't already own. The series row itself was upserted
-                    # above so existing owned books in this series still get
-                    # linked correctly via _update_existing.
+                    # Library-only scan: don't add discovered series books
+                    # that we don't already own. _ensure_series() is NOT
+                    # called on this path — if NO matched_row in this
+                    # series fired _ensure_series above, no series row
+                    # gets created at all (the orphan-row prevention).
                     continue
                 if norm in existing:
                     logger.debug(f"    SKIP (norm dup): '{bk.title}'")
                     continue
+                # Insert path: also needs the series row to exist.
+                sid_use = await _ensure_series()
                 initial_urls = json.dumps({source_name: bk.source_url}) if bk.source_url else "{}"
                 await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,series_id,series_index,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,{source_name}_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,?)",
-                    (bk.title, author_id, sid, bk.series_index, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, bk.external_id))
+                    (bk.title, author_id, sid_use, bk.series_index, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, bk.external_id))
                 existing.add(norm); new_books += 1
                 logger.debug(f"    NEW: '{bk.title}' → series '{sr.name}' from {source_name}")
 
@@ -608,6 +668,24 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             existing.add(norm); new_books += 1
             logger.debug(f"    NEW: '{bk.title}' → standalone from {source_name}")
 
+        # ── Orphan series safety net ─────────────────────────────────
+        # Defense in depth: even with the lazy upsert above, some other
+        # code path could in theory leave a series row pointing at no
+        # books for this author. Scope the cleanup to THIS author's
+        # series only (not a global sweep) so we don't accidentally
+        # touch concurrently-running scans for other authors. Idempotent
+        # — running it twice deletes nothing the second time.
+        cleanup_cur = await db.execute(
+            "DELETE FROM series WHERE author_id = ? AND id NOT IN "
+            "(SELECT DISTINCT series_id FROM books "
+            " WHERE series_id IS NOT NULL AND author_id = ?)",
+            (author_id, author_id),
+        )
+        if cleanup_cur.rowcount > 0:
+            logger.debug(
+                f"  Orphan series cleanup: dropped {cleanup_cur.rowcount} "
+                f"unlinked series rows for author_id={author_id}"
+            )
         await db.commit()
         return new_books, updated_books
     finally:

@@ -263,7 +263,7 @@ class KoboSource(BaseSource):
             logger.error(f"Kobo search error '{author_name}': {e}")
             return None
 
-    async def get_author_books(self, author_name: str, existing_titles: set = None, owned_only: bool = False, **kw) -> Optional[AuthorResult]:
+    async def get_author_books(self, author_name: str, existing_titles: set = None, owned_only: bool = False, owned_titles: list = None, **kw) -> Optional[AuthorResult]:
         # author_name arrives from search_author's external_id, which is
         # now the ORIGINAL user-provided name (Phase 3a) — not a slug that
         # would need lossy .title() reconstruction. Old param name was
@@ -476,10 +476,28 @@ class KoboSource(BaseSource):
                 # detail fetch entirely for those — saves ~3s per book
                 # at the rate limit, which dominates total scan time
                 # for prolific authors.
+                #
+                # IMPORTANT: in full_scan mode, lookup.py intentionally
+                # passes `existing_titles=set()` so the URL-backfill
+                # branch (`is_known`) above is bypassed and we revisit
+                # pages for fresh metadata. We must therefore consult
+                # `owned_titles` (passed separately) to know which books
+                # are owned. Without this check, full_scan + owned_only
+                # silently skips ALL books including owned ones — same
+                # bug found in goodreads.py during the post-3c Sanderson
+                # verification.
                 if owned_only:
-                    skipped_unowned += 1
-                    logger.debug(f"    SKIP-UNOWNED (library-only): '{rb['title']}'")
-                    continue
+                    is_owned = False
+                    if owned_titles:
+                        owned_norm = [_norm(ot) for ot in owned_titles]
+                        is_owned = any(
+                            norm == on or norm in on or on in norm
+                            for on in owned_norm
+                        )
+                    if not is_owned:
+                        skipped_unowned += 1
+                        logger.debug(f"    SKIP-UNOWNED (library-only): '{rb['title']}'")
+                        continue
 
                 # Unknown book — visit the detail page for full metadata
                 details = await self._get_book_details(rb["kobo_url"])
