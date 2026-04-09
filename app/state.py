@@ -93,6 +93,23 @@ _last_calibre_check: Dict[str, Any] = {"at": None, "synced": False}
 # Always cleared in a try/finally block — never leave this stuck True.
 _calibre_sync_in_progress: bool = False
 
+# Phase 3d-2: per-book progress for the active Calibre sync. Populated
+# by sync_calibre() during its book-upsert pass so the unified scan
+# widget can show "Syncing 142/675 — The Final Empire" the same way it
+# shows source/MAM scan progress. The MAM-blocking semantics still
+# come from `_calibre_sync_in_progress` above — this dict is purely
+# UX/visibility. Reset to idle when no sync is active.
+_calibre_sync_progress: Dict[str, Any] = {
+    "running": False,
+    "current": 0,
+    "total": 0,
+    "current_book": "",
+    "books_new": 0,
+    "books_updated": 0,
+    "status": "idle",
+    "type": "none",
+}
+
 
 # ─── Author lookup scan state ────────────────────────────────
 _lookup_task: Optional[asyncio.Task] = None
@@ -101,6 +118,14 @@ _lookup_progress: Dict[str, Any] = {
     "checked": 0,
     "total": 0,
     "current_author": "",
+    # Phase 3d-2: per-book progress for source scans. Set by Goodreads/
+    # Kobo/Hardcover via the `_on_book` callback that lookup.py stashes
+    # on each source instance. Only emitted for books that actually
+    # consume work (DETAIL page fetches + URL-backfill matches) — the
+    # filter-noise SKIPs (foreign/set/translation/contributor/unowned)
+    # never reach the user. Cleared between authors so a stale title
+    # from a previous author doesn't bleed into the next.
+    "current_book": "",
     "new_books": 0,
     "status": "idle",
     "type": "none",
@@ -117,6 +142,12 @@ _mam_scan_progress: Dict[str, Any] = {
     "possible": 0,
     "not_found": 0,
     "errors": 0,
+    # Phase 3d-2: title of the book MAM is currently checking. Updated
+    # per-book by scan_books_batch (via the on_progress stats dict) and
+    # by the single-author scan loop in routers/mam.py. MAM intentionally
+    # shows EVERY attempt — unlike source scans, MAM has no filter-noise
+    # to hide.
+    "current_book": "",
     "status": "idle",
     "type": "none",
 }

@@ -91,6 +91,7 @@ async def trigger_lookup():
     if due_count == 0:
         state._lookup_progress = {
             "running": False, "checked": 0, "total": 0, "current_author": "",
+            "current_book": "",
             "new_books": 0, "type": "lookup",
             "status": f"no authors due (cache window: {s.get('lookup_interval_days', 3)} days)",
         }
@@ -98,6 +99,7 @@ async def trigger_lookup():
                 "message": "No authors due for scanning within the current cache window."}
 
     state._lookup_progress = {"running": True, "checked": 0, "total": due_count, "current_author": "",
+                        "current_book": "",
                         "new_books": 0, "status": "scanning", "type": "lookup"}
     def _progress(data):
         state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
@@ -165,6 +167,8 @@ def _label_for(kind: str, scan_type: str) -> str:
             "scheduled": "Scheduled MAM Scan",
             "full_scan": "MAM Full Scan",
         }.get(scan_type, "MAM Scan")
+    if kind == "calibre":
+        return "Calibre Sync"
     return scan_type or kind
 
 
@@ -179,6 +183,11 @@ def _project_lookup() -> dict:
         "current": p.get("checked", 0),
         "total": p.get("total", 0),
         "current_label": p.get("current_author", "") or None,
+        # Phase 3d-2: in-flight book the source scan is currently fetching.
+        # Populated by goodreads/kobo/hardcover via the _on_book closure
+        # stashed by lookup_author. Filter-noise SKIPs are excluded — only
+        # DETAIL fetches and URL-backfill matches reach this field.
+        "current_book": p.get("current_book", "") or None,
         "status": p.get("status", "idle"),
         "extra": {
             "new_books": p.get("new_books", 0),
@@ -197,6 +206,10 @@ def _project_mam() -> dict:
         "current": p.get("scanned", 0),
         "total": p.get("total", 0),
         "current_label": None,
+        # Phase 3d-2: in-flight book MAM is currently checking. Unlike
+        # the source scans, MAM shows EVERY attempt because there's no
+        # filter-noise to hide.
+        "current_book": p.get("current_book", "") or None,
         "status": p.get("status", "idle"),
         "extra": {
             "found":     p.get("found", 0),
@@ -204,6 +217,34 @@ def _project_mam() -> dict:
             "not_found": p.get("not_found", 0),
             "errors":    p.get("errors", 0),
             "remaining": p.get("remaining"),
+        },
+    }
+
+
+def _project_calibre() -> dict:
+    """Project _calibre_sync_progress into the unified shape.
+
+    Phase 3d-2: Calibre sync was previously only visible via the
+    `_calibre_sync_in_progress` boolean (used by MAM/lookup writers
+    to yield to the bulk upsert). Surfacing it as a third "kind" in
+    the unified scan widget lets the user see how far the sync has
+    progressed before kicking off another scan that would be blocked
+    behind it.
+    """
+    p = state._calibre_sync_progress
+    return {
+        "kind": "calibre",
+        "type": p.get("type", "none"),
+        "label": _label_for("calibre", p.get("type", "none")),
+        "running": bool(p.get("running")),
+        "current": p.get("current", 0),
+        "total": p.get("total", 0),
+        "current_label": None,
+        "current_book": p.get("current_book", "") or None,
+        "status": p.get("status", "idle"),
+        "extra": {
+            "books_new": p.get("books_new", 0),
+            "books_updated": p.get("books_updated", 0),
         },
     }
 
@@ -220,7 +261,7 @@ async def scan_status():
     auto-hides when nothing has run yet.
     """
     out = []
-    for proj in (_project_lookup(), _project_mam()):
+    for proj in (_project_lookup(), _project_mam(), _project_calibre()):
         # Hide entries that are pristine idle (never ran). Keep complete
         # ones so the user sees the result of the last scan even after
         # it finishes.
@@ -238,6 +279,7 @@ async def trigger_full_rescan():
     if state._lookup_task and not state._lookup_task.done():
         return {"error": "An author scan is already running"}
     state._lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+                        "current_book": "",
                         "new_books": 0, "status": "scanning", "type": "full_rescan"}
     def _progress(data):
         state._lookup_progress.update({"checked": data["checked"], "total": data["total"],

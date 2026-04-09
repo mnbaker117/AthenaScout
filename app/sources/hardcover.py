@@ -552,7 +552,18 @@ class HardcoverSource(BaseSource):
                     all_names = book_authors + ed_contribs
                     logger.info(f"  Hardcover: skipping '{book.get('title')}' — contributors: {all_names[:5] if all_names else '(none)'}")
                     continue
-                
+
+                # Phase 3d-2: emit per-book progress. Hardcover has no
+                # per-book HTTP fetch (all data comes from one GraphQL
+                # round-trip), so this loop tears through fast — but it's
+                # consistent with Goodreads/Kobo and useful for very large
+                # catalogs where the merge loop itself takes a perceptible
+                # moment. Skipped (non-author) books above are filtered out
+                # because they consume no downstream work.
+                on_book = getattr(self, '_on_book', None)
+                if on_book:
+                    on_book(book.get("title", ""))
+
                 edition = book.get("editions", [{}])[0] if book.get("editions") else {}
                 cover = None
                 cached_img = edition.get("image")

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from app.config import CALIBRE_DB_PATH, CALIBRE_LIBRARY_PATH
 from app.database import get_db
+from app import state
 
 logger = logging.getLogger("athenascout.calibre_sync")
 
@@ -166,6 +167,22 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
         calibre_data = _read_calibre_db(cal_path, lib_path)
         books_found = 0
         books_new = 0
+        # Phase 3d-2: surface progress in the unified scan widget. The
+        # initial dict captures the total upfront (after metadata.db has
+        # been read but before pass 3 starts upserting), so the widget
+        # can render a real progress bar instead of an indeterminate
+        # spinner. Updated per-book inside the loop below; reset to
+        # idle in the finally block.
+        state._calibre_sync_progress = {
+            "running": True,
+            "current": 0,
+            "total": len(calibre_data["books"]),
+            "current_book": "",
+            "books_new": 0,
+            "books_updated": 0,
+            "status": "scanning",
+            "type": "manual",
+        }
 
         # Pass 1: upsert authors
         author_map = {}  # calibre_author_id -> our_id
@@ -221,10 +238,17 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                     series_map[key] = cur.lastrowid
 
         # Pass 3: upsert books
-        for book in calibre_data["books"]:
+        for i, book in enumerate(calibre_data["books"]):
             if not book["authors"]:
                 continue
             books_found += 1
+            # Phase 3d-2: per-book progress tick. `current` advances on
+            # every iteration (including the no-author skip above only
+            # if it had been kept — we deliberately advance AFTER the
+            # skip so the bar doesn't include skipped rows). The current
+            # title goes to the unified scan widget.
+            state._calibre_sync_progress["current"] = books_found
+            state._calibre_sync_progress["current_book"] = book["title"]
 
             primary_cal_id = book["authors"][0]["id"]
             our_author_id = author_map.get(primary_cal_id)
@@ -255,6 +279,7 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                       book["description"], book["tags"], book["rating"],
                       book["language"], book["publisher"], book["formats"],
                       row["id"]))
+                state._calibre_sync_progress["books_updated"] += 1
                 logger.debug(f"  Calibre: updated '{book['title']}' (calibre_id={book['book_id']}, tags={book['tags']}, rating={book['rating']})")
             else:
                 await db.execute("""
@@ -268,6 +293,7 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                       book["description"], book["tags"], book["rating"],
                       book["language"], book["publisher"], book["formats"]))
                 books_new += 1
+                state._calibre_sync_progress["books_new"] += 1
                 logger.debug(f"  Calibre: NEW '{book['title']}' by {book['authors'][0]['name']} (tags={book['tags']}, lang={book['language']})")
 
             # Match external books by title
@@ -290,6 +316,11 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
         await db.commit()
 
         logger.info(f"Calibre sync complete: {books_found} books, {books_new} new")
+        state._calibre_sync_progress.update({
+            "running": False,
+            "current_book": "",
+            "status": "complete",
+        })
         return {"books_found": books_found, "books_new": books_new}
 
     except Exception as e:
@@ -299,6 +330,11 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
             (time.time(), str(e), sync_id)
         )
         await db.commit()
+        state._calibre_sync_progress.update({
+            "running": False,
+            "current_book": "",
+            "status": f"error: {e}",
+        })
         raise
     finally:
         await db.close()

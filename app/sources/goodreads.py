@@ -460,6 +460,15 @@ class GoodreadsSource(BaseSource):
                         skipped.setdefault("known", 0)
                         skipped["known"] += 1
                         logger.debug(f"    SKIP (known, URL backfill): '{rb['title']}' → book/{rb['book_id']}")
+                        # Phase 3d-2: URL-backfill counts as "real work" for
+                        # per-book progress (we're emitting a BookResult that
+                        # the merge layer will use). Filter-noise skips above
+                        # this point (translator/contributor/set) do NOT call
+                        # _on_book, which is the whole point of the SKIPPED
+                        # filtering requirement.
+                        on_book = getattr(self, '_on_book', None)
+                        if on_book:
+                            on_book(rb["title"])
                         # Emit minimal result for URL backfill (no page visit needed)
                         sname = rb["list_series"]
                         br = BookResult(
@@ -502,6 +511,13 @@ class GoodreadsSource(BaseSource):
                 # Log progress every 10 books
                 if (i + 1) % 10 == 0 or i == 0:
                     logger.info(f"  Goodreads: checking book {i+1}/{total}...")
+
+                # Phase 3d-2: emit per-book progress for the DETAIL fetch.
+                # This is the slow path (HTTP page visit + parse), so the
+                # user actually sees the progress widget tick through these.
+                on_book = getattr(self, '_on_book', None)
+                if on_book:
+                    on_book(rb["title"])
 
                 details = await self._get_book_details(rb["book_id"], rb["title"])
                 logger.debug(f"    PAGE: '{rb['title']}' → lang={details.get('language')}, set={details.get('is_set')}, trans={details.get('is_translation')}, series={details.get('series_name')}, date={details.get('pub_date') or details.get('expected_date')}")

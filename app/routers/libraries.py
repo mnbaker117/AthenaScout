@@ -68,6 +68,7 @@ async def switch_library(body: dict = Body(...)):
         # don't bleed into the new library's dashboard before a new scan starts.
         state._lookup_progress = {
             "running": False, "checked": 0, "total": 0, "current_author": "",
+            "current_book": "",
             "new_books": 0, "status": "cancelled (library switch)", "type": "none",
         }
         cancelled.append("author scan")

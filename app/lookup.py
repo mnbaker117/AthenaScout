@@ -10,6 +10,7 @@ from app.sources.hardcover import HardcoverSource
 from app.sources.goodreads import GoodreadsSource
 from app.sources.kobo import KoboSource
 from app.sources.base import AuthorResult
+from app import state
 
 logger = logging.getLogger("athenascout.lookup")
 
@@ -1161,6 +1162,18 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     # data, only the final consensus diffs.
     series_collector: dict[int, dict[str, tuple]] = {}
 
+    # Phase 3d-2: per-book progress hook. Stashed on each source instance
+    # before scanning so the source can poke the title of the book it's
+    # currently working on into _lookup_progress["current_book"]. Sources
+    # only call this for non-skipped work — DETAIL fetches and URL-backfill
+    # matches — so the user-visible progress feed never flickers through
+    # filter noise (foreign/set/translation/contributor/unowned skips).
+    def _on_book(title: str) -> None:
+        state._lookup_progress["current_book"] = title or ""
+    goodreads._on_book = _on_book
+    hardcover._on_book = _on_book
+    kobo._on_book = _on_book
+
     # 1. Goodreads (PRIMARY)
     if settings.get("goodreads_enabled", True):
         total += await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
@@ -1175,6 +1188,10 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     # 3. Kobo
     if settings.get("kobo_enabled", True):
         total += await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+
+    # Clear current_book so the next author's scan widget doesn't show
+    # the last book of THIS author until its first DETAIL fetch lands.
+    state._lookup_progress["current_book"] = ""
 
     # Phase 3c: compute consensus and write pending suggestions for
     # any per-book disagreement that meets the 2+ sources threshold.

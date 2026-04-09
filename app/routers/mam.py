@@ -106,6 +106,7 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
     scan_total = len(snapshot_ids)
     state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_total,
                           "found": 0, "possible": 0, "not_found": 0, "errors": 0,
+                          "current_book": "",
                           "status": "scanning", "type": "manual"}
 
     async def _wait_for_other_writers():
@@ -159,6 +160,9 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                         "possible": base_possible + stats["possible"],
                         "not_found": base_not_found + stats["not_found"],
                         "errors": base_errors + stats["errors"],
+                        # Phase 3d-2: forward the in-flight book title from
+                        # the source layer up to the unified scan widget.
+                        "current_book": stats.get("current_book", ""),
                     })
                 # Slice the next batch out of the frozen snapshot. This
                 # is the snapshot guarantee: only IDs captured at scan
@@ -306,17 +310,26 @@ async def mam_full_scan_start():
         state._mam_scan_progress = {"running": True, "scanned": 0,
                               "total": start_result.get("total_books", 0),
                               "found": 0, "possible": 0, "not_found": 0,
-                              "errors": 0, "status": "scanning", "type": "full_scan"}
+                              "errors": 0, "current_book": "",
+                              "status": "scanning", "type": "full_scan"}
         while True:
             db = await get_db()
             try:
                 cs = load_settings()
+                # Phase 3d-2: surface the in-flight book title in the
+                # unified scan widget for full scans too. The full-scan
+                # loop polls the DB for scanned/total via mam_get_full_scan_status,
+                # but per-book current_book has to come straight from the
+                # batch worker via this callback.
+                def _on_book(title: str) -> None:
+                    state._mam_scan_progress["current_book"] = title or ""
                 result = await mam_run_full_scan_batch(
                     db, session_id=cs["mam_session_id"],
                     skip_ip_update=True,
                     delay=cs.get("rate_mam", 2),
                     format_priority=cs.get("mam_format_priority"),
                     lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
+                    on_book=_on_book,
                 )
                 fs = await mam_get_full_scan_status(db)
                 state._mam_scan_progress.update({
@@ -531,6 +544,7 @@ async def mam_scan_single_author(author_id: int):
         state._mam_scan_progress = {
             "running": False, "scanned": 0, "total": 0,
             "found": 0, "possible": 0, "not_found": 0, "errors": 0,
+            "current_book": "",
             "status": "complete", "type": "manual",
         }
         return {"status": "complete", "message": "No un-scanned books for this author",
@@ -539,6 +553,7 @@ async def mam_scan_single_author(author_id: int):
     state._mam_scan_progress = {
         "running": True, "scanned": 0, "total": len(book_rows),
         "found": 0, "possible": 0, "not_found": 0, "errors": 0,
+        "current_book": "",
         "status": "scanning", "type": "manual",
     }
 
@@ -551,6 +566,9 @@ async def mam_scan_single_author(author_id: int):
         bdb = await get_db()
         try:
             for bid, btitle in book_rows:
+                # Phase 3d-2: surface the in-flight book BEFORE the network
+                # call so the unified scan widget shows what we're waiting on.
+                state._mam_scan_progress["current_book"] = btitle
                 try:
                     check = await mam_check_book(token, btitle, author_name, format_priority, delay, lang_ids=lang_ids)
                 except asyncio.CancelledError:

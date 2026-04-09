@@ -1079,12 +1079,21 @@ async def scan_books_batch(
                 "errors": 0, "error": None}
 
     logger.info(f"MAM scan: processing {len(rows)} books (limit={limit})")
-    stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0, "error": None}
+    stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0,
+             "current_book": "", "error": None}
 
     for i, row in enumerate(rows):
         book_id, book_title, author_name = row[0], row[1], row[2]
 
         logger.debug(f"MAM [{i+1}/{len(rows)}] {book_title[:65]} — {author_name[:35]}")
+
+        # Phase 3d-2: surface the title BEFORE the network call so the
+        # progress widget shows what we're currently waiting on, not the
+        # one we just finished. MAM intentionally shows every attempt —
+        # there's no filter-noise here to hide.
+        stats["current_book"] = book_title
+        if on_progress:
+            on_progress(dict(stats))
 
         check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids)
         stats["scanned"] += 1
@@ -1187,6 +1196,7 @@ async def run_full_scan_batch(
     delay: float = DEFAULT_DELAY,
     format_priority: list[str] = None,
     lang_ids: Optional[list[int]] = None,
+    on_book: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
     Run one batch of a full scan (400 books per batch).
@@ -1273,6 +1283,12 @@ async def run_full_scan_batch(
 
     for i, row in enumerate(book_rows):
         book_id, book_title, author_name = row
+
+        # Phase 3d-2: per-book progress hook for the full scan path. Same
+        # contract as scan_books_batch — fire BEFORE the network call so
+        # the widget shows what we're waiting on, not what we just finished.
+        if on_book:
+            on_book(book_title)
 
         check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids)
         scanned += 1

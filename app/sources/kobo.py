@@ -470,6 +470,13 @@ class KoboSource(BaseSource):
                     # as "unknown, assume ok".
                     skipped_known += 1
                     logger.debug(f"    SKIP-KNOWN (URL backfill): '{rb['title']}'")
+                    # Phase 3d-2: URL-backfill emits a BookResult that the
+                    # merge layer consumes — counts as real work for the
+                    # per-book progress feed. Filter-noise SKIPs (unowned)
+                    # below do NOT call _on_book.
+                    on_book = getattr(self, '_on_book', None)
+                    if on_book:
+                        on_book(rb["title"])
                     br = BookResult(
                         title=rb["title"], cover_url=rb["cover"],
                         external_id=rb["kobo_id"], source="kobo",
@@ -506,6 +513,13 @@ class KoboSource(BaseSource):
                         skipped_unowned += 1
                         logger.debug(f"    SKIP-UNOWNED (library-only): '{rb['title']}'")
                         continue
+
+                # Phase 3d-2: emit per-book progress for the DETAIL fetch.
+                # Slow path (cloudscraper + sync HTTP + parse), so the user
+                # sees real ticks here.
+                on_book = getattr(self, '_on_book', None)
+                if on_book:
+                    on_book(rb["title"])
 
                 # Unknown book — visit the detail page for full metadata
                 details = await self._get_book_details(rb["kobo_url"])

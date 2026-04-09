@@ -220,6 +220,7 @@ async def lifespan(app: FastAPI):
         if state._lookup_progress.get("running"):
             return
         state._lookup_progress = {"running": True, "checked": 0, "total": 0, "current_author": "",
+                            "current_book": "",
                             "new_books": 0, "status": "scanning", "type": "scheduled_lookup"}
         def _progress(data):
             state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
@@ -296,7 +297,8 @@ async def lifespan(app: FastAPI):
             logger.info(f"MAM scheduled scan starting ({scan_limit} books, {total_remaining} total remaining)")
             state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_limit,
                                   "found": 0, "possible": 0, "not_found": 0,
-                                  "errors": 0, "status": "scanning", "type": "scheduled",
+                                  "errors": 0, "current_book": "",
+                                  "status": "scanning", "type": "scheduled",
                                   "remaining": total_remaining}
             def _sched_progress(stats):
                 state._mam_scan_progress.update({
@@ -305,6 +307,8 @@ async def lifespan(app: FastAPI):
                     "possible": stats["possible"],
                     "not_found": stats["not_found"],
                     "errors": stats["errors"],
+                    # Phase 3d-2: forward in-flight book title.
+                    "current_book": stats.get("current_book", ""),
                 })
             db = await get_db()
             try:

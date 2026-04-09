@@ -116,6 +116,7 @@ def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:
 
     state._lookup_progress = {
         "running": True, "checked": 0, "total": total, "current_author": "",
+        "current_book": "",
         "new_books": 0, "status": "scanning", "type": scan_type,
     }
 
