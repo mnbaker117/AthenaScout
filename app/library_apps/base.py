@@ -1,16 +1,24 @@
 """
-Library App Base Class — defines the interface that all library source
-applications must implement.
+Library app base class — the interface every library backend implements.
 
-Each library app represents a different ebook/audiobook management application
-(Calibre, audiobookshelf, Epubor, etc.) that AthenaScout can sync from.
+Each library app represents a different ebook or audiobook management
+application that AthenaScout can sync from. The current public release
+ships only the Calibre backend (`calibre.py`), but the interface is
+deliberately small so adding new backends is a self-contained change.
+The list of candidate future backends — Alfa, Kavita, Komga,
+Audiobookshelf, Libation, OpenAudible — is in `__init__.py`.
 
 A library app defines:
-- How to discover libraries under a root path
-- How to sync data from the source database into AthenaScout
-- How to locate cover images for books
-- What content type it manages (ebook, audiobook)
-- What environment variables it uses
+  - How to discover libraries under a root path
+  - How to sync data from the source database into AthenaScout
+  - How to locate cover images for books
+  - What content type it manages (ebook, audiobook)
+  - What environment variables it reads for default paths
+
+The discovery loop in `app/config.py:discover_libraries` walks every
+registered app and asks it to scan its `env_root_var` for libraries,
+so a new backend "just works" the moment it's registered — no changes
+needed in the discovery layer, the sync orchestrator, or the UI.
 """
 import os
 import logging

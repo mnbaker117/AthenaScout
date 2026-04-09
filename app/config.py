@@ -97,7 +97,7 @@ DEFAULT_SETTINGS = {
     "theme": "dark",
     "languages": ["English"],
     "lookup_interval_days": 3,
-    "calibre_sync_interval_minutes": 60,
+    "library_sync_interval_minutes": 60,
     "rate_goodreads": 2,
     "rate_hardcover": 1,
     "rate_kobo": 3,
@@ -120,7 +120,7 @@ DEFAULT_SETTINGS = {
     "last_mam_validated_at": None,
     "mam_validation_ok": True,
     "active_library": "",
-    "calibre_mtimes": {},
+    "library_mtimes": {},
     "library_sources": [],
     "setup_complete": False,
 }
@@ -317,6 +317,44 @@ def load_settings() -> dict:
             # Strip orphaned FantasticFiction settings if present in old settings.json
             for k in ("fantasticfiction_enabled", "rate_fantasticfiction"):
                 merged.pop(k, None)
+            # ── calibre_* → library_* settings rename ────────────
+            # The framework's library backend layer is generic, so the
+            # settings keys that hold backend-agnostic state (sync
+            # interval, mtimes-per-library) are renamed accordingly.
+            # `calibre_web_url` and `calibre_url` are NOT migrated —
+            # they specifically point at Calibre-Web / Calibre, not
+            # at the active library backend.
+            #
+            # Idempotent: only migrates when the old key exists AND
+            # the new key is absent. After the first migrated load,
+            # the old keys are gone and this block becomes a no-op.
+            settings_dirty = False
+            _RENAMES = {
+                "calibre_sync_interval_minutes": "library_sync_interval_minutes",
+                "calibre_mtimes": "library_mtimes",
+            }
+            for old_key, new_key in _RENAMES.items():
+                if old_key in saved and new_key not in saved:
+                    merged[new_key] = saved[old_key]
+                    merged.pop(old_key, None)
+                    settings_dirty = True
+                    _cfg_logger.info(
+                        f"Settings migration: renamed '{old_key}' → '{new_key}'"
+                    )
+                elif old_key in merged:
+                    # Old key snuck back in via DEFAULT_SETTINGS merge
+                    # path or stale cache; drop it.
+                    merged.pop(old_key, None)
+                    settings_dirty = True
+            if settings_dirty:
+                # Persist the rename so the next startup doesn't
+                # re-run the migration. save_settings() also warms
+                # the cache with the new dict.
+                save_settings(merged)
+                try:
+                    cur_mtime = SETTINGS_PATH.stat().st_mtime
+                except OSError:
+                    cur_mtime = None
             # Env vars only seed on first run — settings.json is source of truth
             _settings_cache["data"] = merged
             _settings_cache["mtime"] = cur_mtime

@@ -133,7 +133,21 @@ async def get_stats():
         upcoming = (await (await g(f"SELECT COUNT(*) c FROM books b WHERE is_unreleased=1 AND owned=0 AND {HF}")).fetchone())["c"]
         series = (await (await g("SELECT COUNT(*) c FROM series")).fetchone())["c"]
         hidden = (await (await g("SELECT COUNT(*) c FROM books WHERE hidden=1")).fetchone())["c"]
-        ls = await (await g("SELECT * FROM sync_log WHERE sync_type='calibre' ORDER BY started_at DESC LIMIT 1")).fetchone()
+        # Pull the most recent library-sync row from sync_log. The set
+        # of "library sync" types is whatever's currently registered in
+        # the library_apps registry, so this query stays correct as new
+        # backends land — no future code change needed.
+        from app.library_apps import get_all_apps
+        lib_types = list(get_all_apps().keys())
+        if lib_types:
+            placeholders = ",".join("?" * len(lib_types))
+            ls = await (await db.execute(
+                f"SELECT * FROM sync_log WHERE sync_type IN ({placeholders}) "
+                f"ORDER BY started_at DESC LIMIT 1",
+                lib_types,
+            )).fetchone()
+        else:
+            ls = None
         ll = await (await g("SELECT * FROM sync_log WHERE sync_type='lookup' ORDER BY started_at DESC LIMIT 1")).fetchone()
         s = load_settings()
         mam_stats = None
@@ -141,6 +155,6 @@ async def get_stats():
             mam_stats = await get_mam_stats(db)
         active_lib = get_active_library()
         lib_info = next((l for l in state._discovered_libraries if l["slug"] == active_lib), None)
-        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_calibre_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(state._discovered_libraries), "active_content_type": lib_info.get("content_type", "ebook") if lib_info else "ebook", "active_app_type": lib_info.get("app_type", "calibre") if lib_info else "calibre", "last_calibre_check": state._last_calibre_check}
+        return {"authors": authors, "total_books": total, "owned_books": owned, "missing_books": missing, "new_books": new, "upcoming_books": upcoming, "total_series": series, "hidden_books": hidden, "last_library_sync": dict(ls) if ls else None, "last_lookup": dict(ll) if ll else None, "calibre_web_url": s.get("calibre_web_url", ""), "calibre_url": s.get("calibre_url", ""), "mam": mam_stats, "mam_enabled": s.get("mam_enabled", False), "mam_scanning_enabled": s.get("mam_scanning_enabled", True), "author_scanning_enabled": s.get("author_scanning_enabled", True), "active_library": active_lib, "active_library_name": lib_info["name"] if lib_info else active_lib, "library_count": len(state._discovered_libraries), "active_content_type": lib_info.get("content_type", "ebook") if lib_info else "ebook", "active_app_type": lib_info.get("app_type", "calibre") if lib_info else "calibre", "last_library_sync_check": state._last_library_sync_check}
     finally:
         await db.close()

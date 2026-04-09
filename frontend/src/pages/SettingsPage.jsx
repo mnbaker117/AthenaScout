@@ -92,7 +92,7 @@ return<div style={{paddingBottom:40}}>
 </div>
 <SF label="Calibre Web URL" desc="Full URL to your Calibre-Web instance, including port (e.g. http://192.168.1.100:8083). Enables deep links to individual books in the sidebar."><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.calibre_web_url||""} onChange={e=>upd("calibre_web_url",e.target.value)} placeholder="http://192.168.1.100:8083" style={{...ist,width:220}}/>{s.calibre_web_url?<a href={s.calibre_web_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
 <SF label="Calibre Library URL" desc="Full URL to your Calibre content server or management interface, including port (e.g. https://192.168.1.100:8181). Adds a quick-access button on the dashboard."><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.calibre_url||""} onChange={e=>upd("calibre_url",e.target.value)} placeholder="https://10.0.10.20:8787" style={{...ist,width:220}}/>{s.calibre_url?<a href={s.calibre_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
-<SF label="Calibre sync interval (minutes)" desc="Set to 0 to disable auto-sync"><input {...numP("calibre_sync_interval_minutes",60)}/></SF>
+<SF label="Library sync interval (minutes)" desc="Set to 0 to disable auto-sync"><input {...numP("library_sync_interval_minutes",60)}/></SF>
 
 </SSection>
 

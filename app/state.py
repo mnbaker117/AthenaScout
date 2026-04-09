@@ -80,25 +80,29 @@ def supervised_task(
 _discovered_libraries: List[dict] = []
 
 
-# ─── Calibre sync check tracking ─────────────────────────────
-# Updated after every successful calibre sync (manual or scheduled)
-# Displayed on dashboard via /api/stats
-_last_calibre_check: Dict[str, Any] = {"at": None, "synced": False}
+# ─── Library sync check tracking ─────────────────────────────
+# Updated after every successful library sync (manual or scheduled),
+# regardless of which backend ran the sync. Displayed on the dashboard
+# via /api/stats. Calibre is the only backend today, but the field is
+# named generically because the framework is designed to grow.
+_last_library_sync_check: Dict[str, Any] = {"at": None, "synced": False}
 
-# True while a Calibre library sync is actively running (manual or
-# scheduled). MAM scan batches and other write-heavy background tasks
-# check this flag before grabbing the DB write lock, so they yield
-# cleanly instead of racing against the bulk upsert and getting hit
-# with "database is locked" errors after the busy_timeout expires.
-# Always cleared in a try/finally block — never leave this stuck True.
-_calibre_sync_in_progress: bool = False
+# True while ANY library sync is actively running (manual or scheduled,
+# Calibre today, future backends tomorrow). MAM scan batches and other
+# write-heavy background tasks check this flag before grabbing the DB
+# write lock, so they yield cleanly instead of racing against the bulk
+# upsert and getting hit with "database is locked" errors after the
+# busy_timeout expires. Always cleared in a try/finally block — never
+# leave this stuck True.
+_library_sync_in_progress: bool = False
 
-# Per-book progress for the active Calibre sync. Populated by
-# sync_calibre() during its book-upsert pass so the unified scan widget
-# can show "Syncing 142/675 — The Final Empire" alongside source/MAM
-# progress. Pure visibility — the MAM-blocking semantics come from
-# `_calibre_sync_in_progress` above. Reset to idle when no sync runs.
-_calibre_sync_progress: Dict[str, Any] = {
+# Per-book progress for the active library sync. Populated by the
+# active backend's sync function during its book-upsert pass so the
+# unified scan widget can show "Syncing 142/675 — The Final Empire"
+# alongside source/MAM progress. Pure visibility — the MAM-blocking
+# semantics come from `_library_sync_in_progress` above. Reset to idle
+# when no sync runs.
+_library_sync_progress: Dict[str, Any] = {
     "running": False,
     "current": 0,
     "total": 0,

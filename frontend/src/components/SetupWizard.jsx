@@ -53,7 +53,7 @@ setSaveStep("Discovering libraries...");
 const rescan=await api.post("/libraries/rescan");
 const libCount=rescan.libraries?.length||0;
 // Step 3: Sync if libraries found
-if(libCount>0){setSaveStep("Syncing library data...");try{await api.post("/sync/calibre")}catch(e){console.warn("Initial sync warning:",e)}}
+if(libCount>0){setSaveStep("Syncing library data...");try{await api.post("/sync/library")}catch(e){console.warn("Initial sync warning:",e)}}
 setResult({libraries:libCount,synced:libCount>0});setDone(true)
 }catch(e){setError(String(e));setDone(true)}setSaving(false)};
 

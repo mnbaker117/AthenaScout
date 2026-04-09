@@ -1,24 +1,46 @@
 """
-Library App Registry — central registry of all supported library source applications.
+Library app registry — central registry of supported library backends.
 
-To add a new source app:
-1. Create a new file in this directory (e.g., audiobookshelf.py)
-2. Implement the LibraryApp interface from base.py
-3. Import and register it in this file
+AthenaScout's discovery system, sync engine, and UI all hang off this
+registry: anything registered here automatically becomes a candidate
+backend that the user can point at a library directory for. The
+current public release ships only the Calibre backend, but the
+`LibraryApp` interface in `base.py` is deliberately small so that
+adding new backends is a self-contained change.
 
-The discovery system, sync engine, and UI automatically pick up registered apps.
+Candidate ebook backends a future contributor could implement:
+
+  - **Alfa**            (ebook management)
+  - **Kavita**          (ebook side)
+  - **Komga**           (ebook + comics)
+  - **Audiobookshelf**  (ebook side)
+
+Candidate audiobook backends:
+
+  - **Audiobookshelf**  (audiobook side)
+  - **Kavita**          (audiobook side)
+  - **Libation**        (Audible audiobook downloader / library)
+  - **OpenAudible**     (Audible audiobook manager)
+
+To add a new backend:
+  1. Create a new file in this directory (e.g. `audiobookshelf.py`).
+  2. Implement the `LibraryApp` interface from `base.py`.
+  3. Add the import + a registry entry below.
+
+The `app_type` string used as the dict key shows up in the `books`,
+`authors`, and `series` row `source` columns and in the library
+discovery JSON, so keep it short, lowercase, and stable once chosen.
 """
 from app.library_apps.calibre import CalibreApp
 
 # ─── Registry ────────────────────────────────────────────────
-# Each key is the app_type string used throughout the system.
-# Each value is an instance of a LibraryApp subclass.
+# Each key is the `app_type` string used throughout the system.
+# Each value is an instance of a `LibraryApp` subclass.
 LIBRARY_APPS = {
     "calibre": CalibreApp(),
-    # Future source apps:
-    # "audiobookshelf": AudiobookshelfApp(),
-    # "epubor": EpuborApp(),
-    # "libation": LibationApp(),
+    # Future backends slot in here. See module docstring above for the
+    # candidate list of ebook and audiobook apps the framework is
+    # designed to accept.
 }
 
 

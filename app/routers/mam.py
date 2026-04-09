@@ -138,12 +138,12 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
         let one long Sanderson source scan stall the entire MAM queue,
         which is the symptom that motivated splitting these out.
         """
-        if state._calibre_sync_in_progress:
-            state._mam_scan_progress["status"] = "waiting (calibre sync running)"
-            logger.info("MAM scan waiting for Calibre sync to finish...")
-            while state._calibre_sync_in_progress:
+        if state._library_sync_in_progress:
+            state._mam_scan_progress["status"] = "waiting (library sync running)"
+            logger.info("MAM scan waiting for library sync to finish...")
+            while state._library_sync_in_progress:
                 await asyncio.sleep(5)
-            logger.info("Calibre sync finished — MAM scan resuming")
+            logger.info("Library sync finished — MAM scan resuming")
         state._mam_scan_progress["status"] = "scanning"
 
     async def _do_scan():

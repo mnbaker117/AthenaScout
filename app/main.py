@@ -157,7 +157,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"Active library: '{active}'")
 
         # Sync each library (with mtime optimization)
-        mtimes = s.get("calibre_mtimes", {})
+        mtimes = s.get("library_mtimes", {})
         for lib in state._discovered_libraries:
             set_active_library(lib["slug"])
             try:
@@ -173,32 +173,32 @@ async def lifespan(app: FastAPI):
                     else:
                         await sync_calibre(lib["source_db_path"], lib["library_path"])
                     mtimes[lib["slug"]] = current_mtime
-                    s["calibre_mtimes"] = mtimes
+                    s["library_mtimes"] = mtimes
                     save_settings(s)
             except Exception as e:
                 logger.warning(f"Sync failed for library '{lib['name']}': {e}")
 
         # Restore active library after syncing all
         set_active_library(active)
-        state._last_calibre_check["at"] = time.time()
-        state._last_calibre_check["synced"] = True
+        state._last_library_sync_check["at"] = time.time()
+        state._last_library_sync_check["synced"] = True
 
-    # ─── Scheduled Calibre Sync (all libraries) ───────────
+    # ─── Scheduled library sync (all libraries) ───────────
     s = load_settings()
-    sync_min = s.get("calibre_sync_interval_minutes", SYNC_INTERVAL_MINUTES)
+    sync_min = s.get("library_sync_interval_minutes", SYNC_INTERVAL_MINUTES)
     lookup_days = s.get("lookup_interval_days", 3)
 
     async def _sync_all_libraries():
         """Scheduled task: sync all libraries with mtime optimization."""
         current_active = get_active_library()
         st = load_settings()
-        mtimes = st.get("calibre_mtimes", {})
+        mtimes = st.get("library_mtimes", {})
         any_synced = False
         # Signal background writers (MAM scanner, etc.) that a bulk sync
         # is in flight so they yield gracefully instead of racing us.
         # try/finally ensures the flag ALWAYS clears — a crash mid-sync
         # must not leave background tasks permanently paused.
-        state._calibre_sync_in_progress = True
+        state._library_sync_in_progress = True
         try:
             for lib in state._discovered_libraries:
                 try:
@@ -215,24 +215,24 @@ async def lifespan(app: FastAPI):
                     else:
                         await sync_calibre(lib["source_db_path"], lib["library_path"])
                     mtimes[lib["slug"]] = current_mtime
-                    st["calibre_mtimes"] = mtimes
+                    st["library_mtimes"] = mtimes
                     save_settings(st)
                     any_synced = True
                 except Exception as e:
                     logger.warning(f"Scheduled sync failed for '{lib['name']}': {e}")
             set_active_library(current_active)
-            state._last_calibre_check["at"] = time.time()
-            state._last_calibre_check["synced"] = any_synced
+            state._last_library_sync_check["at"] = time.time()
+            state._last_library_sync_check["synced"] = any_synced
         finally:
-            state._calibre_sync_in_progress = False
+            state._library_sync_in_progress = False
 
     if sync_min and sync_min > 0:
         if state._discovered_libraries:
-            scheduler.add_job(_sync_all_libraries, "interval", minutes=sync_min, id="calibre_sync", replace_existing=True)
+            scheduler.add_job(_sync_all_libraries, "interval", minutes=sync_min, id="library_sync", replace_existing=True)
         else:
-            logger.info("Calibre auto-sync skipped - no libraries configured")
+            logger.info("Library auto-sync skipped — no libraries configured")
     else:
-        logger.info("Calibre auto-sync disabled (interval = 0)")
+        logger.info("Library auto-sync disabled (interval = 0)")
 
     async def _scheduled_lookup():
         s = load_settings()
@@ -271,13 +271,13 @@ async def lifespan(app: FastAPI):
                 continue
             if state._mam_scan_progress.get("running"):
                 continue
-            # Defer ONLY on a Calibre sync — concurrent author scans
+            # Defer ONLY on a library sync — concurrent author scans
             # are tolerated because WAL + the 30s busy_timeout absorb
-            # the small per-row contention. Calibre sync, by contrast,
+            # the small per-row contention. Library sync, by contrast,
             # holds the write lock for tens of seconds during bulk
             # inserts, longer than busy_timeout is willing to wait.
-            if state._calibre_sync_in_progress:
-                logger.debug("MAM scheduled scan deferred — Calibre sync in progress")
+            if state._library_sync_in_progress:
+                logger.debug("MAM scheduled scan deferred — library sync in progress")
                 continue
             last_val = s.get("last_mam_validated_at") or 0
             if time.time() - last_val > 86400:
