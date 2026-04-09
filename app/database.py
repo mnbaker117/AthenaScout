@@ -1,5 +1,24 @@
 """
-Database layer for AthenaScout.
+Database layer.
+
+AthenaScout's per-library SQLite databases live under DATA_DIR with
+filenames like `athenascout_{slug}.db`. The active library is selected
+at runtime via `set_active_library` and read by `get_db` so every
+endpoint operates against the right database without having to pass
+the slug around explicitly.
+
+Schema and migrations are both defined in this file. The schema block
+is the up-to-date target shape; the migration list is the ordered
+sequence of statements that bring an older database forward to it.
+`PRAGMA user_version` tracks how many entries from the list have been
+applied so subsequent startups skip the work entirely.
+
+The connection pragmas worth knowing about:
+  - WAL mode: keeps readers unblocked during writes.
+  - foreign_keys=ON: enforced at runtime, not just declared in the
+    schema (SQLite defaults to off).
+  - busy_timeout=30s: long enough to wait out a Calibre bulk-sync
+    holding the write lock.
 """
 import logging
 import aiosqlite
@@ -85,13 +104,10 @@ def match_legacy_db_to_library(libraries):
 
     _db_logger.info(f"Legacy DB has {legacy_count} Calibre-sourced books")
 
-    # Count books in each Calibre metadata.db. Phase 20A renamed the
-    # discovered-library dict field from `calibre_db_path` to the
-    # library-agnostic `source_db_path` (see library_apps/base.py:130);
-    # this function was missed in that rename and was raising KeyError on
-    # every library, then logging a misleading "Could not read Calibre DB"
-    # warning while silently falling back to the first library by slug
-    # ordering. Fixed in Phase 3a follow-up.
+    # Count books in each library's source database. The lookup uses
+    # `source_db_path` (the library-agnostic key) with a fallback to
+    # the legacy `calibre_db_path` so we don't break any external
+    # caller still passing the old shape.
     best_slug = libraries[0]["slug"]
     best_diff = float("inf")
     for lib in libraries:
@@ -218,30 +234,32 @@ CREATE TABLE IF NOT EXISTS mam_scan_log (
     started_at REAL NOT NULL,
     finished_at REAL,
     status TEXT NOT NULL DEFAULT 'running',
-    -- Phase 3d-1 (post-feedback): JSON array of book IDs captured at
-    -- scan start. Each batch consumes a slice of this list rather
-    -- than re-querying `WHERE mam_status IS NULL`, so a concurrent
-    -- author scan adding new books mid-scan can NOT inflate the
-    -- queue. Mirrors the snapshot semantics already in the manual
-    -- /api/mam/scan path. Empty/null means legacy pre-snapshot scan.
+    -- JSON array of book IDs captured at scan start. Each batch
+    -- consumes a slice of this list rather than re-querying
+    -- `WHERE mam_status IS NULL`, so a concurrent author scan
+    -- adding new books mid-scan can NOT inflate the queue. Empty
+    -- or null means a legacy pre-snapshot scan that should fall
+    -- back to the old query path.
     book_ids_snapshot TEXT
 );
 
--- Phase 3c: Source-consensus series suggestions.
--- One row per book with an active suggestion. The merge layer
--- (lookup.py:_merge_result + _compute_series_suggestions) populates
--- this whenever 2+ sources agree on a (series_name, series_index)
--- tuple that differs from what's currently stored on the book row.
--- The user reviews pending suggestions in the UI and either applies
--- (writes back to books.series_id/series_index, status→applied) or
--- ignores (status→ignored, suppresses re-suggestion of the SAME tuple).
--- A future scan that produces a DIFFERENT consensus from a previously
--- ignored one creates a fresh pending suggestion.
+-- Source-consensus series suggestions. One row per book with an
+-- active suggestion. The merge layer populates this whenever 2+
+-- sources independently agree on a (series_name, series_index) tuple
+-- that differs from what's currently stored on the book.
 --
--- The current_* columns snapshot the book's series state at the moment
--- the suggestion was generated, so the UI can render "currently: X →
--- suggested: Y" diffs without re-querying the books row (which may
--- have changed by the time the user reviews).
+-- Lifecycle:
+--   pending  → the user hasn't reviewed yet
+--   applied  → the user accepted; the book row was updated, and we
+--              suppress re-suggestion of the same tuple forever
+--   ignored  → the user rejected; we suppress THIS exact tuple but a
+--              future scan that produces a DIFFERENT consensus
+--              creates a fresh pending row
+--
+-- The `current_*` columns snapshot the book's series state at the
+-- moment the suggestion was generated, so the UI can render
+-- "currently: X → suggested: Y" diffs without re-reading the books
+-- row (which may have changed by review time).
 CREATE TABLE IF NOT EXISTS book_series_suggestions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     book_id INTEGER NOT NULL UNIQUE,
@@ -314,10 +332,9 @@ MIGRATIONS = [
     "ALTER TABLE authors DROP COLUMN fantasticfiction_id",
     "ALTER TABLE series DROP COLUMN fantasticfiction_id",
     "ALTER TABLE books DROP COLUMN fantasticfiction_id",
-    # ── Phase 3c: source-consensus series suggestions ────────────
-    # See SCHEMA above for full doc. Single new table; no changes
-    # to existing tables. Indexes are created via the SCHEMA index
-    # block at startup so they're not duplicated here.
+    # ── Source-consensus series suggestions table ─────────────────
+    # See SCHEMA above for the full lifecycle doc. Indexes are
+    # created via the SCHEMA index block at startup, not here.
     """CREATE TABLE IF NOT EXISTS book_series_suggestions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         book_id INTEGER NOT NULL UNIQUE,
@@ -332,20 +349,15 @@ MIGRATIONS = [
         FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
     )""",
     # ── Orphan series cleanup ────────────────────────────────────
-    # Existing databases accumulated phantom series rows because the
-    # pre-fix _merge_result inserted a series row BEFORE processing any
-    # books in that series. In owned_only (library-only) scans, all the
-    # books then got filtered out, leaving the series row pointing at
-    # nothing. On the user's live container this was 649 of 1324 series
-    # rows (~49%). Lazy upsert in lookup.py prevents NEW orphans; this
-    # one-shot DELETE kills the existing ones. Idempotent — running it
-    # twice deletes nothing the second time.
+    # One-shot cleanup of phantom series rows that older scans could
+    # leave behind when every book in a series got filtered out by
+    # owned-only mode. Lookup's lazy series upsert prevents new
+    # orphans, so this exists only to scrub historical residue.
+    # Idempotent — re-running deletes nothing.
     "DELETE FROM series WHERE id NOT IN (SELECT DISTINCT series_id FROM books WHERE series_id IS NOT NULL)",
-    # Phase 3d-1 (post-feedback): mam_scan_log.book_ids_snapshot column
-    # for the full MAM scan ID snapshot. Without this column, existing
-    # databases would get the legacy code path because the column read
-    # would fail. The migration loop tolerates "duplicate column" so
-    # this is safe to ship.
+    # mam_scan_log.book_ids_snapshot column for the full MAM scan ID
+    # snapshot. Tolerated by the migration loop's "duplicate column"
+    # handler if it's already present.
     "ALTER TABLE mam_scan_log ADD COLUMN book_ids_snapshot TEXT",
 ]
 
@@ -362,12 +374,13 @@ async def get_db(slug=None) -> aiosqlite.Connection:
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
-    # 30s busy_timeout gives background tasks (MAM scan batches, UI
-    # queries) plenty of room to wait out a Calibre bulk-sync that's
-    # holding the write lock. Previously 5s, which was too short — a
-    # 2700-book Calibre sync takes ~15s and was causing "database is
-    # locked" errors on concurrent writers. WAL mode keeps *readers*
-    # unblocked entirely; this only matters for writer↔writer contention.
+    # 30s busy_timeout gives background writers (MAM scan batches,
+    # author scans, UI mutations) plenty of room to wait out a
+    # Calibre bulk-sync that's holding the write lock. A 2700-book
+    # sync can take ~15s, so anything shorter than ~20s starts
+    # producing "database is locked" errors on concurrent writers.
+    # WAL mode keeps READERS unblocked regardless — this timeout
+    # only matters for writer↔writer contention.
     await db.execute("PRAGMA busy_timeout=30000")
     return db
 

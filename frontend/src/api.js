@@ -1,24 +1,28 @@
-// API client for AthenaScout backend.
+// API client for the AthenaScout backend.
 //
-// Wraps fetch() with /api prefix and JSON handling.
-// All methods throw on non-2xx responses with the status code as the message.
+// Thin wrapper over fetch() that prefixes /api, handles JSON request
+// bodies and responses, and throws an Error on any non-2xx response.
+// The thrown Error carries a `.status` property (numeric HTTP code) so
+// callers can branch on specific failures.
+//
+// Two app-wide behaviors worth knowing about:
+//
+//  1. Any 401 response dispatches the `athenascout:auth-required`
+//     window event. App.jsx listens for it and drops the user back to
+//     the login screen — no callers have to handle the auth case
+//     individually.
+//
+//  2. Every method accepts an optional AbortSignal as its last
+//     argument. Pass `controller.signal` and call `controller.abort()`
+//     on component unmount / page change to drop in-flight requests.
+//     Aborted fetches throw `DOMException("AbortError")`; the helper
+//     `api.isAbort(e)` recognizes the shape so call sites can ignore
+//     them cleanly.
 //
 // Usage:
 //   import { api } from "./api";
 //   const books = await api.get("/books");
 //   await api.post("/libraries/active", { slug: "my-library" });
-//
-// Phase 22B.3 Stage 2A: any 401 response dispatches a global
-// "athenascout:auth-required" event that App.jsx listens for to redirect
-// to the login screen. The thrown Error also carries a `.status` property
-// so callers (and the wrapper below) can detect HTTP failures by code.
-//
-// Phase 22B.3 Batch B.1: all methods accept an optional AbortSignal as the
-// last argument. Callers can pass `controller.signal` and call
-// `controller.abort()` on component unmount / page change to drop in-flight
-// requests. Aborted fetches throw DOMException("AbortError"), which callers
-// can ignore via `.catch(e=>{if(e.name!=="AbortError")throw e})` or the
-// `api.isAbort(e)` helper below.
 
 // Throws an Error whose message is FastAPI's `detail` field if available,
 // otherwise the bare status code. The error carries a `.status` property

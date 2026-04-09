@@ -1,28 +1,32 @@
 """
-MyAnonamouse (MAM) integration for AthenaScout.
+MyAnonamouse (MAM) integration.
 
-Ported from the standalone mam_calibre_check.py script into an async service
-that integrates with AthenaScout's SQLite database and FastAPI scheduler.
+Looks up each book in the user's library against MAM's torrent catalog so the
+UI can show what's already available, what's missing, and what would be a
+useful upload.
 
 Authentication:
-  MAM uses IP-locked session tokens. The user generates one from
-  MAM → Preferences → Security and enters it in AthenaScout settings.
-  On each scan run, we first ping MAM's dynamic seedbox endpoint to
-  register the Docker container's IP, then search for books.
+  MAM session tokens are IP- (or ASN-)locked. The user generates one from
+  MAM → Preferences → Security and pastes it into AthenaScout's settings.
+  Before each scan we ping the dynamic-seedbox endpoint to register the
+  current IP (skipped for ASN-locked sessions), then run searches with the
+  token in a `mam_id` cookie.
 
-Search strategy (5-pass cascade, same as standalone script):
+Search strategy — five-pass cascade:
   Pass 1 — author + full title
-  Pass 2 — author + core title  (volume/series prefix stripped)
-  Pass 3 — author + subtitle right  (part after colon)
-  Pass 4 — author + short title  (part before colon)
-  Pass 5 — title words only  (no author, loose cleaning)
+  Pass 2 — author + core title         (volume/series prefix stripped)
+  Pass 3 — author + subtitle-right     (part after the colon)
+  Pass 4 — author + short title        (part before the colon)
+  Pass 5 — title words only            (no author, loose cleaning)
+  The cascade short-circuits as soon as a high-confidence match is found;
+  the best "possible" across all passes is kept as a fallback.
 
 Format preference:
-  When multiple MAM results match a book, each result is scored by:
+  When several MAM results match the same book, each is scored by:
     1. Highest-priority ebook format present (user-configurable)
     2. Number of formats available (more = more choice)
-  The best result's torrent page is linked. If multiple distinct uploads
-  exist for the same book, a flag is set so the UI can note it.
+  The winner's torrent page is linked. If multiple distinct uploads exist
+  for the same book, a flag is set so the UI can show a "multiple" badge.
 """
 
 import asyncio
@@ -47,24 +51,20 @@ MAM_DYNIP_URL = "https://t.myanonamouse.net/json/dynamicSeedbox.php"
 EBOOK_CATEGORY = "14"
 
 # ─── SQL predicates for "books needing MAM scan" ─────────────
-# Two flavors exist for historical reasons. They're functionally equivalent
-# in practice (mam_url and mam_status are always set together by the
-# UPDATE statement that records scan results), but kept separate to
-# preserve existing behavior exactly. A future cleanup could unify them
-# after verifying the invariant holds across the entire codebase.
-#
-# Each flavor has _BARE (no table alias) and _ALIASED (with `b.` prefix)
-# variants because some queries JOIN authors and need to disambiguate.
+# Two flavors: BASIC checks only mam_status, STRICT also requires mam_url.
+# In practice they always agree because the UPDATE that writes scan results
+# sets both columns together — but the strict flavor is used by full scans
+# to be defensive against any future code path that might write one column
+# without the other. Each flavor has a _BARE and an _ALIASED form for
+# queries that JOIN authors and need a `b.` prefix to disambiguate.
 
-# Used by scan_books_batch — checks only mam_status (basic flavor)
 _NEEDS_SCAN_BASIC_BARE = "mam_status IS NULL AND is_unreleased = 0 AND hidden = 0"
 _NEEDS_SCAN_BASIC_ALIASED = "b.mam_status IS NULL AND b.is_unreleased = 0 AND b.hidden = 0"
 
-# Used by full-scan paths — strict flavor including mam_url IS NULL
 _NEEDS_SCAN_STRICT_BARE = "mam_url IS NULL AND mam_status IS NULL AND is_unreleased = 0 AND hidden = 0"
 _NEEDS_SCAN_STRICT_ALIASED = "b.mam_url IS NULL AND b.mam_status IS NULL AND b.is_unreleased = 0 AND b.hidden = 0"
 
-# Match quality thresholds (same as standalone script)
+# Match quality thresholds
 MATCH_MIN_PCT = 25.0       # below this → junk, skip
 MATCH_PROMOTE_PCT = 50.0   # at or above + author match → promote to "found"
 
@@ -79,12 +79,11 @@ STATUS_ERROR = "error"
 DEFAULT_DELAY = 2.0
 
 # How many results to request per search. The MAM API allows 5–1000.
-# Phase 22B.2.6: bumped from 25 → 100 because, for prolific authors with
-# many torrents in a series, the actual exact match would get pushed off
-# page 1 by collection bundles and series-sibling torrents that the API
-# ranks higher. The captured logs showed Robert Jordan's "The Eye of the
-# World" being completely absent from a 25-result page despite existing
-# on MAM, because Wheel of Time bundles took the top slots.
+# 100 is deliberate: for prolific authors with many torrents in a series,
+# the exact match can get pushed off the first page by bundles and series-
+# sibling torrents that MAM ranks higher. A 25-result page once missed
+# Robert Jordan's "The Eye of the World" entirely because Wheel of Time
+# bundles took every top slot. Don't drop this without re-verifying.
 RESULTS_PER_PAGE = 100
 
 # MAM language ID mapping. The MAM API uses numeric language IDs both for
@@ -153,7 +152,7 @@ KNOWN_EBOOK_FORMATS = {
 
 
 # ---------------------------------------------------------------------------
-# Regex patterns (ported from standalone script)
+# Regex patterns
 # ---------------------------------------------------------------------------
 HONORIFICS = re.compile(
     r'\b(Mr|Mrs|Ms|Miss|Dr|PhD|Professor|Prof)\.?\s?\b', re.IGNORECASE
@@ -181,7 +180,7 @@ RE_NUM_PREFIX = re.compile(
 
 
 # ---------------------------------------------------------------------------
-# Text helpers (ported from standalone)
+# Text helpers
 # ---------------------------------------------------------------------------
 
 def _clean_title(title: str) -> str:
@@ -264,11 +263,10 @@ _RE_PUNCT_TOKEN = re.compile(r"[^\w\s]+")
 def _word_match_pct(text1: str, text2: str) -> float:
     """Sorted-token word overlap percentage.
 
-    Strips punctuation before tokenizing so that "Reach:" matches "Reach"
-    (Phase 22B.2.6). Without this, colons / apostrophes / commas attached
-    to words caused real exact matches to score below the promote threshold,
-    which silently mis-linked books in series with subtitled titles like
-    "Halo: Shadows of Reach: A Master Chief Story".
+    Strips punctuation before tokenizing so "Reach:" matches "Reach". Without
+    this, attached colons / apostrophes / commas dragged real exact matches
+    below the promote threshold, which silently mis-linked subtitled series
+    titles like "Halo: Shadows of Reach: A Master Chief Story".
     """
     def _tokens(t: str) -> list[str]:
         return sorted(_RE_PUNCT_TOKEN.sub(" ", t.lower()).split())
@@ -368,12 +366,11 @@ def _format_score(formats: list[str], priority: list[str]) -> tuple[int, int, st
     return (999, len(formats), formats[0] if formats else "unknown")
 
 
-# Phase 22B.2.6 — Books at or above this match_pct are considered the
-# "same book" with high confidence. The format-aware sort that prefers more
-# formats is only meaningful WITHIN this set; allowing low-confidence
-# matches into the format-preference comparison caused the historical bug
-# where a wrong-but-multi-format result would beat the right-but-single-
-# format match.
+# Books at or above this match_pct are treated as the "same book" with high
+# confidence. The format-aware sort that prefers more formats is only
+# meaningful WITHIN this set — letting low-confidence matches into the
+# format comparison once let a wrong-but-multi-format result beat the
+# right-but-single-format match.
 HIGH_CONFIDENCE_PCT = 80.0
 
 
@@ -387,19 +384,18 @@ def _pick_best_result(
     Each match dict has: torrent_id, mam_title, formats, match_pct,
     author_matched, seeders, plus per-result fields.
 
-    Selection logic (Phase 22B.2.6):
-      1. Filter to high-confidence title matches (>= HIGH_CONFIDENCE_PCT) if
-         any exist; this prevents a wrong-book-with-more-formats from beating
-         a right-book-with-fewer-formats. Fall back to all matches if no
-         high-confidence ones are present.
-      2. Among the candidates, score by user's format preference (rank).
-      3. Within the same format rank, prefer the result with the highest
-         match_pct (the actual title match), then with more formats, then
-         with more seeders.
+    Selection logic — order matters:
+      1. Filter to high-confidence title matches (>= HIGH_CONFIDENCE_PCT)
+         when any exist, falling back to the full list otherwise. This is
+         what stops a wrong-book-with-more-formats from beating a
+         right-book-with-fewer-formats.
+      2. Among the candidates, score by user's format preference rank.
+      3. Within the same format rank, prefer higher match_pct, then more
+         formats, then more seeders.
 
-    The previous version sorted by (fmt_rank, -fmt_count, -match_pct), which
-    placed format count BEFORE match quality and silently produced wrong
-    matches for any series where one torrent bundled extra formats.
+    Match quality MUST come before format count in the tiebreak — sorting
+    formats first silently mis-matches any series where one torrent
+    bundles extra formats.
     """
     if not matches:
         return None
@@ -435,16 +431,14 @@ def _pick_best_result(
 def _build_headers(token: str) -> dict:
     """Build headers for MAM API requests.
 
-    The `curl/8.0` User-Agent is a holdover from an earlier Claude session
-    that suspected MAM was doing TLS fingerprinting. That theory turned out
-    to be wrong — the actual failure mode was HTTP 200 with a 0-byte body,
-    which is a request-encoding issue, not a TLS-layer one. We keep the
-    curl UA anyway because it's known-good and cheap. Do not remove it
-    without re-testing a full MAM scan end-to-end.
+    The `curl/8.0` User-Agent is intentional and load-bearing — it's the UA
+    we know works against MAM end-to-end. Don't change it without running a
+    full scan first; subtle UA-based rejection has bitten us before.
 
-    The IP-locked `mam_id` cookie is the ONLY auth mechanism; the same
-    token will be rejected if the requesting IP differs from the one that
-    generated it. See register_ip() and settings `skip_ip_update`.
+    The IP- (or ASN-)locked `mam_id` cookie is the ONLY auth mechanism;
+    the same token will be rejected if the requesting IP differs from the
+    one that generated it. See register_ip() and the `skip_ip_update`
+    setting for the network-binding workflow.
     """
     return {
         "Content-Type": "application/json",
@@ -456,28 +450,26 @@ def _build_headers(token: str) -> dict:
 # ---------------------------------------------------------------------------
 # HTTP layer (async — httpx.AsyncClient)
 # ---------------------------------------------------------------------------
-# Native async HTTP via a process-wide httpx.AsyncClient. Previous versions
-# of this module used `requests` + `asyncio.to_thread` because an earlier
-# attempt with aiohttp saw MAM return HTTP 200 + 0 bytes, and at the time
-# the best hypothesis was TLS fingerprinting. Re-investigation (see the
-# docstring on _build_headers) concluded the real problem was aiohttp
-# form-encoding the JSON body into `%7B%22tor%22%...` — MAM accepted the
-# cookie but had nothing valid to search against, hence the empty response.
+# Native async HTTP via a single process-wide httpx.AsyncClient.
 #
-# httpx avoids this cleanly by using `content=<string>` (raw body, no
-# encoding) instead of `data=<dict>` (form-url-encoded). This produces
-# the exact same bytes as `requests.post(..., data=<string>)`, which is
-# what the old mam.py relied on.
+# Two non-obvious choices, both load-bearing — do NOT change without running
+# a full MAM scan end-to-end first:
 #
-# Connection reuse: a single AsyncClient instance is shared across all MAM
-# calls for the lifetime of the process. Without this, every search would
-# do a fresh TCP+TLS handshake (50-150ms each); a 100-book batch with a
-# 5-pass cascade could spend 30-60 seconds just on handshakes. With the
-# shared client, handshake overhead drops to one per batch.
+#   1. Search POSTs use `content=<string>` (raw body), NOT `data=<dict>`
+#      (form-url-encoded) and NOT `json=<dict>` (re-serialized by httpx).
+#      MAM will happily accept the request and return HTTP 200 with a
+#      zero-byte body when the search payload is form-encoded — looks like
+#      auth failure but isn't. The fix is sending the exact JSON bytes
+#      produced by json.dumps at the call site.
 #
-# http2=False is explicit — httpx can speak HTTP/2 when the `h2` package
-# is installed, but MAM isn't known to need it and we don't want variable
-# transport behavior. HTTP/1.1 matches what `requests` did before.
+#   2. http2=False is explicit. httpx can speak HTTP/2 when `h2` is
+#      installed; we pin HTTP/1.1 because that's what's been verified
+#      against MAM and we don't want variable transport behavior.
+#
+# Connection reuse matters for throughput: a 100-book scan with the 5-pass
+# cascade fires hundreds of requests, and each fresh TCP+TLS handshake
+# costs 50-150ms. Sharing one client across the process drops that to a
+# single handshake per batch.
 
 _client: Optional[httpx.AsyncClient] = None
 
@@ -504,9 +496,9 @@ async def aclose_session() -> None:
     """Tear down the module-level AsyncClient.
 
     Called from main.py's lifespan() during app shutdown. Safe to call
-    multiple times — subsequent calls are no-ops. Named `aclose_session`
-    (not `close_session`) because the coroutine-ness is load-bearing:
-    callers must `await` it to actually close the underlying transport.
+    multiple times — subsequent calls are no-ops. The `a` prefix is
+    deliberate: callers must `await` this to actually close the
+    underlying transport.
     """
     global _client
     if _client is not None:
@@ -529,12 +521,10 @@ async def _do_get(url: str, token: str, timeout: int = 15) -> httpx.Response:
 async def _do_post(url: str, token: str, payload: str, timeout: int = 20) -> httpx.Response:
     """Async POST to a MAM endpoint with standard headers.
 
-    `payload` should be a JSON-encoded string (use json.dumps at the call
-    site). Sent via httpx `content=` — the raw-body equivalent of requests'
-    `data=<string>`. DO NOT switch to `data=<dict>` (which would form-url-
-    encode the payload and break the search API) or `json=` (which would
-    re-serialize with httpx's JSON encoder and can reorder keys). MAM wants
-    the exact bytes produced by json.dumps at the callsite.
+    `payload` MUST be a pre-serialized JSON string. Sent via httpx
+    `content=` so the body bytes go on the wire untouched. See the module
+    header for why `data=<dict>` and `json=<dict>` both break the search
+    API in subtle ways.
     """
     return await _get_client().post(
         url, headers=_build_headers(token), content=payload, timeout=timeout
@@ -546,11 +536,10 @@ async def register_ip(session_id: str, skip_ip_update: bool = True) -> dict:
     Ping MAM's dynamic seedbox endpoint to register this server's IP.
     Returns {"success": bool, "message": str}
 
-    Note: skip_ip_update defaults to True because IP registration is only
-    needed for non-ASN-locked sessions, and the AthenaScout codebase always
-    passes True at the call site to avoid interfering with seedbox sessions.
-    The False default would only fire if someone called this from a new
-    code path without specifying — making the safer behavior the default.
+    skip_ip_update defaults to True because IP registration is only needed
+    for non-ASN-locked sessions, and the rest of the codebase always passes
+    True. The default exists so any new caller that forgets to specify gets
+    the safer behavior automatically.
     """
     if skip_ip_update:
         return {"success": True, "message": "Skipped IP registration (ASN-locked session)"}
@@ -599,10 +588,9 @@ async def register_ip(session_id: str, skip_ip_update: bool = True) -> dict:
     except asyncio.TimeoutError:
         return {"success": False, "message": "Timeout connecting to MAM"}
     except Exception:
-        # Phase 22B.3 Stage 2C: log full traceback server-side, return a
-        # generic message to the API caller. The full exception details
-        # might contain library versions, internal hostnames, or stack
-        # frame paths that we don't want leaking via the response body.
+        # Log the full traceback server-side but return a generic message:
+        # exception details can leak library versions, internal hostnames,
+        # or stack frame paths through the API response body.
         logger.exception("MAM IP-registration network error")
         return {
             "success": False,
@@ -641,8 +629,8 @@ async def verify_search_auth(session_id: str) -> dict:
         else:
             return {"success": False, "message": f"Unexpected HTTP {resp.status_code}"}
     except Exception:
-        # Phase 22B.3 Stage 2C: see register_ip's matching handler. The
-        # full traceback goes to logs; the API response stays generic.
+        # Same rationale as register_ip's handler: full traceback to logs,
+        # generic message in the API response.
         logger.exception("MAM search-auth network error")
         return {
             "success": False,
@@ -747,7 +735,6 @@ def _evaluate_results(
     calibre_title: str,
     search_title: str,
     authors: str,
-    format_priority: list[str],
     lang_ids: Optional[list[int]] = None,
 ) -> list[dict]:
     """
@@ -884,7 +871,7 @@ async def check_book(
             return False
 
         data = resp["data"]
-        # H10: log total_found vs returned so we can spot truncated result sets
+        # Log total_found vs returned so we can spot truncated result sets.
         total_found = resp.get("found") or resp.get("total_found") or resp.get("total")
         if total_found is not None and isinstance(total_found, (int, str)):
             try:
@@ -896,7 +883,7 @@ async def check_book(
                     )
             except (ValueError, TypeError):
                 pass
-        matches = _evaluate_results(data, title, search_title, authors, format_priority, lang_ids)
+        matches = _evaluate_results(data, title, search_title, authors, lang_ids)
 
         if not matches:
             return False
@@ -1026,18 +1013,18 @@ async def scan_books_batch(
 ) -> dict:
     """
     Scan a batch of books that don't yet have MAM data.
-    Returns {"scanned": int, "found": int, "possible": int,
-             "not_found": int, "errors": int, "error": str|None}
 
-    Phase 3d-1 (post-feedback): the optional `book_ids` parameter takes
-    a pre-computed list of book IDs to scan, instead of letting the
-    function query `WHERE mam_status IS NULL` itself. Used by the
-    orchestrators to enforce scan-set stability when concurrent author
-    scans may be adding new books to the database mid-MAM-run. With
-    `book_ids` provided, NEW books added by an author scan during this
-    MAM scan will NOT be picked up — they'll wait for the next MAM
-    scan, matching what the user expects. With `book_ids=None` the
-    legacy `WHERE mam_status IS NULL` query path is used.
+    Returns {"scanned": int, "found": int, "possible": int,
+             "not_found": int, "errors": int, "error": str|None}.
+
+    Two scan-set modes:
+      - `book_ids` provided  → scan exactly that ID set (snapshot mode).
+      - `book_ids=None`      → query whatever currently has mam_status IS NULL.
+
+    Snapshot mode is what orchestrators use when concurrent author scans
+    may be adding new books mid-run: any books added during THIS scan
+    won't be picked up — they wait for the next MAM scan, which is what
+    the user expects (otherwise the queue would silently grow forever).
     """
     if format_priority is None:
         format_priority = DEFAULT_FORMAT_PRIORITY
@@ -1048,9 +1035,6 @@ async def scan_books_batch(
         return {"scanned": 0, "found": 0, "possible": 0, "not_found": 0,
                 "errors": 0, "error": f"IP registration failed: {ip_result['message']}"}
 
-    # Get books needing scan. Two paths:
-    #   - book_ids provided → scan exactly that ID set (snapshot mode)
-    #   - book_ids None     → query whatever currently has mam_status IS NULL
     if book_ids is not None:
         if not book_ids:
             return {"scanned": 0, "found": 0, "possible": 0, "not_found": 0,
@@ -1087,10 +1071,9 @@ async def scan_books_batch(
 
         logger.debug(f"MAM [{i+1}/{len(rows)}] {book_title[:65]} — {author_name[:35]}")
 
-        # Phase 3d-2: surface the title BEFORE the network call so the
-        # progress widget shows what we're currently waiting on, not the
-        # one we just finished. MAM intentionally shows every attempt —
-        # there's no filter-noise here to hide.
+        # Surface the title BEFORE the network call so the progress widget
+        # shows what we're waiting on, not what we just finished. MAM shows
+        # every attempt — no filter-noise to hide here.
         stats["current_book"] = book_title
         if on_progress:
             on_progress(dict(stats))
@@ -1151,14 +1134,15 @@ async def scan_books_batch(
 async def start_full_scan(db) -> dict:
     """Start a full MAM scan. Creates a tracking row in mam_scan_log.
 
-    Phase 3d-1 (post-feedback):
-      - Batch size bumped 250 → 400.
-      - The eligible book IDs are SNAPSHOTTED at scan start and stored
-        as a JSON array in mam_scan_log.book_ids_snapshot. Each
-        subsequent batch consumes a slice of this list rather than
-        re-querying `WHERE mam_status IS NULL`. New books added by a
-        concurrent author/source scan are NOT picked up — they wait
-        for the next full scan, matching the manual MAM scan behavior.
+    The eligible book IDs are snapshotted up-front and stored as a JSON
+    array in `mam_scan_log.book_ids_snapshot`. Subsequent batches consume
+    slices of this list rather than re-querying `WHERE mam_status IS NULL`,
+    so a concurrent author/source scan that adds new books mid-run does
+    NOT inflate the queue — those books wait for the next full scan,
+    matching the manual MAM scan's snapshot behavior.
+
+    Batch size is 400; full scans take many batches with a 5-minute pause
+    between them (see run_full_scan_batch + the orchestrator loop).
     """
     running = await db.execute_fetchall(
         "SELECT id FROM mam_scan_log WHERE status='running'"
@@ -1201,21 +1185,17 @@ async def run_full_scan_batch(
     """
     Run one batch of a full scan (400 books per batch).
 
-    Phase 3d-1 (post-feedback): consumes the snapshot stored in
-    mam_scan_log.book_ids_snapshot rather than re-querying for any
-    book where mam_status IS NULL. The snapshot is sliced by
-    last_offset → last_offset + batch_size and only those exact IDs
-    are processed. This means a concurrent author/source scan that
-    adds new books to the database mid-run will NOT inflate the
-    queue or appear in subsequent batches of THIS full scan — those
-    new books wait for the next full scan.
+    Consumes the snapshot stored in `mam_scan_log.book_ids_snapshot`,
+    sliced by `last_offset → last_offset + batch_size`. Only those exact
+    IDs are processed, so a concurrent author/source scan adding new
+    books mid-run does NOT inflate this scan's queue.
 
-    Legacy support: if book_ids_snapshot is NULL (a scan that started
-    on an older binary, before the migration ran), falls back to the
-    old `WHERE mam_status IS NULL` query path so an in-progress scan
-    isn't bricked by an upgrade.
+    If `book_ids_snapshot` is NULL — possible only for a scan started on
+    an older binary before the snapshot column existed — falls back to
+    the legacy `WHERE mam_status IS NULL` path so an in-progress scan
+    survives an upgrade.
 
-    Returns {"status": "batch_complete"|"scan_complete"|"error"|"no_scan", ...}
+    Returns {"status": "batch_complete"|"scan_complete"|"error"|"no_scan", ...}.
     """
     if format_priority is None:
         format_priority = DEFAULT_FORMAT_PRIORITY
@@ -1236,7 +1216,7 @@ async def run_full_scan_batch(
                 "next_batch_in_seconds": None,
                 "error": f"IP registration failed: {ip_result['message']}"}
 
-    # Get next batch — snapshot path or legacy path.
+    # Snapshot path (current) or legacy WHERE mam_status IS NULL path.
     if snapshot_json:
         try:
             snapshot_ids = json.loads(snapshot_json)
@@ -1284,9 +1264,8 @@ async def run_full_scan_batch(
     for i, row in enumerate(book_rows):
         book_id, book_title, author_name = row
 
-        # Phase 3d-2: per-book progress hook for the full scan path. Same
-        # contract as scan_books_batch — fire BEFORE the network call so
-        # the widget shows what we're waiting on, not what we just finished.
+        # Per-book progress hook (same contract as scan_books_batch): fire
+        # BEFORE the network call so the widget shows what we're waiting on.
         if on_book:
             on_book(book_title)
 
@@ -1326,9 +1305,9 @@ async def run_full_scan_batch(
     )
     await db.commit()
 
-    # Remaining: snapshot path uses fixed total - processed; legacy
-    # path falls back to a fresh COUNT against `WHERE mam_status IS
-    # NULL` (which is still right for that path).
+    # Remaining: snapshot path uses (total - processed). Legacy path
+    # COUNTs `WHERE mam_status IS NULL` because there's no snapshot to
+    # diff against.
     if snapshot_json:
         remaining = max(0, total_books - new_offset)
     else:

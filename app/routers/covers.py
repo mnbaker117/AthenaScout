@@ -1,7 +1,12 @@
 """
-Cover image serving for AthenaScout.
+Cover image serving.
 
-Holds /api/covers/{bid}.
+Calibre stores book covers as `cover.jpg` inside each book's folder
+on disk. Rather than re-uploading every cover into AthenaScout's own
+storage during sync, we resolve them on demand: the book row carries
+the absolute `cover_path`, and `/api/covers/{bid}` reads and streams
+that file when the UI asks for it. Source-discovered books that
+don't yet have a local file fall back to `cover_url` from the source.
 """
 import logging
 from pathlib import Path

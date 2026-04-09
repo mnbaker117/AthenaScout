@@ -6,6 +6,11 @@ import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
 
 // ─── Database Browser ───────────────────────────────────────
+// Power-user table browser and row editor for the active library's
+// SQLite database. Backed by the /api/db/* endpoints in db_editor.py.
+// Supports browsing tables, paging through rows, editing/inserting/
+// deleting rows, and inspecting column schema. Always operates against
+// whichever library is currently active.
 export default function DatabasePage(){const t=useTheme();
 const[tables,setTables]=useState([]);
 const[tab,setTab]=usePersist("db_tab","books");

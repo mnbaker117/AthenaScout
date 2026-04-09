@@ -1,12 +1,12 @@
-// Navigation menu structure for AthenaScout top nav.
-// Each entry: {id, label, icon}
-// id is matched against the current page state in App.jsx.
+// Top-nav menu structure.
+// Each entry: { id, label, icon }
+// `id` is matched against the current page state in App.jsx to drive
+// active highlighting and the page-rendering switch.
 //
-// Phase 3c: "suggestions" was added; auto-hidden when its count is 0
-// (gating done in App.jsx). To make room without crowding the navbar,
-// "importexport" was moved to a right-side icon button alongside the
-// theme/database/settings cluster — it's a power-user backup feature
-// accessed rarely, so it fits better as an icon than a text item.
+// Power-user destinations (Database, Settings, Import/Export) live in
+// the right-side icon cluster instead of this list — they don't need
+// horizontal navbar space and grouping them as icons keeps the main
+// nav focused on the day-to-day reading-list pages.
 
 export const NAV=[
   {id:"library",label:"Library",icon:"📖"},

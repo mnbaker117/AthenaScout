@@ -1,11 +1,11 @@
-// Login + first-run admin setup screen for AthenaScout.
+// Login + first-run admin setup screen.
 //
-// Phase 22B.3 Stage 2A. Renders in two modes depending on the
-// `isFirstRun` prop:
-//   - true:  "Welcome — create your admin account" with a confirm-password field
-//   - false: "Sign in to AthenaScout"
+// Renders in two modes depending on the `isFirstRun` prop:
+//   - true  → "Welcome — create your admin account" with a
+//             confirm-password field, posts to /auth/setup.
+//   - false → "Sign in to AthenaScout", posts to /auth/login.
 //
-// On successful submit, calls onLoginSuccess() which is wired in App.jsx
+// On success, calls `onLoginSuccess()` which is wired up in App.jsx
 // to flip the auth state and re-render the main app.
 import { useState } from "react";
 import { useTheme } from "../theme";

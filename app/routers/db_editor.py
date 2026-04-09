@@ -1,8 +1,18 @@
 """
-Database browser and row editor endpoints for AthenaScout.
+Database browser and row-editor endpoints.
 
-Holds /api/db/tables, /api/db/table/{table_name}/schema,
-/api/db/table/{table_name} (list/update/add), and row delete.
+Backs the Database page in the UI — a power-user escape hatch for
+inspecting and surgically editing the active library's SQLite database
+without dropping to the shell. Every endpoint here scopes its writes
+to the active library's database file (via `get_db()`), and every
+table name passed by the client is validated against the schema
+before being interpolated into SQL.
+
+  GET    /api/db/tables                      — list tables in active DB
+  GET    /api/db/table/{name}/schema         — column metadata
+  GET    /api/db/table/{name}                — paginated row list
+  POST   /api/db/table/{name}                — insert / update row
+  DELETE /api/db/table/{name}/{rowid}        — delete by rowid
 """
 import logging
 import sqlite3

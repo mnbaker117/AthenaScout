@@ -6,13 +6,14 @@ import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
 
-// Phase 3c: source-consensus series suggestion review page.
+// Source-consensus series suggestion review page.
 //
 // Lists rows from /api/series-suggestions filtered by status. Each
 // row shows the current vs suggested series state plus a chip list
-// of agreeing source names. Apply, Ignore, and Delete actions hit the
-// corresponding endpoints and dispatch a window event so App.jsx
-// refetches the count badge for the navbar.
+// of agreeing source names. Apply, Ignore, and Delete actions hit
+// the corresponding endpoints and dispatch the
+// `athenascout:suggestions-changed` event so App.jsx refetches the
+// pending-count badge in the nav bar.
 
 const SOURCE_BADGE = {
   goodreads: { bg: "#553b1a", fg: "#e8c070", br: "#88642a" },

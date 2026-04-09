@@ -30,22 +30,19 @@ function SSection({title,defaultOpen=true,children}){const t=useTheme();const[op
 // ─── Settings ───────────────────────────────────────────────
 export default function SettingsPage(){const t=useTheme();const[s,setS]=useState(null);const[sv,setSv]=useState(false);const[msg,setMsg]=useState("");
 const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState(null);const[dragIdx,setDragIdx]=useState(null);const[testRun,setTestRun]=useState(false);const[testRes,setTestRes]=useState(null);const[newSrcPath,setNewSrcPath]=useState("");const[newSrcType,setNewSrcType]=useState("root");const[newSrcApp,setNewSrcApp]=useState("calibre");const[pathVld,setPathVld]=useState(false);const[pathRes,setPathRes]=useState(null);useEffect(()=>{api.get("/settings").then(setS).catch(console.error)},[]);
-// Phase 3d-1 (post-feedback): Full scan polling moved out of Settings.
-// The Dashboard's app-level scan poller now surfaces full scan progress
-// in the unified scan widget — no need for a separate Settings poll.
-// Debounced author search for the "Clear scan data by author" field. The old inline
-// onChange fired a fetch on every keystroke — typing "Tobias S. Buckell" triggered 18
-// separate API calls in ~2 seconds when only the last one mattered. Waits 300ms after
-// the last keystroke before firing, and short-circuits the search entirely for queries
-// shorter than 2 characters.
+// Debounced author search for the "Clear scan data by author" field.
+// Waits 300ms after the last keystroke before firing, and skips the
+// search entirely for queries shorter than 2 characters. The naive
+// onChange-fires-fetch-per-keystroke version triggered ~18 API calls
+// for a 12-character author name; only the last result matters.
 useEffect(()=>{const q=s?._scanClearQ||"";if(q.length<2){setS(o=>o&&o._scanClearResults?.length?{...o,_scanClearResults:[]}:o);return}const tm=setTimeout(()=>{api.get(`/authors?search=${encodeURIComponent(q)}`).then(r=>setS(o=>o?{...o,_scanClearResults:r.authors||[]}:o)).catch(()=>{})},300);return()=>clearTimeout(tm)},[s?._scanClearQ]);
 const save=async()=>{setSv(true);setMsg("");try{const toSave={...s};if(s._editingKey&&s._newKey){toSave.hardcover_api_key=s._newKey}delete toSave._editingKey;delete toSave._newKey;delete toSave._editingMam;delete toSave._newMam;delete toSave._scanClearQ;delete toSave._scanClearResults;delete toSave._scanClearSel;delete toSave.hardcover_api_key_set;delete toSave.language_options;delete toSave._discovered_libraries;delete toSave._extra_mount_paths;delete toSave._newSrcApp;await api.post("/settings",toSave);setMsg("Saved!");upd("_editingKey",false);upd("_newKey","");const fresh=await api.get("/settings");setS(fresh);setTimeout(()=>setMsg(""),2000)}catch(e){setMsg("Error")}setSv(false)};
 const doValidate=async()=>{setMamVld(true);setMamRes(null);try{const r=await api.post("/mam/validate");setMamRes(r);if(r.success){const fresh=await api.get("/settings");setS(fresh)}}catch(e){setMamRes({success:false,message:"Network error"})}setMamVld(false)};
 const resetMam=async()=>{if(!confirm("Reset all MAM scan data? This clears mam_url and mam_status on every book. You will need to re-scan."))return;try{await api.post("/mam/reset");setMsg("MAM data cleared!");setTimeout(()=>setMsg(""),2000)}catch{}};
 const reorderFmt=(from,to)=>{if(from===to)return;const arr=[...(s.mam_format_priority||[])];const[item]=arr.splice(from,1);arr.splice(to,0,item);upd("mam_format_priority",arr)};
 const doTestScan=async()=>{setTestRun(true);setTestRes(null);try{const r=await api.post("/mam/test-scan");setTestRes(r)}catch(e){setTestRes({error:"Network error"})}setTestRun(false)};
-// Phase 22B.3 Stage 2A — logout. Best-effort POST to clear the cookie
-// then hard-reload to reset all in-memory state and re-enter the auth flow.
+// Logout: best-effort POST to clear the cookie, then hard-reload to
+// reset all in-memory state and re-enter the auth flow cleanly.
 const doLogout=async()=>{if(!confirm("Sign out of AthenaScout?"))return;try{await api.post("/auth/logout")}catch{}window.location.reload()};
 // Local timeAgo with different return semantics from lib/format.js — returns null
 // for falsy ts and lowercase strings ("just now", "5m ago"). DO NOT merge with shared one.

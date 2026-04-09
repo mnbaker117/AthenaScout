@@ -32,11 +32,13 @@ useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const loadA=useCallback((signal)=>{setLd(true);api.get(`/authors/${authorId}`,signal).then(d=>{setA(d);setLd(false)}).catch(e=>{if(!api.isAbort(e))console.error(e)})},[authorId]);useEffect(()=>{const c=new AbortController();loadA(c.signal);return()=>c.abort()},[loadA]);
-// Phase 3d-1 (post-feedback): scans now run as background tasks on the
-// server. We dispatch a scan-started event so the Dashboard widget shows
-// it immediately, fire the POST without awaiting completion, and listen
-// for the scan-completed event (dispatched by the Dashboard's poller
-// when it detects running→idle) to refresh the page data.
+// Author scans run as background tasks on the server. The flow:
+//   1. Dispatch `athenascout:scan-started` so the Dashboard widget
+//      shows it immediately.
+//   2. Fire the POST without awaiting completion (the server returns
+//      `{status: "started"}`).
+//   3. Listen for `athenascout:scan-completed` from App's unified
+//      poller and refresh the page data when it fires.
 const refresh=async(full=false)=>{if(ref)return;setRef(true);try{const r=await api.post(`/authors/${authorId}/${full?"full-rescan":"lookup"}`);toast.info(`${full?"Full re-scan":"Source scan"} started for ${r.author||"author"}`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}catch(e){toast.error(e.message||"Scan failed to start");setRef(false)}};
 const scanMam=async()=>{if(mamRef)return;setMamRef(true);try{const r=await api.post(`/mam/scan-author/${authorId}`);if(r.status==="complete"){toast.info(r.message||"No un-scanned books for this author");setMamRef(false)}else{toast.info(`MAM scan started — ${r.total||0} books`);window.dispatchEvent(new CustomEvent("athenascout:scan-started"))}}catch(e){toast.error(e.message||"MAM scan failed to start");setMamRef(false)}};
 // Listen for scan completion (broadcast by the unified poller in

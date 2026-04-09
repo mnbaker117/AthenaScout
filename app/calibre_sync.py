@@ -1,6 +1,23 @@
 """
-Calibre Sync — reads Calibre's metadata.db and imports authors, series, books.
-Fixed: ISBN from identifiers table, series_index from books table, proper delimiters.
+Calibre library sync.
+
+Reads Calibre's `metadata.db` (read-only, via SQLite URI mode) and
+upserts the user's library into AthenaScout's database. Runs in three
+passes — authors, series, books — so foreign key targets exist before
+the rows that reference them get inserted.
+
+Calibre is the user's curated source of truth. Everything this module
+imports is flagged `owned=1`, and the merge layer in `lookup.py`
+protects calibre-sourced rows with field-level rules so source scans
+can enrich metadata without ever clobbering curated content. The
+"match external books by title" pass at the end of book upsert is the
+inverse: a book the user just added to Calibre may already exist in
+the DB as an unowned discovery from a previous source scan, and we
+flip its `owned` bit instead of creating a duplicate.
+
+Sync surfaces progress via `state._calibre_sync_progress` so the
+unified Dashboard widget can show "Syncing 142/675 — The Final Empire"
+the same way it shows MAM/source scan progress.
 """
 import sqlite3
 import time
@@ -13,18 +30,30 @@ from app import state
 
 logger = logging.getLogger("athenascout.calibre_sync")
 
-# Use a delimiter that won't appear in author/series names
+# Delimiters that won't appear in author/series names — used by helper
+# code that needs to flatten multi-author / multi-series fields into
+# single strings for logging or grouping.
 SEP = "|||"
 FIELD_SEP = ":::"
 
 
 def _read_calibre_db(calibre_path: str, library_path: str = None) -> dict:
-    """Read Calibre metadata.db (synchronous, read-only).
+    """Read Calibre metadata.db into a list of book dicts.
 
-    Args:
-        calibre_path: Path to metadata.db
-        library_path: Path to the Calibre library root (for cover images).
-                      If None, falls back to CALIBRE_LIBRARY_PATH.
+    Synchronous + read-only, opened via the SQLite URI `mode=ro` flag
+    so we never accidentally hold a write lock on the user's Calibre
+    database (which Calibre itself wants exclusive write access to).
+
+    The function fans out per-book to fetch authors, series, ISBN,
+    tags, rating, languages, publisher, and formats from their
+    respective Calibre link tables. This is N+1 by design — Calibre's
+    schema makes a single-query alternative awkward, and N is small
+    enough (a few thousand rows) that the per-book overhead doesn't
+    matter compared to the main async upsert pass that follows.
+
+    `library_path` is the on-disk root of the Calibre library; we use
+    it to resolve `cover.jpg` paths so AthenaScout can serve covers
+    without re-uploading them.
     """
     lib_path = library_path or CALIBRE_LIBRARY_PATH
     if not Path(calibre_path).exists():
@@ -144,11 +173,23 @@ def _read_calibre_db(calibre_path: str, library_path: str = None) -> dict:
 
 
 async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
-    """Main sync — imports Calibre data into our database.
+    """Run a full Calibre → AthenaScout import.
 
-    Args:
-        calibre_db_path: Path to metadata.db. If None, uses CALIBRE_DB_PATH from config.
-        calibre_library_path: Path to library root. If None, uses CALIBRE_LIBRARY_PATH from config.
+    Three passes, in this exact order (because each pass needs the FK
+    targets from the previous one to exist):
+      1. Authors — upsert by name, link calibre_id.
+      2. Series  — upsert by lowercased name, scoped to author for
+                   uniqueness but matched globally so multi-author
+                   series collapse to one row.
+      3. Books   — upsert by (calibre_id, source='calibre'), then run
+                   a "flip ownership" pass that marks pre-existing
+                   discovery rows as owned when they title-match the
+                   book we just imported.
+
+    Paths default to `CALIBRE_DB_PATH` / `CALIBRE_LIBRARY_PATH` from
+    config when not supplied — used by single-library setups. The
+    multi-library code path always passes the discovered library's
+    paths explicitly via `library_apps.calibre.CalibreApp.sync`.
     """
     cal_path = calibre_db_path or CALIBRE_DB_PATH
     lib_path = calibre_library_path or CALIBRE_LIBRARY_PATH
@@ -167,12 +208,10 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
         calibre_data = _read_calibre_db(cal_path, lib_path)
         books_found = 0
         books_new = 0
-        # Phase 3d-2: surface progress in the unified scan widget. The
-        # initial dict captures the total upfront (after metadata.db has
-        # been read but before pass 3 starts upserting), so the widget
-        # can render a real progress bar instead of an indeterminate
-        # spinner. Updated per-book inside the loop below; reset to
-        # idle in the finally block.
+        # Surface progress in the unified scan widget. The initial dict
+        # captures the total upfront (right after metadata.db has been
+        # read, before any upserts start) so the widget can render a
+        # real progress bar instead of an indeterminate spinner.
         state._calibre_sync_progress = {
             "running": True,
             "current": 0,
@@ -242,11 +281,9 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
             if not book["authors"]:
                 continue
             books_found += 1
-            # Phase 3d-2: per-book progress tick. `current` advances on
-            # every iteration (including the no-author skip above only
-            # if it had been kept — we deliberately advance AFTER the
-            # skip so the bar doesn't include skipped rows). The current
-            # title goes to the unified scan widget.
+            # `current` advances AFTER the no-author skip so the
+            # progress bar reflects books actually being processed,
+            # not raw iteration count.
             state._calibre_sync_progress["current"] = books_found
             state._calibre_sync_progress["current_book"] = book["title"]
 
@@ -296,7 +333,13 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                 state._calibre_sync_progress["books_new"] += 1
                 logger.debug(f"  Calibre: NEW '{book['title']}' by {book['authors'][0]['name']} (tags={book['tags']}, lang={book['language']})")
 
-            # Match external books by title
+            # Flip ownership on any pre-existing discovery row that
+            # matches this book's title for the same author. The
+            # `REPLACE(...,'the ',...)` half handles articles — "The
+            # Final Empire" and "Final Empire" should collapse onto
+            # the same row. Without this pass, importing a book the
+            # user already owned would leave the original discovery
+            # row sitting around as an unowned duplicate.
             await db.execute("""
                 UPDATE books SET owned = 1
                 WHERE author_id = ? AND owned = 0 AND source != 'calibre'

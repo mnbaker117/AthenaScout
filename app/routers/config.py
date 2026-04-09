@@ -1,7 +1,13 @@
 """
-App-level config and status endpoints for AthenaScout.
+App-level config and status endpoints.
 
-Holds /api/settings, /api/settings/reset, /api/health, /api/platform, /api/stats.
+  GET  /api/settings        — current saved settings (DEFAULT_SETTINGS
+                              merged with user overrides)
+  POST /api/settings        — partial update; merged into settings.json
+  POST /api/settings/reset  — wipe back to defaults
+  GET  /api/health          — liveness probe (public, no auth)
+  GET  /api/platform        — runtime mode + OS info for the setup wizard
+  GET  /api/stats           — Dashboard stats (counts, last sync time, etc.)
 """
 import logging
 import time

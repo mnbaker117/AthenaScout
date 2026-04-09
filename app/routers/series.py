@@ -1,7 +1,14 @@
 """
-Series endpoints for AthenaScout.
+Series endpoints — list and detail.
 
-Holds /api/series and /api/series/{sid}.
+  GET /api/series         — every series the user has at least one
+                            visible book for, with owned/missing
+                            counts and multi-author flag
+  GET /api/series/{sid}   — full series detail with the ordered
+                            book list and per-book ownership state
+
+Both endpoints honor the global hidden-book filter so the totals
+shown in the UI match what the user actually sees on book pages.
 """
 import logging
 from fastapi import APIRouter, HTTPException, Query

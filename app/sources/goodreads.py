@@ -1,8 +1,31 @@
 """
-Goodreads — PRIMARY source. Two-pass scraping:
-1. Author list page for all book IDs, titles, basic series info
-2. Individual book pages for EVERY book to get: language, pub date, expected date, 
-   series details (for set/collection detection), and translator info
+Goodreads source — primary metadata provider.
+
+Goodreads has the most complete catalog of the three sources but no
+public API, so this module scrapes the public HTML pages. Two passes
+per author:
+
+  1. Author list page (`/author/list/{id}?per_page=100`) for every
+     book ID, title, list-page series, cover, translator marker, and
+     contributor marker. Paginates through `?page=N` until exhausted.
+  2. Individual book pages (`/book/show/{id}`) for the full per-book
+     details: authoritative language (from JSON-LD `inLanguage`), pub
+     date, expected date, page count, series name + index, set/
+     collection detection, translator confirmation, description, and
+     a higher-quality cover.
+
+The two-pass design exists because the list page doesn't carry enough
+metadata to confidently filter foreign editions, sets, or translator-
+only credits, but visiting every book page for every author is
+expensive — so the list-page pre-filters cheap exclusions (`(translator)`,
+`(contributor)`, obvious set titles) and the book-page pass only runs
+for survivors.
+
+Per-book progress hook: this module calls `self._on_book(title)` (set
+by lookup.py) on every entry that does real work (a DETAIL fetch or a
+URL-backfill emit) but NOT on filter-noise skips, so the unified scan
+widget never flickers through "skipped translator", "skipped foreign",
+etc.
 """
 import logging, re, json
 from datetime import datetime
@@ -71,17 +94,14 @@ class GoodreadsSource(BaseSource):
             page_text = soup.get_text(" ", strip=True)
 
             # --- Language ---
-            # JSON-LD `inLanguage` is the authoritative source and is parsed
-            # below in the JSON-LD block. We only fall back to a text-regex
-            # scan if JSON-LD didn't yield a language, and even then the
-            # regex is restricted to a known allowlist of language names —
-            # the previous loose `Language\s+(\w+)` was matching the word
-            # "and" out of body text like "...this language and that..."
-            # which was appearing somewhere on the Leviathan Wakes (8855321)
-            # page before the actual Language detail row, causing the real
-            # book to be skipped as "foreign" and leaving only the wrong
-            # Dragon's Path/Leviathan Wakes anthology in the result set.
-            # Fix: defer to JSON-LD; allowlist text fallback.
+            # Defer to JSON-LD `inLanguage` (authoritative, parsed in
+            # the JSON-LD block below) and fall back to a strict
+            # text-regex scan only if JSON-LD didn't yield a language.
+            # The regex IS allowlisted to specific language names —
+            # a loose `Language\s+(\w+)` once matched "and" out of body
+            # text containing the phrase "language and", which silently
+            # marked Leviathan Wakes as foreign and left an unrelated
+            # anthology as the only Corey result.
 
             # --- Translator detection ---
             if "(translator)" in page_text.lower() or "translator" in page_text.lower()[:2000]:
@@ -248,14 +268,19 @@ class GoodreadsSource(BaseSource):
             return None
 
     async def get_author_books(self, author_id: str, existing_titles: set = None, owned_titles: list = None, owned_only: bool = False) -> Optional[AuthorResult]:
-        """Scrape author's books. Validates author identity before visiting individual pages.
+        """Scrape an author's full book list and visit per-book detail pages.
 
-        Post-3b refinement: in `owned_only` mode (Library-only source
-        scans), books that don't match `existing_titles` would be
-        silently dropped by _merge_result anyway. Skip the per-book
-        page visit for those — same optimization as kobo.py. Goodreads
-        is the slower of the two for prolific authors so this is even
-        more impactful (~2s per saved fetch via the rate limiter).
+        Validates author identity from list-page titles BEFORE running
+        any per-book fetches — if no owned/known title shows up on the
+        author's list page at all, we're almost certainly looking at
+        the wrong author and bail out cleanly.
+
+        In `owned_only` mode (the "Library-only source scan" setting),
+        books that don't match `existing_titles` get dropped by the
+        merge layer downstream anyway, so we skip the per-book page
+        visit for them up front. This saves ~2s per skipped book at
+        the rate limit, which dominates total scan time for prolific
+        authors.
         """
         if existing_titles is None:
             existing_titles = set()
@@ -267,12 +292,11 @@ class GoodreadsSource(BaseSource):
 
             # Goodreads always 301-redirects /author/list/{id} →
             # /author/list/{id}.{Author_Slug}. httpx auto-follows so the
-            # first request still works, but it costs an extra round-trip
-            # PER pagination page. Capture the resolved URL from the first
-            # response and reuse its path for subsequent pages so each
-            # additional fetch is a single 200 instead of 301→200. The
-            # Sanderson 4-page list went from 8 requests (4×301 + 4×200)
-            # to 5 requests after this change.
+            # first request still works, but every pagination page
+            # would also do its own 301→200 round-trip. Capturing the
+            # resolved URL once and reusing its path for subsequent
+            # pages cuts out one redirect per page — a 4-page Sanderson
+            # list goes from 8 requests (4×301 + 4×200) to 5.
             list_path = str(r.url).split("?", 1)[0]
 
             nm_el = soup.select_one("a.authorName span")
@@ -286,7 +310,8 @@ class GoodreadsSource(BaseSource):
                 if author_img and "nophoto" in author_img:
                     author_img = None
 
-            # Phase 1: Collect all book entries from author list pages (with pagination)
+            # Pass 1: collect every book entry from the author list
+            # pages (paginating through `?page=N` until exhausted).
             raw_books = []
             max_pages = 70  # Safety cap: 70 pages × 30 = ~2100 books max (Goodreads caps at 30/page)
 
@@ -414,7 +439,8 @@ class GoodreadsSource(BaseSource):
 
             logger.info(f"  Goodreads: author confirmed via title match")
 
-            # Phase 2: Visit each book's page for full details
+            # Pass 2: visit each surviving book's detail page for the
+            # full metadata Goodreads only exposes per book.
             total = len(raw_books)
             logger.info(f"  Goodreads: found {total} books on list page, fetching details...")
 
@@ -460,12 +486,13 @@ class GoodreadsSource(BaseSource):
                         skipped.setdefault("known", 0)
                         skipped["known"] += 1
                         logger.debug(f"    SKIP (known, URL backfill): '{rb['title']}' → book/{rb['book_id']}")
-                        # Phase 3d-2: URL-backfill counts as "real work" for
-                        # per-book progress (we're emitting a BookResult that
-                        # the merge layer will use). Filter-noise skips above
-                        # this point (translator/contributor/set) do NOT call
-                        # _on_book, which is the whole point of the SKIPPED
-                        # filtering requirement.
+                        # URL-backfill counts as "real work" for the
+                        # per-book progress feed: we're emitting a
+                        # BookResult that the merge layer consumes.
+                        # Filter-noise skips ABOVE this point
+                        # (translator / contributor / set) deliberately
+                        # do NOT call _on_book — the user-visible feed
+                        # only ticks through productive work.
                         on_book = getattr(self, '_on_book', None)
                         if on_book:
                             on_book(rb["title"])
@@ -487,20 +514,20 @@ class GoodreadsSource(BaseSource):
                             books.append(br)
                         continue
 
-                # owned_only optimization: skip detail fetches for books
-                # that won't survive the merge layer in library-only mode.
-                # See get_author_books() docstring for the rationale.
+                # owned_only optimization: skip detail fetches for
+                # books that won't survive the merge layer in
+                # library-only mode (see the docstring for context).
                 #
-                # IMPORTANT: in full_scan mode, lookup.py intentionally
+                # IMPORTANT: in full_scan mode, lookup.py deliberately
                 # passes `existing_titles=set()` so the URL-backfill
                 # branch above doesn't fire and we revisit pages for
-                # fresh metadata. That means we cannot trust
-                # existing_titles to tell us which books are owned —
-                # we must consult `owned_titles` (passed separately) here.
-                # Without this check, full_scan + owned_only would skip
-                # ALL books including owned ones, which is what happened
-                # on Sanderson before this fix (Goodreads merged 0
-                # books while Hardcover correctly merged 16).
+                # fresh metadata. We CANNOT trust existing_titles to
+                # tell us which books are owned in that mode — we have
+                # to consult `owned_titles` (passed separately) here.
+                # Without this check, full_scan + owned_only would
+                # skip ALL books including owned ones — once produced
+                # 0 merged books on a real Sanderson scan while
+                # Hardcover correctly merged 16.
                 if owned_only:
                     if not (owned_titles and any(_title_match(ot, rb["title"]) for ot in owned_titles)):
                         skipped.setdefault("unowned", 0)
@@ -512,9 +539,9 @@ class GoodreadsSource(BaseSource):
                 if (i + 1) % 10 == 0 or i == 0:
                     logger.info(f"  Goodreads: checking book {i+1}/{total}...")
 
-                # Phase 3d-2: emit per-book progress for the DETAIL fetch.
-                # This is the slow path (HTTP page visit + parse), so the
-                # user actually sees the progress widget tick through these.
+                # DETAIL fetch path — the slow one (HTTP + parse).
+                # Emit per-book progress so the user sees the widget
+                # tick through real work.
                 on_book = getattr(self, '_on_book', None)
                 if on_book:
                     on_book(rb["title"])

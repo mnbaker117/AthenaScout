@@ -1,15 +1,36 @@
 """
-Kobo — scrapes kobo.com for book metadata.
-Uses cloudscraper to bypass Cloudflare protection.
+Kobo source — third in the priority chain after Goodreads and Hardcover.
 
-Two-pass scraping (Phase 3b-K2):
-1. Author search page → list of book URLs + basic title/cover
-2. Per-book detail page → series, pub_date, language, isbn, page_count,
-   description, publisher, full-res cover
+Kobo has no public API, so this module scrapes the storefront pages.
+Cloudflare sits in front of kobo.com, so the HTTP layer uses
+`cloudscraper` (synchronous) instead of httpx — the only source in
+this codebase that doesn't use the async base-class machinery. The
+sync calls are wrapped in `asyncio.to_thread` so they don't block the
+event loop.
 
-For books already in the DB, the detail fetch is skipped — we only emit
-a minimal BookResult so the merge layer can backfill source_url. Same
-pattern as goodreads.py uses to keep scan times reasonable.
+Two passes per author, mirroring the goodreads pattern:
+
+  1. Author search page (`?fcsearchfield=Author&fcmedia=Book`) for the
+     full set of book URLs, titles, and thumbnail covers. Paginates
+     through `&pagenumber=N` up to `MAX_PAGES`.
+  2. Per-book detail page for the rich metadata Kobo only exposes on
+     book pages: series name + index, ISO publication date, language,
+     ISBN-13, page count, description, publisher, full-resolution
+     cover.
+
+Optimizations that keep scan times bounded:
+  - Books already in the DB get a minimal BookResult for URL backfill,
+    no detail fetch.
+  - In `owned_only` (Library-only) mode, books that don't match
+    `owned_titles` are skipped entirely — saves ~3s per skipped book
+    at the rate limit, which dominates total scan time.
+  - `&fcmedia=Book` filters audiobooks out of the search before they
+    can pollute the per-book pass.
+  - kobo_id and ISBN-13 dedupe passes catch the two distinct ways
+    Kobo's catalog produces duplicates.
+
+Per-book progress hook: `self._on_book(title)` is called for DETAIL
+fetches and URL-backfill emits, but NOT for filter-noise skips.
 """
 import logging, asyncio, time, re
 from datetime import datetime
@@ -72,14 +93,12 @@ class KoboSource(BaseSource):
             return None
         time.sleep(self.rate_limit)
         try:
-            # 30s read timeout (was 15s). Cloudscraper-fronted Kobo
-            # detail pages occasionally take 15-25s to respond when
-            # the Cloudflare challenge resolver does extra work,
-            # especially mid-scan on prolific authors. Two consecutive
-            # post-3c Sanderson scans tripped this around books 35-55
-            # of his 85-book catalog. The rate limit (3s/req) governs
-            # how OFTEN we call; this governs how long any single
-            # response can take.
+            # 30s read timeout. Cloudflare-fronted Kobo detail pages
+            # can take 15-25s when the challenge resolver does extra
+            # work, especially mid-scan on prolific authors with 80+
+            # books in their catalog. The rate limit governs how
+            # OFTEN we call; this governs how long any single response
+            # is allowed to take.
             r = session.get(url, timeout=30)
             if r.status_code == 200:
                 return r.text
@@ -94,25 +113,24 @@ class KoboSource(BaseSource):
     async def _get_book_details(self, kobo_url: str) -> dict:
         """Fetch a Kobo book detail page and extract structured metadata.
 
-        Phase 3b-K2: prior to this, get_author_books only returned title +
-        cover_url + kobo_id from search results, and series detection was
-        always empty (Kobo's search page doesn't surface series). The book
-        detail page contains everything we want in clean HTML structure
-        (no JS rendering required for these fields):
+        Kobo's search results only carry title + thumbnail + URL —
+        everything else (series, language, ISBN, page count,
+        description, full-res cover) lives only on the detail page,
+        and the detail page renders it all in clean static HTML so
+        we don't need a JS engine.
 
-          - h1.title.product-field                       → title
-          - span.series.product-field a                  → series name
-          - span.sequenced-name-prefix                   → 'Book N -' index
-          - div.book-stats strong (next to 'Pages')      → page_count
-          - div.bookitem-secondary-metadata li           → release date,
-                                                            ISBN, language,
-                                                            publisher
-          - div[data-full-synopsis]                      → description
-          - img.cover-image                              → high-res cover
+        Selectors used:
+          h1.title.product-field                  → title
+          span.series.product-field a             → series name
+          span.sequenced-name-prefix              → "Book N -" index
+          div.book-stats strong (next to "Pages") → page_count
+          div.bookitem-secondary-metadata li      → release date, ISBN,
+                                                    language, publisher
+          div[data-full-synopsis]                 → description
+          img.cover-image                         → high-res cover
 
-        Returns a dict of extracted fields; all values default to None on
-        miss so the caller can build a BookResult with COALESCE-friendly
-        defaults.
+        Every field defaults to None so callers can build a BookResult
+        with COALESCE-friendly nulls.
         """
         details = {
             "title": None, "series_name": None, "series_index": None,
@@ -229,13 +247,14 @@ class KoboSource(BaseSource):
             result_titles_old = page.xpath("//h2[@class='title product-field']/a")
             result_titles = result_titles_new or result_titles_old
 
-            # external_id stores the ORIGINAL author_name (not a URL slug),
-            # because Kobo has no stable public author-id and get_author_books
-            # needs to re-query by name. The pre-Phase-3a code stored a slug
-            # here and then reconstructed the name via `slug.replace("-", " ").title()`,
-            # which was lossy on apostrophes, accents, and hyphens
-            # ("O'Brien" → "O'brien", "jean-luc" → "Jean Luc"). Round-tripping
-            # the raw name avoids the whole problem.
+            # external_id stores the ORIGINAL author_name (not a URL
+            # slug), because Kobo has no stable public author-id and
+            # get_author_books needs to re-query by name. Storing the
+            # raw name round-trips cleanly through Unicode and
+            # punctuation; storing a slug and then reconstructing via
+            # `replace("-", " ").title()` is lossy on apostrophes,
+            # accents, and intentional hyphenation ("O'Brien" →
+            # "O'brien", "Jean-Luc" → "Jean Luc").
             if result_titles:
                 which = "new layout" if result_titles_new else "old layout"
                 logger.debug(f"  Kobo: matched {len(result_titles)} results via {which} selectors for '{author_name}'")
@@ -255,12 +274,12 @@ class KoboSource(BaseSource):
                 logger.debug(f"  Kobo: short response ({len(page_html)} bytes) for '{author_name}' — likely empty/error page")
                 return None
 
-            # Page is >5000 bytes and has no "No results" marker but NONE
-            # of our selectors matched. Almost certainly a Kobo DOM change.
-            # Emit a warning so the user sees it and can report the layout
-            # change — then return None rather than the old lenient
-            # fallback, which was constructing fake AuthorResults that
-            # caused get_author_books to fire a pointless follow-up fetch.
+            # Page is >5000 bytes and has no "No results" marker but
+            # NONE of our selectors matched. Almost certainly a Kobo
+            # DOM change. Warn loudly so the user notices and can
+            # report the layout change, and return None rather than
+            # constructing a fake AuthorResult — a fake one would only
+            # trigger a pointless follow-up fetch downstream.
             logger.warning(
                 f"  Kobo: {len(page_html)} bytes returned for '{author_name}' "
                 f"but no result selectors matched — Kobo may have changed their DOM"
@@ -272,40 +291,33 @@ class KoboSource(BaseSource):
             return None
 
     async def get_author_books(self, author_name: str, existing_titles: set = None, owned_only: bool = False, owned_titles: list = None, **kw) -> Optional[AuthorResult]:
-        # author_name arrives from search_author's external_id, which is
-        # now the ORIGINAL user-provided name (Phase 3a) — not a slug that
-        # would need lossy .title() reconstruction. Old param name was
-        # `author_slug`; renamed for accuracy.
-        #
-        # Phase 3b-K2: For each search-result book, we now visit the book
-        # detail page to extract series, language, pub_date, ISBN, page
-        # count, and description — Kobo's search results only carry
-        # title + cover. To keep scan time bounded, books that already
-        # exist in the DB get a minimal BookResult (URL backfill only,
-        # no detail fetch). Same pattern as goodreads.py.
-        #
-        # Post-3b refinement: in `owned_only` mode (Library-only source
-        # scans), books that don't match `existing_titles` would be
-        # silently dropped by _merge_result anyway. Skip the detail
-        # fetch for those — the Sanderson 3b-K1 verification scan spent
-        # ~3.4 minutes of its ~4.7-minute total fetching 68 detail pages
-        # whose results were ultimately discarded by the merge layer.
+        """Search Kobo for an author, then enrich each book via its detail page.
+
+        `author_name` arrives from `search_author`'s external_id —
+        which IS the original user-provided name, not a URL slug, so
+        no lossy normalization is needed.
+
+        Two optimizations layered on top of the basic two-pass scrape:
+          - Books already in the DB get a URL-backfill BookResult
+            with no detail fetch (Kobo's search results only carry
+            title + cover anyway).
+          - In `owned_only` mode, books that don't match `owned_titles`
+            never reach the detail fetch — they'd be dropped by the
+            merge layer downstream regardless. This trims minutes off
+            scans for prolific authors with large unowned catalogs.
+        """
         if existing_titles is None:
             existing_titles = set()
         try:
-            # &fcmedia=Book filters out audiobooks. Counterintuitive
-            # naming — "Book" is Kobo's internal label for the eBook
-            # category (Audiobook is its own peer category). Without
-            # this filter, prolific audiobook-only authors like
-            # J.N. Chaney would have ~280 audiobook entries fuzzy-matched
-            # against owned ebook rows by the skip-known logic below,
-            # polluting source_url with wrong-format Kobo URLs. The
-            # filter is harmless for normal authors (they have eBook
-            # entries that pass through) and protective for the edge
-            # case. Verified via a manual UI search where the same
-            # filter returned 0 results for J.N. Chaney, exposing the
-            # audiobook-only situation as a true content gap on Kobo's
-            # side rather than a scraping miss on ours.
+            # `&fcmedia=Book` filters out audiobooks at the search
+            # layer. The naming is counterintuitive — "Book" is Kobo's
+            # internal label for the eBook category, with Audiobook as
+            # its own peer category. Without this filter, prolific
+            # audiobook-only authors like J.N. Chaney return ~280
+            # audiobook results that fuzzy-match against owned ebook
+            # rows in the URL-backfill pass, polluting source_url with
+            # wrong-format URLs. The filter is harmless for normal
+            # authors and surgically protective for the edge case.
             base_search_url = (
                 f"{BASE}/us/en/search?query={author_name.replace(' ', '%20')}"
                 f"&fcsearchfield=Author&fcmedia=Book&numrecords=60"
@@ -330,25 +342,21 @@ class KoboSource(BaseSource):
             if not items:
                 logger.debug(f"  Kobo: no book items matched on get_author_books page for '{author_name}' ({len(page_html)} bytes)")
 
-            # ── Phase 3b-K1: pagination ────────────────────────────────
-            # Kobo's author search caps at 60 results per page (controlled
-            # by &numrecords=60 in our URL). For very prolific authors
-            # (J.N. Chaney has ~288 audiobook entries on Kobo, Sanderson
-            # has 60+), the first page silently truncates the rest.
+            # ── Pagination ─────────────────────────────────────────
+            # Kobo's author search caps at 60 results per page
+            # (`&numrecords=60`). Prolific authors silently truncate
+            # at the first page without this loop — Sanderson has 60+
+            # ebook results, J.N. Chaney has ~280 across all formats.
             #
-            # Pagination is JavaScript-driven `<button>` elements rather
-            # than href links, but Kobo's canonical URL exposes the
-            # state as `&pagenumber=N` (page 1 has no param). The total
-            # page count is rendered as plain text inside
+            # Pagination is JavaScript-driven `<button>` elements
+            # rather than href links, but Kobo's canonical URL still
+            # exposes the state as `&pagenumber=N` (page 1 has no
+            # param). The total page count lives in plain text inside
             # `<button data-testid="pagination-item-last-page"><span>N</span></button>`,
             # which we parse to know when to stop.
             #
-            # MAX_PAGES caps runaway scans — at 60 results × 10 pages
-            # that's 600 entries, comfortably above any plausible single
-            # author's catalog while keeping the worst case bounded
-            # (10 fetches × ~3s rate-limit = ~30s for the search-results
-            # phase, with the per-book detail enrichment dwarfing it
-            # anyway for any author with this many books).
+            # MAX_PAGES caps the worst case at 600 entries (60 × 10),
+            # comfortably above any plausible single-author catalog.
             MAX_PAGES = 10
             last_page = 1
             last_page_btns = page.xpath(
@@ -380,12 +388,11 @@ class KoboSource(BaseSource):
                     items = items + extra_items
                     logger.debug(f"  Kobo: page {pn} added {len(extra_items)} raw items (running total {len(items)})")
 
-            # Phase 1: collect raw search results (title, href, cover thumbnail).
-            # Phase 3b-K2-fix: dedupe by kobo_id. The XPath
+            # Pass 1: collect raw search results (title, href, cover
+            # thumbnail). Dedupe by kobo_id because the XPath
             # `//a[@data-testid='title']` matches BOTH the cover-image
-            # anchor and the title-text anchor for each result, so without
-            # dedupe every book gets processed twice (visible in the first
-            # 3b-K2 verification scan as paired DETAIL/SKIP-KNOWN log lines).
+            # anchor AND the title-text anchor for each result —
+            # without this dedupe every book would be processed twice.
             raw_books = []
             seen_ids = set()
             for item in items:
@@ -427,9 +434,9 @@ class KoboSource(BaseSource):
                     "cover": cover, "kobo_url": kobo_url,
                 })
 
-            # Phase 2: per-book detail enrichment. Skip-known mirrors the
-            # goodreads.py logic — for titles that already match something
-            # in the DB, we only need to backfill the source_url.
+            # Pass 2: per-book detail enrichment. Skip-known mirrors
+            # the goodreads.py logic — for titles already in the DB
+            # we only need to backfill the source_url.
             def _norm(t):
                 t = re.sub(r'[^\w\s]', '', t.lower()).strip()
                 return re.sub(r'\s+', ' ', t)
@@ -438,18 +445,15 @@ class KoboSource(BaseSource):
             skipped_known = 0
             skipped_unowned = 0
             enriched = 0
-            # Phase 3b post-3b: secondary ISBN dedupe. Kobo sometimes
-            # has multiple distinct kobo_id store listings for what is
-            # actually the same edition by ISBN (regional storefronts,
-            # admin duplicates, etc.). The Phase 3b-K1 Sanderson scan
-            # surfaced two such pairs: 'For Glory and Honor' and 'The
-            # Scarlet Circus', each fetched twice. The kobo_id-keyed
-            # raw-results dedupe at line ~370 can't catch these because
-            # the store IDs are genuinely different — only the ISBN
-            # reveals them as the same book. We can't avoid the wasted
-            # fetch (we need the detail page to learn the ISBN), but we
-            # can keep the duplicate out of the merge pass and the
-            # final book count.
+            # Secondary ISBN dedupe — Kobo sometimes has multiple
+            # distinct `kobo_id` store listings for what is actually
+            # the same edition (regional storefronts, admin
+            # duplicates). The kobo_id-keyed dedupe in Pass 1 can't
+            # catch these because the store IDs are genuinely
+            # different; only the ISBN-13 reveals them as the same
+            # book. We can't avoid the wasted detail fetch (we need
+            # the page to learn the ISBN), but we can keep the
+            # duplicate out of the merge pass and the final count.
             seen_isbns = set()
             dupe_isbns = 0
 
@@ -465,15 +469,15 @@ class KoboSource(BaseSource):
                     logger.info(f"  Kobo: processing book {i+1}/{len(raw_books)}...")
 
                 if is_known or not rb["kobo_url"]:
-                    # Minimal BookResult for URL backfill — no detail fetch.
-                    # Language left None so lookup.py's _lang_ok treats it
-                    # as "unknown, assume ok".
+                    # Minimal BookResult for URL backfill — no detail
+                    # fetch. Language is left None so lookup.py's
+                    # `_lang_ok` treats it as "unknown, assume ok".
                     skipped_known += 1
                     logger.debug(f"    SKIP-KNOWN (URL backfill): '{rb['title']}'")
-                    # Phase 3d-2: URL-backfill emits a BookResult that the
-                    # merge layer consumes — counts as real work for the
-                    # per-book progress feed. Filter-noise SKIPs (unowned)
-                    # below do NOT call _on_book.
+                    # URL-backfill emits a BookResult that the merge
+                    # layer consumes — counts as real work for the
+                    # per-book progress feed. Filter-noise skips
+                    # (unowned) below do NOT call _on_book.
                     on_book = getattr(self, '_on_book', None)
                     if on_book:
                         on_book(rb["title"])
@@ -485,22 +489,21 @@ class KoboSource(BaseSource):
                     books.append(br)
                     continue
 
-                # owned_only optimization: in Library-only mode, books
-                # that don't match existing_titles will be dropped by
-                # _merge_result anyway (lookup.py:542,573). Skip the
-                # detail fetch entirely for those — saves ~3s per book
-                # at the rate limit, which dominates total scan time
-                # for prolific authors.
+                # owned_only optimization: in Library-only mode,
+                # books that don't match existing_titles will be
+                # dropped by _merge_result anyway. Skip the detail
+                # fetch up front — saves ~3s per book at the rate
+                # limit, which dominates total scan time for prolific
+                # authors.
                 #
-                # IMPORTANT: in full_scan mode, lookup.py intentionally
+                # IMPORTANT: in full_scan mode, lookup.py deliberately
                 # passes `existing_titles=set()` so the URL-backfill
-                # branch (`is_known`) above is bypassed and we revisit
-                # pages for fresh metadata. We must therefore consult
-                # `owned_titles` (passed separately) to know which books
-                # are owned. Without this check, full_scan + owned_only
-                # silently skips ALL books including owned ones — same
-                # bug found in goodreads.py during the post-3c Sanderson
-                # verification.
+                # branch above is bypassed and we revisit pages for
+                # fresh metadata. We CANNOT trust existing_titles to
+                # tell us which books are owned in that mode — we
+                # have to consult `owned_titles` (passed separately)
+                # here. Without this check, full_scan + owned_only
+                # silently skips ALL books including owned ones.
                 if owned_only:
                     is_owned = False
                     if owned_titles:
@@ -514,9 +517,9 @@ class KoboSource(BaseSource):
                         logger.debug(f"    SKIP-UNOWNED (library-only): '{rb['title']}'")
                         continue
 
-                # Phase 3d-2: emit per-book progress for the DETAIL fetch.
-                # Slow path (cloudscraper + sync HTTP + parse), so the user
-                # sees real ticks here.
+                # DETAIL fetch path — the slow one (cloudscraper +
+                # sync HTTP + parse). Emit per-book progress so the
+                # user sees real ticks.
                 on_book = getattr(self, '_on_book', None)
                 if on_book:
                     on_book(rb["title"])

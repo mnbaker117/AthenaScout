@@ -23,8 +23,9 @@ STRIP_SYMBOLS = sys.platform.startswith("linux")  # safest on Linux only
 
 # ─── Data Files ──────────────────────────────────────────────
 # The frontend dist directory must be bundled so the FastAPI static
-# file mount can find it via sys._MEIPASS at runtime. The path detection
-# logic in app/main.py (Phase 20A) handles both source-tree and bundled paths.
+# file mount can find it via sys._MEIPASS at runtime. The path
+# detection logic in app/main.py handles both source-tree and bundled
+# (PyInstaller) paths transparently.
 datas = [
     (str(ROOT / 'frontend' / 'dist'), 'frontend/dist'),
 ]

@@ -1,3 +1,10 @@
+// Hidden books page.
+//
+// Lists every book the user has hidden via the "Hide" action elsewhere
+// in the app. Each row exposes an Unhide button that flips `hidden=0`
+// and refreshes the list. Hidden books DO get re-fetched on Full
+// Re-Scan so their metadata stays fresh if the user later un-hides
+// them.
 import { useState, useEffect } from "react";
 import { useTheme } from "../theme";
 import { api } from "../api";

@@ -1,8 +1,28 @@
 """
-MyAnonamouse integration endpoints for AthenaScout.
+MyAnonamouse integration endpoints.
 
-Holds /api/mam/* — validation, status, scan/cancel/status, test-scan,
-full-scan flow, toggle, books list, reset.
+This router orchestrates every MAM scan path the UI exposes:
+
+  - Manual batched scan (/api/mam/scan)            — chips through every
+    book missing MAM data, in 150-book batches with a 1-minute pause
+    between each. Snapshots eligible IDs at start so a concurrent
+    author scan adding new books does NOT grow this scan's queue.
+  - Single-book rescan (/api/mam/scan-book/{id})   — used by the
+    "Re-scan MAM" button in BookSidebar to refresh a stale match.
+  - Single-author scan (/api/mam/scan-author/{id}) — runs as a
+    background task tracked through the unified scan widget so the
+    user can Stop it mid-run.
+  - Full library scan (/api/mam/full-scan)         — long-running,
+    400 books per batch with a 5-minute pause. State lives in the
+    `mam_scan_log` table so it survives process restarts.
+
+All scan paths share `_mam_scan_progress` in app.state and serialize
+through the same "one MAM scan at a time" lock so the unified widget
+always reflects exactly one in-flight MAM job.
+
+Other endpoints in this router: /validate (test session), /status
+(stats + scan health), /books (paged book list for the MAM page),
+/toggle (feature flag), /reset (wipe all mam_* fields).
 """
 import asyncio
 import logging
@@ -77,18 +97,14 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
     if state._mam_scan_progress.get("running"):
         return {"error": "A MAM scan is already running"}
-    # Phase 3d-1 (post-feedback): no longer blocking on a concurrent
-    # author scan — see _wait_for_other_writers() docstring below.
 
-    # Phase 3d-1 (post-feedback): snapshot the FULL set of book IDs
-    # eligible for scanning RIGHT NOW. The scan processes only this
-    # snapshot — books that get added to the database during the scan
-    # (e.g. by a concurrent author/source scan discovering new titles)
-    # are NOT picked up by this run, they wait for the next MAM scan.
-    # This is what the user expects: "MAM scan won't constantly
-    # recalculate". Without snapshotting, each batch's `WHERE
-    # mam_status IS NULL` re-query would grow the queue endlessly
-    # under sustained author-scan throughput.
+    # Snapshot every eligible book ID right now. The scan processes
+    # only this exact list — books added to the DB mid-scan (e.g. by a
+    # concurrent author scan discovering new titles) are NOT picked up
+    # by this run; they wait for the next MAM scan. The alternative —
+    # re-querying `WHERE mam_status IS NULL` per batch — would grow
+    # the queue endlessly under sustained author-scan throughput,
+    # making the scan feel like it never finishes.
     db = await get_db()
     try:
         id_rows = await db.execute_fetchall(
@@ -110,19 +126,17 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                           "status": "scanning", "type": "manual"}
 
     async def _wait_for_other_writers():
-        """Yield to Calibre library sync before grabbing the write lock.
+        """Yield to a running Calibre sync before grabbing the write lock.
 
-        Phase 3d-1 (post-feedback): the historical wait-out for in-flight
-        author/source scans was REMOVED. The original incident at 22:33
-        was a MAM batch racing a scheduled Calibre SYNC, not an author
-        scan — Calibre sync does massive bulk inserts in big transactions
-        and can hold the SQLite write lock for tens of seconds, longer
-        than busy_timeout. Author scans, by contrast, do small per-row
-        UPDATEs with sub-100ms write windows that the WAL-mode + 30s
-        busy_timeout combo absorbs cleanly. Letting MAM and author scans
-        run concurrently means a long Sanderson source scan no longer
-        blocks the entire MAM scan queue, which was the user-visible
-        annoyance that motivated this change.
+        ONLY blocks on Calibre sync — author/source scans are allowed to
+        run concurrently. The asymmetry is deliberate: Calibre sync does
+        massive bulk inserts inside big transactions and can hold the
+        SQLite write lock for tens of seconds, longer than busy_timeout
+        is willing to wait. Author scans, by contrast, do small per-row
+        UPDATEs with sub-100ms write windows that WAL mode + the 30s
+        busy_timeout absorb cleanly. Blocking on author scans here would
+        let one long Sanderson source scan stall the entire MAM queue,
+        which is the symptom that motivated splitting these out.
         """
         if state._calibre_sync_in_progress:
             state._mam_scan_progress["status"] = "waiting (calibre sync running)"
@@ -144,10 +158,12 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                 return
             db = await get_db()
             try:
-                # Snapshot per-batch baselines BEFORE defining the
-                # progress closure so static analyzers see them as
-                # used. The closure adds incremental stats from this
-                # batch onto the running totals from prior batches.
+                # Capture per-batch baselines so the progress closure
+                # can add this batch's incremental stats onto the
+                # totals carried over from prior batches. The variables
+                # must be defined OUTSIDE the closure (rather than read
+                # from state inside it) so each batch's running totals
+                # don't double-count.
                 base_scanned = state._mam_scan_progress["scanned"]
                 base_found = state._mam_scan_progress["found"]
                 base_possible = state._mam_scan_progress["possible"]
@@ -160,17 +176,17 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                         "possible": base_possible + stats["possible"],
                         "not_found": base_not_found + stats["not_found"],
                         "errors": base_errors + stats["errors"],
-                        # Phase 3d-2: forward the in-flight book title from
-                        # the source layer up to the unified scan widget.
+                        # Forward the in-flight book title from the
+                        # source layer up to the unified scan widget.
                         "current_book": stats.get("current_book", ""),
                     })
-                # Slice the next batch out of the frozen snapshot. This
-                # is the snapshot guarantee: only IDs captured at scan
-                # start are processed. New books added by a concurrent
-                # author scan will NOT inflate the total or appear in
-                # later batches of THIS scan. Batch size 150 (was 100)
-                # — bumped per user feedback after concurrent scans
-                # made longer batches less risky.
+                # Slice the next batch out of the frozen snapshot. The
+                # snapshot guarantee: only IDs captured at scan start
+                # are processed, ever. 150 books per batch is a balance
+                # between throughput and staying clear of MAM rate
+                # limits — small enough that the per-batch failure
+                # blast radius is bounded, large enough that a manual
+                # scan finishes in a reasonable wall-clock time.
                 batch_ids = snapshot_ids[cursor:cursor + 150]
                 if not batch_ids:
                     state._mam_scan_progress.update({"status": "complete", "running": False})
@@ -189,9 +205,9 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                     state._mam_scan_progress.update({"status": f"error: {result['error']}", "running": False})
                     return
                 cursor += len(batch_ids)
-                # NOTE: total stays fixed at scan_total — no recompute.
-                # The user explicitly asked that the MAM scan not grow
-                # its queue when concurrent author scans add new books.
+                # `total` deliberately stays fixed at the snapshot size
+                # — no recompute. See the snapshot rationale at the
+                # top of the endpoint.
                 await db.execute(
                     "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
                     ("mam", time.time(), time.time(), "complete",
@@ -210,11 +226,10 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                 return
             batch_num += 1
             state._mam_scan_progress["status"] = "paused"
-            # 1 minute pause between batches (was 5). Bumped down per
-            # user feedback after batch size went 100→150 — the longer
-            # batches and shorter pauses make a manual scan finish in
-            # roughly half the wall-clock time without changing the
-            # per-request rate limit.
+            # 1-minute pause between batches. Total throughput on a
+            # manual scan: 150 books × 60s overhead = ~2.5 min per
+            # batch including the pause, on top of the per-request
+            # rate limit.
             logger.info(f"MAM scan batch {batch_num} done ({state._mam_scan_progress['scanned']}/{state._mam_scan_progress['total']}), pausing 1 min")
             await asyncio.sleep(60)
             # Wait for Calibre sync (only) to finish before resuming
@@ -281,22 +296,14 @@ async def mam_test_scan():
 
 @router.post("/full-scan")
 async def mam_full_scan_start():
-    """Start a full MAM library scan (250 books/batch, 1hr between batches)."""
-    s = load_settings()
-    if not s.get("mam_enabled") or not s.get("mam_session_id"):
-        return {"error": "MAM not configured or not enabled"}
-    if not s.get("mam_scanning_enabled", True):
-        return {"error": "MAM scanning is disabled — enable it in Settings"}
-    if state._mam_full_scan_task and not state._mam_full_scan_task.done():
-        return {"error": "A full MAM scan is already running"}
-    if state._mam_scan_progress.get("running"):
-        return {"error": "A MAM scan is already running — wait for it to finish"}
-    # Phase 3d-1 (post-feedback): no longer rejecting on a concurrent
-    # author scan — they're allowed to run side-by-side now. See the
-    # _wait_for_other_writers comment in /api/mam/scan above. The
-    # full MAM scan also snapshots its book IDs at start (via the
-    # book_ids_snapshot column on mam_scan_log) so concurrent author
-    # scans don't grow its queue.
+    """Start a full MAM library scan (400 books/batch, 5-min pause between).
+
+    Long-running and persistent: state lives in `mam_scan_log` (including
+    the snapshotted book ID list) so the scan survives a process restart
+    and can resume from where it left off. Like the manual scan, only
+    blocks on a concurrent Calibre sync, not on author scans — see the
+    `_wait_for_other_writers` rationale in /api/mam/scan above.
+    """
 
     db = await get_db()
     try:
@@ -316,11 +323,11 @@ async def mam_full_scan_start():
             db = await get_db()
             try:
                 cs = load_settings()
-                # Phase 3d-2: surface the in-flight book title in the
-                # unified scan widget for full scans too. The full-scan
-                # loop polls the DB for scanned/total via mam_get_full_scan_status,
-                # but per-book current_book has to come straight from the
-                # batch worker via this callback.
+                # Forward in-flight book titles to the unified scan
+                # widget. The full-scan loop polls the DB for
+                # scanned/total via mam_get_full_scan_status, but
+                # per-book progress has to come straight from the batch
+                # worker via this callback.
                 def _on_book(title: str) -> None:
                     state._mam_scan_progress["current_book"] = title or ""
                 result = await mam_run_full_scan_batch(
@@ -343,11 +350,11 @@ async def mam_full_scan_start():
                 state._mam_scan_progress.update({"running": False, "status": result["status"]})
                 break
             elif result["status"] == "batch_complete":
-                # Phase 3d-1 (post-feedback): hardcoded 5 minute wait
-                # between batches (was a user-configurable setting,
-                # default 60 min). The setting was removed from the
-                # Settings UI — full scans now have a fixed cadence
-                # of 400 books per batch every 5 minutes.
+                # Fixed 5-minute pause between batches. The cadence
+                # (400 books per batch every 5 minutes) is intentionally
+                # not user-configurable — too aggressive and you risk
+                # MAM rate-limiting; too slow and a full library scan
+                # takes literal weeks.
                 state._mam_scan_progress["status"] = "paused"
                 logger.info("Full MAM scan: batch done, waiting 5 min")
                 await asyncio.sleep(300)
@@ -504,12 +511,11 @@ async def mam_scan_single_book(book_id: int):
 async def mam_scan_single_author(author_id: int):
     """Scan all of an author's missing/un-scanned books against MAM.
 
-    Phase 3d-1 (post-feedback): now spawned as a background asyncio task
-    tracked via state._mam_scan_task and reported through
-    state._mam_scan_progress so the unified Dashboard widget can show
-    live progress and the Stop button on the widget can cancel mid-run.
-    Mirrors the same lock semantics as /api/mam/scan — only one MAM
-    scan running at a time, regardless of trigger source.
+    Spawned as a background asyncio task tracked through
+    `state._mam_scan_task` / `state._mam_scan_progress` so the unified
+    Dashboard widget shows live progress and the Stop button can cancel
+    mid-run. Honors the same one-MAM-scan-at-a-time lock as the manual
+    batch scan.
     """
     s = load_settings()
     if not s.get("mam_enabled") or not s.get("mam_session_id"):
@@ -566,8 +572,9 @@ async def mam_scan_single_author(author_id: int):
         bdb = await get_db()
         try:
             for bid, btitle in book_rows:
-                # Phase 3d-2: surface the in-flight book BEFORE the network
-                # call so the unified scan widget shows what we're waiting on.
+                # Surface the title BEFORE the network call so the
+                # widget shows what we're waiting on, not what we just
+                # finished.
                 state._mam_scan_progress["current_book"] = btitle
                 try:
                     check = await mam_check_book(token, btitle, author_name, format_priority, delay, lang_ids=lang_ids)

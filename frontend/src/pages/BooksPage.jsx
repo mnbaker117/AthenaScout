@@ -1,3 +1,11 @@
+// Books browse page.
+//
+// Reused as the renderer for "My Library", "Missing Books", and
+// "Upcoming Books" — App.jsx instantiates BooksPage with different
+// `apiPath` and `extraParams` props for each. The page hosts the
+// shared search/sort/grouping/view-mode controls, the BookSidebar
+// drawer for inspecting a single book, and the bulk-select bar for
+// running scans against a chosen subset.
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useTheme } from "../theme";
 import { api } from "../api";

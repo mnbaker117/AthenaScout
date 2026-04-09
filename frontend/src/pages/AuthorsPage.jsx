@@ -1,3 +1,10 @@
+// Authors browse page.
+//
+// Lists every author with at least one linked book (orphan rows are
+// hidden — see routers/authors.py for the reasoning). Supports search,
+// sort, has-missing filter, and a bulk-select bar that triggers source
+// or MAM scans across the entire selection. Clicking an author
+// navigates to AuthorDetailPage.
 import { useState, useEffect } from "react";
 import { useTheme } from "../theme";
 import { api } from "../api";

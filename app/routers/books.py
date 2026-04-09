@@ -1,7 +1,13 @@
 """
-Book query and mutation endpoints for AthenaScout.
+Book query and mutation endpoints.
 
-Holds /api/books, /api/missing, /api/upcoming, hide/unhide/dismiss/edit/add/delete.
+Covers the main book browse (`/api/books`), the missing/upcoming
+filtered views, hide/unhide/dismiss state, manual book add/edit/delete,
+and the bulk-by-book scan triggers used by the BooksPage selection bar.
+
+The shared SELECT fragment at the top of this file pre-aggregates
+visible series counts so list endpoints don't fire one correlated
+COUNT subquery per row — see `_SERIES_TOTAL_JOIN` for the rationale.
 """
 import logging
 import re
@@ -15,17 +21,16 @@ logger = logging.getLogger("athenascout")
 router = APIRouter(prefix="/api", tags=["books"])
 
 # ─── Shared SELECT fragments ────────────────────────────────
-# `SERIES_TOTAL_JOIN` pre-aggregates visible-book counts per series in a
-# single subquery instead of the old correlated-subquery-per-row pattern.
-# The old code ran `(SELECT COUNT(*) ... WHERE series_id=b.series_id)`
-# once for every row returned — a 60-book page did 60 sub-COUNTs. This
-# version does ONE scan, then LEFT JOINs against the result.
+# `_SERIES_TOTAL_JOIN` pre-aggregates visible-book counts per series in
+# one subquery, then the row-level SELECT LEFT JOINs against the
+# result. The naive alternative — `(SELECT COUNT(*) ... WHERE
+# series_id=b.series_id)` per row — fires once per returned book,
+# turning a 60-row page into 60 sub-COUNTs.
 #
-# Preserves the original semantics: standalone books (series_id IS NULL)
-# get series_total=0 via COALESCE, matching what the old correlated
-# subquery returned for them. The inner filter is fixed at hidden=0 —
-# series_total always represents "visible books in this series" even
-# when include_hidden=True on the outer query (matches prior behavior).
+# The inner filter is fixed at `hidden=0`: `series_total` always means
+# "visible books in this series" even when the outer query has
+# `include_hidden=True`. Standalone books (series_id IS NULL) come back
+# as `series_total=0` via the COALESCE in the projection below.
 _SERIES_TOTAL_JOIN = """
 LEFT JOIN (
     SELECT series_id, COUNT(*) AS series_total
@@ -302,9 +307,9 @@ async def scan_books_sources(data: dict = Body(...)):
     if not rows:
         raise HTTPException(404, "No matching authors found")
 
-    # Phase 3d-1 (post-feedback): same background-task pattern as
-    # /authors/scan-sources. Imports _spawn_lookup_task lazily to keep
-    # books.py from importing the whole authors router at module load.
+    # Same background-task pattern as /authors/scan-sources. Lazy
+    # import keeps books.py from pulling in the whole authors router
+    # at module load time.
     import asyncio
     from app.routers.authors import _spawn_lookup_task
 

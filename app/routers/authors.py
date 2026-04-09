@@ -1,8 +1,22 @@
 """
-Author endpoints for AthenaScout.
+Author endpoints — list, detail, scan triggers, and reset operations.
 
-Holds /api/authors, /api/authors/{aid}, lookup/full-rescan triggers,
-clear-scan-data.
+The author scan triggers in this file all funnel through
+`_spawn_lookup_task`, which manages the single-author / single-author-
+full-rescan / bulk-authors paths as background asyncio tasks tracked
+through `state._lookup_task` + `state._lookup_progress`. This is what
+makes the Dashboard widget's "Stop" button work uniformly regardless
+of where the scan was kicked off from.
+
+Endpoints:
+  GET  /api/authors                       — paginated list with filters
+  GET  /api/authors/{aid}                 — detail with series & standalone
+  POST /api/authors/{aid}/lookup          — single-author source scan
+  POST /api/authors/{aid}/full-rescan     — single-author full re-scan
+  POST /api/authors/clear-scan-data       — wipe source/MAM data per author set
+  POST /api/authors/scan-sources          — bulk source scan
+  POST /api/authors/scan-mam              — bulk MAM scan
+  POST /api/sources/reset                 — global source-scan reset
 """
 import asyncio
 import logging
@@ -90,24 +104,21 @@ async def get_author(aid: int):
 def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:
     """Spawn `runner` as a background asyncio task tracked by state._lookup_task.
 
-    Phase 3d-1 (post-feedback fix): single-author and bulk-author scans
-    previously ran inline within the request handler with `_lookup_task`
-    left unset, which broke the Dashboard Stop button — `/lookup/cancel`
-    only checks `_lookup_task and not _lookup_task.done()` to know what
-    to cancel. Spawning the work as a real background task means the
-    same cancel endpoint Just Works for every author-scan flavor,
-    including single-author refreshes from the Author detail page.
+    Single-author and bulk-author scans run as real background tasks
+    so the Dashboard's Stop button can cancel them via the standard
+    `/lookup/cancel` endpoint — that endpoint only knows about
+    `_lookup_task`, so any scan that doesn't register itself there
+    silently dodges the user's cancel request.
 
-    The endpoint returns immediately with `{"status": "started"}` and
-    the frontend polls /api/scan-status (or refreshes via the
-    athenascout:scan-started window event) to surface progress and
-    completion. Pages that previously consumed the synchronous return
-    value (Author detail page's new_books count) now refresh themselves
-    on completion via /scan-status polling.
+    Endpoints that call this return immediately with
+    `{"status": "started"}`. The frontend polls `/api/scan-status`
+    (and listens for the `athenascout:scan-started` window event)
+    to surface progress and completion.
 
-    `runner` is a zero-arg async callable that returns when the work is
-    done. Exceptions inside it are caught and stored in
-    _lookup_progress["status"] so the unified widget can surface them.
+    `runner` is a zero-arg async callable that returns when the work
+    is done. Exceptions inside it are caught and stored in
+    `_lookup_progress["status"]` so the unified widget can surface
+    them.
     """
     if state._lookup_progress.get("running"):
         raise HTTPException(409, "An author scan is already running")
@@ -259,12 +270,11 @@ async def scan_authors_sources(data: dict = Body(...)):
     if not rows:
         raise HTTPException(404, "No matching authors found")
 
-    # Phase 3d-1 (post-feedback): runs as a background task tracked by
-    # state._lookup_task so the Dashboard's Stop button can cancel it
-    # mid-stream. The endpoint returns immediately after spawning; the
-    # frontend polls /api/scan-status for live progress and listens for
-    # the athenascout:scan-started window event to refresh the widget
-    # without polling lag.
+    # Runs as a background task tracked by state._lookup_task so the
+    # Dashboard Stop button can cancel mid-stream. The endpoint
+    # returns immediately after spawning; the frontend polls
+    # /api/scan-status and listens for athenascout:scan-started to
+    # refresh the widget without polling lag.
     async def _runner():
         nonlocal_state = {"scanned": 0, "errors": 0, "new": 0}
         for row in rows:

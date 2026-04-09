@@ -1,6 +1,32 @@
 """
-Lookup Engine — Goodreads → Hardcover → Kobo
-Features: author validation (relaxed matching), language filtering, caching.
+Source-lookup engine.
+
+Iterates the user's authors against external book catalogs (Goodreads,
+Hardcover, Kobo, in that priority order) and merges what each source
+returns into the local DB. The merge layer is the heart of this module:
+it has to reconcile conflicting metadata between sources without
+clobbering the user's Calibre-sourced library, and it has to do that
+hundreds of times per scan without producing false-positive book matches
+or duplicate series rows.
+
+Three things to know before reading:
+
+  1. Title matching is *relaxed* by design — sources spell, capitalize,
+     and subtitle-decorate the same book in incompatible ways. The
+     `_fuzzy_match` function in this file is the single source of truth
+     for "are these the same book?" and is heavily commented because
+     small changes silently mis-link books across the entire library.
+
+  2. The merge layer protects Calibre-sourced rows with field-level
+     rules instead of a blanket lock — see `_update_existing`. The user
+     curates Calibre, so source scans are allowed to enrich it (fill
+     missing fields, correct edition-specific dates) but never to
+     overwrite curated content.
+
+  3. Series rows are upserted lazily: if a per-source series ends up
+     with no linked books in this author after filtering, no series row
+     is created. This prevents orphaned series rows from leaking into
+     the DB during library-only scans.
 """
 import asyncio, time, re, logging, json
 from difflib import SequenceMatcher
@@ -216,34 +242,32 @@ def _fuzzy_match(a: str, b: str) -> bool:
     if la == lb: return True
     if la in lb and _len_ratio_ok(len(la), len(lb)): return True
     if lb in la and _len_ratio_ok(len(lb), len(la)): return True
-    # Fuzzy ratio check for close matches (try both normalizations).
-    # Threshold bumped from 0.75 → 0.85 in Phase 3a follow-up because
-    # 0.75 was admitting "Pride and Prejudice" matching "Pride and
-    # Prejudice and Zombies" (SequenceMatcher ratio 0.76 — a parody is
-    # not the same book). 0.85 still catches genuine close-matches like
-    # spelling variants ("Colour" vs "Color", ratio 0.91), light typos,
-    # and minor punctuation differences. Anything below 0.85 should
-    # either go through the exact-normalized path or be treated as a
-    # different book.
+    # SequenceMatcher fallback for close-but-not-exact matches. The 0.85
+    # threshold is deliberate: 0.75 once admitted "Pride and Prejudice"
+    # ↔ "Pride and Prejudice and Zombies" (ratio 0.76 — a parody is not
+    # the same book). 0.85 still catches spelling variants ("Colour" vs
+    # "Color", ratio 0.91), light typos, and minor punctuation drift.
+    # Anything below 0.85 should either go through the exact-normalized
+    # path or be treated as a different book.
     if len(na) > 3 and len(nb) > 3:
         if SequenceMatcher(None, na, nb).ratio() > 0.85: return True
     if len(la) > 3 and len(lb) > 3:
         if SequenceMatcher(None, la, lb).ratio() > 0.85: return True
 
-    # Phase 3b-H2 followup: handle "SeriesPrefix: BookTitle" against
-    # bare-title Calibre rows. _normalize() strips the suffix after `:`
-    # which is the wrong half for this layout — Hardcover returns
-    # "Mistborn: The Final Empire" while Calibre has "The Final Empire",
-    # and the strip-suffix path reduces both to "mistborn" vs "final
-    # empire" (no match). _normalize_strip_prefix() does the inverse.
+    # Strip-prefix path: handles "SeriesPrefix: BookTitle" against
+    # bare-title Calibre rows. The default `_normalize` strips the
+    # suffix after `:`, which is the wrong half for this layout —
+    # Hardcover returns "Mistborn: The Final Empire" while Calibre has
+    # "The Final Empire", and strip-suffix reduces both sides to
+    # mismatched halves. `_normalize_strip_prefix` does the inverse.
     #
-    # Two-word minimum: a strip-prefix result of 1 word is too generic
-    # to safely auto-link. "Stephen King: A Biography" → "biography"
-    # would otherwise match any Calibre row called "Biography", and
-    # "Star Wars: Aftermath" → "aftermath" could collide with Stephen
-    # King's "Aftermath", Linda Hogan's "Aftermath", etc. The 2-word
-    # floor still catches the common cases ("final empire", "new hope",
-    # "way of kings") which are the ones actually showing up in scans.
+    # Two-word minimum: a 1-word strip-prefix result is too generic to
+    # auto-link safely. "Stephen King: A Biography" → "biography" would
+    # match any Calibre row called "Biography", and "Star Wars:
+    # Aftermath" → "aftermath" would collide across multiple authors'
+    # unrelated books. The 2-word floor still catches the cases that
+    # actually show up in scans ("final empire", "new hope", "way of
+    # kings").
     def _strip_prefix_ok(p: str) -> bool:
         return bool(p) and len(p.split()) >= 2
 
@@ -352,15 +376,15 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
     upcoming books. Useful for getting an existing library polished before
     turning the discovery firehose on.
 
-    Phase 3c: when `series_collector` is a dict, this function records each
-    matched (book_id → source_name → (series_name, series_index)) tuple
-    into it. The collector is owned by lookup_author() and threaded through
-    every source's _merge_result call so that after all sources have run,
-    _compute_series_suggestions() can tally per-source agreement and write
-    suggestion rows where 2+ sources agree on a series different from the
-    book's current value. Recording is non-destructive — the merge layer's
-    actual write behavior (priority-gated for series, Calibre-locked for
-    owned books) is unchanged.
+    When `series_collector` is a dict, this function also records each
+    matched `(book_id → source_name → (series_name, series_index))`
+    tuple into it. The collector is owned by `lookup_author` and
+    threaded through every source's merge call so that after all
+    sources run, `_compute_series_suggestions` can tally per-source
+    agreement and write suggestion rows wherever 2+ sources agree on a
+    series that differs from what's stored. Recording is purely
+    observational — the merge layer's write behavior (priority-gated
+    for series, Calibre-locked for owned books) is unchanged.
     """
     db = await get_db()
     try:
@@ -401,9 +425,11 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         def _update_existing(matched_row, bk, series_id=None):
             """Build UPDATE for an existing book — URL merge always, series with priority, metadata in full_scan.
 
-            Calibre source-of-truth protection (Phase 3a follow-up):
-            owned-Calibre books treat each metadata field with a tailored
-            rule rather than a blanket lock. The current rules:
+            Calibre source-of-truth protection: owned-Calibre books treat
+            each metadata field with a tailored rule rather than a blanket
+            lock. The user curates Calibre, so we want sources to fill
+            gaps and correct edition-specific dates without ever
+            clobbering curated content. Current rules:
 
               cover_url        : LOCKED (Calibre cover_path is authoritative)
               title            : LOCKED (structural — never updated by sources)
@@ -498,7 +524,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                         if not existing_exp:
                             sets.append("expected_date=?"); vals.append(bk.expected_date); fields_updated.append("expected_date(filled)")
 
-                    # page_count + isbn: COALESCE-fill (unchanged from Issue 2a v1)
+                    # page_count + isbn: COALESCE-fill only.
                     if bk.page_count: sets.append("page_count=COALESCE(page_count,?)"); vals.append(bk.page_count); fields_updated.append("page_count")
                     if bk.isbn: sets.append("isbn=COALESCE(isbn,?)"); vals.append(bk.isbn); fields_updated.append("isbn")
 
@@ -527,28 +553,32 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
 
         for sr in result.series:
             # ── Lazy series upsert (orphan-row prevention) ───────────
-            # Previously the series row was created here, before any
-            # book in the series had been processed. In owned_only
-            # mode, the inner book loop then skipped every non-matched
-            # book, leaving the series row pointing at nothing — 649
-            # such orphans on the user's container before this fix.
-            # Now we defer the upsert until the first book in the
-            # inner loop actually needs the series_id. If no book
-            # needs it (all filtered/skipped), no row is created.
+            # The series row is created on first need rather than up
+            # front. In library-only mode the inner book loop skips
+            # every non-owned book, so eagerly creating the series row
+            # would leave it pointing at nothing — exactly how 649
+            # orphan rows accumulated on a real library before this
+            # was fixed. With lazy creation, if no book in this series
+            # actually needs the row, none is written.
             sid = None  # populated lazily by _ensure_series()
 
             async def _ensure_series(_sr=sr):
                 """Upsert the series row on first call; return cached id thereafter.
 
-                Bug B prevention: the SELECT first looks for an exact
-                LOWER(name) match (matches today's behavior), then for
-                a normalized-name match against any existing row for
-                this author so canonical-form variants like "Mistborn"
-                vs "The Mistborn Saga" collapse to one row instead of
-                duplicating. First-source-wins on the stored name —
-                if a later scan brings a more canonical version, it
-                still links to the existing row but doesn't rename it.
-                Manual rename via the Series page is the escape hatch.
+                Lookup order on the SELECT side matters:
+                  1. Exact LOWER(name) match — fast path for the common
+                     case where the source's name already matches what's
+                     stored.
+                  2. Normalized-name match against this author's existing
+                     series. This collapses canonical-form variants like
+                     "Mistborn" vs "The Mistborn Saga" into a single row
+                     instead of accumulating duplicates over time.
+
+                First-source-wins on the stored name: if a later scan
+                brings a more canonical name, it still links to the
+                existing row but does NOT rename it. The user can
+                rename via the Series page if they want a different
+                canonical form.
                 """
                 nonlocal sid
                 if sid is not None:
@@ -560,11 +590,11 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 if row:
                     sid = row["id"]
                 else:
-                    # Normalized fallback: search this author's existing
-                    # series for a normalized-name match before inserting.
-                    # _norm_consensus_series mirrors _norm_series in
-                    # hardcover.py — strips leading articles, trailing
-                    # tail words ("saga", "series", etc.), punctuation.
+                    # Normalized fallback: scan this author's existing
+                    # series for a name that normalizes to the same
+                    # form. `_norm_consensus_series` strips leading
+                    # articles ("The"), trailing tail words ("Saga",
+                    # "Series", "Trilogy"…), and punctuation.
                     target_norm = _norm_consensus_series(_sr.name)
                     if target_norm:
                         author_series = await (await db.execute(
@@ -606,13 +636,14 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                     sid_use = await _ensure_series()
                     sql, vals = _update_existing(matched_row, bk, series_id=sid_use)
                     await db.execute(sql, vals)
-                    # Phase 3c: record this source's series claim for the
-                    # matched book so consensus can be computed at the
-                    # end of lookup_author. We use the SOURCE's reported
-                    # series name (sr.name), not the resolved series_id
-                    # — different sources may use slightly different
-                    # canonical names ("The Mistborn Saga" vs "Mistborn
-                    # Saga") and the consensus computer normalizes them.
+                    # Record this source's series claim for the matched
+                    # book so consensus can be computed at the end of
+                    # lookup_author. We store the SOURCE's reported
+                    # series name (`sr.name`), not the resolved
+                    # series_id — different sources use slightly
+                    # different canonical names ("The Mistborn Saga"
+                    # vs "Mistborn Saga") and the consensus pass
+                    # normalizes them when grouping votes.
                     if series_collector is not None:
                         series_collector.setdefault(matched_row["id"], {})[source_name] = (sr.name, bk.series_index)
                     continue
@@ -649,11 +680,10 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if matched_row:
                 sql, vals = _update_existing(matched_row, bk)
                 await db.execute(sql, vals)
-                # Phase 3c: record (None, None) — this source thinks
-                # the book is a standalone, not in any series. This
-                # captures disagreements where Source A says "in series
-                # X" while Source B says "standalone", which is just as
-                # important to surface as a name conflict.
+                # Record `(None, None)` — this source thinks the book
+                # is a standalone. Surfacing "Source A says series X,
+                # Source B says standalone" disagreements is just as
+                # important as resolving conflicting series names.
                 if series_collector is not None:
                     series_collector.setdefault(matched_row["id"], {})[source_name] = (None, None)
                 continue
@@ -693,11 +723,19 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         await db.close()
 
 
-# ─── Phase 3c: source-consensus series suggestions ───────────────────
-# Series-name normalization for consensus grouping. Mirrors hardcover.py's
-# _norm_series so two sources reporting "The Mistborn Saga" and "Mistborn
-# Saga" group together. Standalone (None) is its own bucket and never
-# normalizes into a name group.
+# ─── Source-consensus series suggestions ─────────────────────────────
+# When two or more sources independently agree on a series name (or on
+# a series index, or on "standalone") that disagrees with what the user
+# has stored, we write a suggestion row instead of overwriting silently.
+# The user reviews suggestions in the Series page and can Apply, Ignore,
+# or do nothing.
+#
+# Normalization is what makes the vote work — sources spell series
+# names inconsistently ("The Mistborn Saga" vs "Mistborn Saga" vs
+# "Mistborn"), and a strict string compare would split every vote into
+# singletons. The `_norm_consensus_*` helpers below collapse those
+# variants into a single bucket. Standalone (None) is its own bucket
+# and never normalizes into a name group.
 _RX_CONSENSUS_LEAD = re.compile(r'^(the|a|an)\s+', re.IGNORECASE)
 _RX_CONSENSUS_TAIL = re.compile(
     r'\s+(saga|series|trilogy|cycle|chronicles|novels|books)\s*$',
@@ -818,19 +856,19 @@ async def _compute_series_suggestions(author_id, series_collector):
             if not groups:
                 continue
 
-            # None-index tolerance: if a source reports a series name
+            # None-index tolerance: when a source reports a series name
             # but no index (e.g. Kobo's detail page often omits the
-            # number even when the book IS in a series), and there's
-            # exactly ONE other group for the same name with a concrete
-            # index, fold the None-index group into that one. The None
-            # vote is better read as "I confirm the name, I just don't
-            # know the number" than as "I claim no index". Two distinct
+            # number even when the book IS in a series), and exactly
+            # ONE other group has the same name with a concrete index,
+            # fold the None-index group into that one. The None vote
+            # is better read as "I confirm the name, I just don't know
+            # the number" than as "I claim no index". Two distinct
             # concrete indices for the same name are NOT collapsed —
-            # those represent genuine disagreement about which book in
+            # those represent genuine disagreement about WHICH book in
             # the series this is.
             #
-            # Real case from the post-3c Sanderson scan that motivated
-            # this: Tress of the Emerald Sea — Goodreads said "Hoid's
+            # Concrete case that motivated this rule: Sanderson's
+            # "Tress of the Emerald Sea" — Goodreads said "Hoid's
             # Travails #1", Kobo said "Hoid's Travails" (no index),
             # Hardcover said "Secret Projects". Without folding, every
             # group has 1 source and the 2+ threshold isn't met. With
@@ -1020,11 +1058,10 @@ async def _compute_series_suggestions(author_id, series_collector):
                 )
 
         await db.commit()
-        # Always log the summary so verification scans can confirm the
-        # consensus pass actually ran (the previous conditional log was
-        # silent in the all-zeros case, which made it impossible to
-        # tell "function ran but found nothing" from "function never
-        # ran" without adding instrumentation).
+        # Unconditional summary log: a silent "all zeros" outcome is
+        # important to surface, otherwise it's impossible to tell
+        # "function ran and found nothing" from "function never ran"
+        # without adding instrumentation.
         logger.info(
             f"  Series consensus pass for author_id={author_id}: "
             f"considered {len(series_collector)} books, "
@@ -1039,12 +1076,13 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
     """Try a single source with validation and detailed logging."""
     try:
         logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
-        # Hardcover needs owned_titles to search by book title, and as
-        # of Phase 3b-H2 also takes owned_series_names so its per-book
-        # series picker can prefer candidates that match what Calibre
-        # already has (avoids "Mistborn Saga: Original Trilogy" being
-        # picked over "The Mistborn Saga"). Both attributes are stashed
-        # on the source instance by lookup_author() before this runs.
+        # Hardcover needs `owned_titles` to search by book title, and
+        # `owned_series_names` so its per-book series picker can prefer
+        # candidates that match what Calibre already has (this is what
+        # stops "Mistborn Saga: Original Trilogy" from beating "The
+        # Mistborn Saga" as the picked series). Both attributes are
+        # stashed on the source instance by lookup_author before this
+        # runs.
         if hasattr(source, '_owned_titles'):
             found = await source.search_author(
                 author_name,
@@ -1138,10 +1176,10 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
             t = re.sub(r'[^\w\s]', '', r["title"].lower()).strip()
             t = re.sub(r'\s+', ' ', t)
             existing_titles.add(t)
-        # Phase 3b-H2: collect distinct series names the user already
-        # has tagged for this author. Used by Hardcover (and any future
-        # source) to prefer matching series candidates over deeper
-        # sub-series in the source's series taxonomy.
+        # Distinct series names the user already has tagged for this
+        # author. Hardcover (and any future source with the same hook)
+        # uses this to prefer matching series candidates over deeper
+        # sub-series in its own taxonomy.
         series_rows = await (await db.execute(
             "SELECT DISTINCT s.name FROM series s "
             "JOIN books b ON b.series_id = s.id "
@@ -1152,22 +1190,23 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     finally:
         await db.close()
 
-    # Phase 3c: per-source series collector. Threaded through every
-    # _try_source call so each source's matched-book series claims are
-    # recorded. After all sources have run, _compute_series_suggestions()
-    # tallies the per-source agreement and writes pending suggestions
-    # for any book where 2+ sources agree on a series different from the
-    # book's current value. The dict is local to this scan and discarded
-    # after the consensus pass — we don't need to persist per-source raw
-    # data, only the final consensus diffs.
+    # Per-source series collector. Threaded through every `_try_source`
+    # call so each source's matched-book series claims are recorded.
+    # After all sources have run, `_compute_series_suggestions` tallies
+    # the per-source agreement and writes pending suggestions for any
+    # book where 2+ sources agree on a series different from the
+    # current value. The dict is local to this scan and discarded after
+    # the consensus pass — we don't need to persist per-source raw data,
+    # only the final consensus diffs.
     series_collector: dict[int, dict[str, tuple]] = {}
 
-    # Phase 3d-2: per-book progress hook. Stashed on each source instance
-    # before scanning so the source can poke the title of the book it's
-    # currently working on into _lookup_progress["current_book"]. Sources
-    # only call this for non-skipped work — DETAIL fetches and URL-backfill
-    # matches — so the user-visible progress feed never flickers through
-    # filter noise (foreign/set/translation/contributor/unowned skips).
+    # Per-book progress hook for the unified scan widget. Stashed on
+    # each source instance before scanning so the source can write the
+    # title of the book it's currently fetching into
+    # `_lookup_progress["current_book"]`. Sources only call this for
+    # work that actually does something (DETAIL fetches + URL-backfill
+    # matches), so the user-visible feed never flickers through filter
+    # noise like foreign-language / box-set / contributor-only skips.
     def _on_book(title: str) -> None:
         state._lookup_progress["current_book"] = title or ""
     goodreads._on_book = _on_book
@@ -1193,9 +1232,9 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     # the last book of THIS author until its first DETAIL fetch lands.
     state._lookup_progress["current_book"] = ""
 
-    # Phase 3c: compute consensus and write pending suggestions for
-    # any per-book disagreement that meets the 2+ sources threshold.
-    # Runs after all sources so it sees the full per-book picture.
+    # Compute consensus and write pending suggestions for any per-book
+    # disagreement that meets the 2+ sources threshold. Runs after all
+    # sources so it sees the full per-book picture.
     if series_collector:
         await _compute_series_suggestions(author_id, series_collector)
 
@@ -1211,6 +1250,18 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
 
 
 async def run_full_lookup(on_progress=None):
+    """Scan every author whose last lookup is older than the cache window.
+
+    Iterates `lookup_author` over the due-author list one at a time so
+    DB writes interleave naturally with reads from the UI. Books-only
+    authors (rows in `authors` with no entries in `books` — typically
+    secondary co-authors of multi-author Calibre rows) are excluded
+    here so the scan budget isn't spent on lookups that have nothing
+    to merge into.
+
+    `on_progress` receives `{checked, total, current_author, new_books}`
+    after each author so the unified scan widget can render progress.
+    """
     logger.info("Starting scheduled lookup...")
     reload_sources()
     start = time.time()
@@ -1254,7 +1305,20 @@ async def run_full_lookup(on_progress=None):
 
 
 async def run_full_rescan(on_progress=None):
-    """Full re-scan: visits every book page to refresh metadata, ignoring skip optimizations."""
+    """Full re-scan: visit every book page to refresh metadata.
+
+    Differs from `run_full_lookup` in two ways:
+      - Ignores the cache window — every author is rescanned regardless
+        of when they were last looked up.
+      - Passes `full_scan=True` down to `lookup_author`, which forces
+        the per-source DETAIL fetches to actually re-visit pages
+        instead of skipping known-already-cached books. This is the
+        only way to refresh stale metadata (descriptions, page counts,
+        edition dates) from the source side.
+
+    Slow and expensive. Surfaced via the Dashboard "Full Re-Scan"
+    button so it's always an explicit user choice, never automatic.
+    """
     logger.info("Starting FULL RE-SCAN of all authors...")
     reload_sources()
     start = time.time()

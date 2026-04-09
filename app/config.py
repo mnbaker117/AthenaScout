@@ -1,3 +1,24 @@
+"""
+Configuration loading and persistence.
+
+Two layers of config:
+
+  1. **Environment variables** (read once at import time): things the
+     deployment owner sets — paths to Calibre, MAM session token,
+     scheduler intervals, the WebUI port. These exist so a Docker
+     deployment can be configured purely through `docker run -e ...`
+     without ever touching the UI.
+  2. **Saved settings** (`settings.json` under DATA_DIR): what the user
+     can change at runtime through the Settings page. `load_settings`
+     always merges the on-disk file over `DEFAULT_SETTINGS`, so every
+     key in DEFAULT_SETTINGS is guaranteed to be present on the
+     returned dict — see the long invariant comment on DEFAULT_SETTINGS
+     below for the rules around adding a new setting.
+
+Library discovery (`discover_libraries`) lives here too because it
+walks both env-driven roots and saved-settings-driven roots and the
+two need to share resolution logic.
+"""
 import os
 import re as _re
 import json
@@ -53,29 +74,21 @@ LANGUAGE_OPTIONS = [
     "Vietnamese", "Welsh",
 ]
 
-# ─── DEFAULT_SETTINGS — the canonical source of truth for every setting ──
+# ─── DEFAULT_SETTINGS — canonical source of truth for every setting ──
 #
-# load_settings() always merges saved settings into DEFAULT_SETTINGS via
-# `{**DEFAULT_SETTINGS, **saved}`, which means any key present here is
-# guaranteed to exist on every dict returned by load_settings(). In other
-# words, `s.get("foo", fallback)` at a call site NEVER uses `fallback` —
-# the key is always there. The inline fallbacks scattered around the
-# routers (`s.get("rate_mam", 2)`, `s.get("languages", ["English"])`, etc)
-# are defensive redundancy, not drift protection.
+# `load_settings` merges saved settings into DEFAULT_SETTINGS via
+# `{**DEFAULT_SETTINGS, **saved}`, so every key listed here is
+# guaranteed to be present on every dict returned. The inline `.get(key,
+# fallback)` calls scattered across the routers are defensive
+# redundancy — they should never actually fall back.
 #
-# INVARIANT: when adding a new setting, add it here FIRST, then reference
-# it from routers. The fallback in the inline `.get()` MUST equal the
-# value here. A linter could enforce this, but a grep audit during code
-# review is cheaper; run:
-#
-#   grep -rn '\.get("foo"' app/   # replace foo with the new key
-#
-# and spot-check that every hit's fallback matches this dict. All 20+
-# inline defaults were audited during Batch D and currently match.
-#
-# DO NOT add a setting that has a different default in DEFAULT_SETTINGS
-# vs. an inline `.get()` fallback — they will silently diverge on first
-# run for users who have an old settings.json missing the new key.
+# INVARIANT for adding a new setting:
+#   1. Add it here first.
+#   2. Inline `.get("new_key", FALLBACK)` calls in routers MUST use the
+#      same FALLBACK value as the entry in this dict. Mismatched
+#      defaults silently diverge for users whose `settings.json` was
+#      written before the key existed — those users see the inline
+#      fallback while everyone else sees the dict default.
 DEFAULT_SETTINGS = {
     "hardcover_api_key": "",
     "goodreads_enabled": True,

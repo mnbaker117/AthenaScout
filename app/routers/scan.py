@@ -1,9 +1,26 @@
 """
-Author lookup, sync, and full-rescan endpoints for AthenaScout.
+Scan-orchestration endpoints.
 
-Holds /api/sync/calibre, /api/sync, /api/sync/lookup, /api/lookup,
-/api/lookup/cancel, /api/lookup/status, /api/sync/full-rescan,
-/api/scanning/author/toggle, /api/scanning/mam/toggle.
+Three scan kinds run through this router:
+  - Calibre sync: imports the user's curated library into AthenaScout's DB.
+  - Author/source lookup: hits Goodreads/Hardcover/Kobo for each author.
+  - Full re-scan: same as lookup but visits every book page to refresh
+    metadata, ignoring the cache window.
+
+Plus the unified `/scan-status` endpoint that the Dashboard polls so it
+can render every active scan side-by-side, regardless of which router
+actually started the scan. The lookup-specific and MAM-specific status
+endpoints still exist (consumed by the legacy MAMPage and SettingsPage),
+so this file *projects* the underlying state dicts into a uniform shape
+rather than restructuring them.
+
+Endpoints:
+  /api/sync/calibre, /api/sync                        — manual Calibre sync
+  /api/sync/lookup, /api/lookup                       — start author scan
+  /api/lookup/cancel, /api/lookup/status              — control + status
+  /api/sync/full-rescan                               — full re-scan
+  /api/scan-status                                    — unified Dashboard feed
+  /api/scanning/{author,mam}/toggle                   — feature on/off
 """
 import asyncio
 import logging
@@ -137,18 +154,17 @@ async def lookup_status():
     return dict(state._lookup_progress)
 
 
-# ─── Phase 3d-1: unified scan status ─────────────────────────
-# A single endpoint the Dashboard can poll instead of fanning out to
-# /lookup/status and /mam/scan/status separately. Each progress dict
-# is projected into a uniform shape with `current`/`total` (the actual
-# numerator/denominator the dict tracks under different field names),
-# a `kind`/`type`/`label` triple, and a `extra` bag for kind-specific
-# numbers like new_books or MAM found/possible counts. The frontend
-# maps over `scans` and renders one row per active scan.
+# ─── Unified scan status ─────────────────────────────────────
+# Each kind of scan stores its progress in a different state dict with
+# different field names (`checked`/`total`, `scanned`/`total`, etc.).
+# The `_project_*` helpers below normalize them into a uniform shape:
 #
-# We project rather than restructure the underlying state to keep the
-# legacy /lookup/status and /mam/scan/status endpoints working for the
-# MAMPage and SettingsPage, which still consume them directly.
+#   { kind, type, label, running, current, total,
+#     current_label, current_book, status, extra }
+#
+# The frontend maps over the resulting `scans` array and renders one row
+# per active scan, so multiple scans can show side-by-side when MAM,
+# author lookup, and Calibre sync are all running concurrently.
 def _label_for(kind: str, scan_type: str) -> str:
     """Human-readable label for a (kind, type) pair."""
     if kind == "lookup":
@@ -183,10 +199,13 @@ def _project_lookup() -> dict:
         "current": p.get("checked", 0),
         "total": p.get("total", 0),
         "current_label": p.get("current_author", "") or None,
-        # Phase 3d-2: in-flight book the source scan is currently fetching.
-        # Populated by goodreads/kobo/hardcover via the _on_book closure
-        # stashed by lookup_author. Filter-noise SKIPs are excluded — only
-        # DETAIL fetches and URL-backfill matches reach this field.
+        # In-flight book title the source scan is currently fetching.
+        # Goodreads/Kobo/Hardcover write to this via the `_on_book`
+        # closure that lookup.py stashes on each source instance, and
+        # only for work that actually does something — DETAIL fetches
+        # and URL-backfill matches. Filter-noise skips don't reach
+        # this field, so the user-visible feed never flickers through
+        # foreign-language / set-collection / contributor-only noise.
         "current_book": p.get("current_book", "") or None,
         "status": p.get("status", "idle"),
         "extra": {
@@ -206,9 +225,8 @@ def _project_mam() -> dict:
         "current": p.get("scanned", 0),
         "total": p.get("total", 0),
         "current_label": None,
-        # Phase 3d-2: in-flight book MAM is currently checking. Unlike
-        # the source scans, MAM shows EVERY attempt because there's no
-        # filter-noise to hide.
+        # In-flight book MAM is currently checking. Unlike source scans,
+        # MAM shows EVERY attempt — there's no filter-noise to hide here.
         "current_book": p.get("current_book", "") or None,
         "status": p.get("status", "idle"),
         "extra": {
@@ -224,12 +242,11 @@ def _project_mam() -> dict:
 def _project_calibre() -> dict:
     """Project _calibre_sync_progress into the unified shape.
 
-    Phase 3d-2: Calibre sync was previously only visible via the
-    `_calibre_sync_in_progress` boolean (used by MAM/lookup writers
-    to yield to the bulk upsert). Surfacing it as a third "kind" in
-    the unified scan widget lets the user see how far the sync has
-    progressed before kicking off another scan that would be blocked
-    behind it.
+    Calibre sync is the third "kind" in the widget, alongside lookup
+    and MAM. This lets the user see exactly how far a sync has gotten
+    before they kick off another scan that would block behind it (the
+    `_calibre_sync_in_progress` flag still gates writers — see
+    sync_calibre and the MAM scanner's wait-for-other-writers loop).
     """
     p = state._calibre_sync_progress
     return {

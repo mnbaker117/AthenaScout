@@ -114,15 +114,14 @@ class BaseSource:
         return self._get_client()
 
     async def _get(self, url: str, retries: int = 2, **kwargs) -> httpx.Response:
-        """HTTP GET with rate limiting and retry logic with exponential backoff.
+        """HTTP GET with per-source rate limiting and retry/backoff.
 
-        Waits `rate_limit` seconds before each attempt. On failure, retries
-        up to `retries` times with exponentially increasing backoff:
-        3s, 6s, 12s, capped at 12s. The exponential schedule helps clear
-        Goodreads' rate-limit window (~6s recovery) which a fixed 3s flat
-        backoff was missing — Phase 3a-followup raised the default from 1
-        to 2 retries (3 total attempts) after a James S. A. Corey full-scan
-        showed 4 of 9 503-affected books being silently skipped.
+        Waits `rate_limit` seconds before each attempt. On failure,
+        retries up to `retries` times with exponentially increasing
+        backoff: 3s → 6s → 12s, capped at 12s. The exponential
+        schedule clears Goodreads' rate-limit window (~6s recovery)
+        which a fixed shorter backoff would miss, causing real
+        503-affected books to silently get skipped.
 
         Subclasses with custom request patterns (POST, GraphQL, etc.) can
         either call this with their own URL construction or implement their

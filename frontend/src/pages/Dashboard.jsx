@@ -9,16 +9,16 @@ import { Load } from "../components/Load";
 import { toast } from "../lib/toast";
 
 export default function Dashboard({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[scans,setScans]=useState([]);const[sugCount,setSugCount]=useState(0);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
-// Phase 3c: pending suggestions count for the Dashboard card. Refetched
-// on the same "athenascout:suggestions-changed" event the navbar uses,
-// so accepting/ignoring on the SuggestionsPage immediately reflects here.
+// Pending-suggestions count for the Dashboard card. Refetched on the
+// same `athenascout:suggestions-changed` event the navbar uses, so
+// Apply/Ignore actions on the SuggestionsPage immediately reflect here.
 useEffect(()=>{const refresh=()=>api.get("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[]);
-// Phase 3d-1 (post-feedback): the unified scan poller now lives in
-// App.jsx and dispatches athenascout:scans-updated whenever it polls,
-// so the Dashboard just listens for that event instead of running its
-// own polling loop. Also refreshes /stats when a scan completes (the
-// running→idle transition is detected here by comparing the new array
-// against the previous render).
+// The unified scan poller lives in App.jsx and dispatches
+// `athenascout:scans-updated` whenever it ticks, so the Dashboard
+// just listens for that event instead of running its own polling
+// loop. We also refresh `/stats` whenever a scan transitions
+// running→idle (detected here by diffing the new array against the
+// previous render's array).
 const lookupRunning=scans.some(s=>s.kind==="lookup"&&s.running);
 useEffect(()=>{const onUpdate=(e)=>{const next=(e.detail&&e.detail.scans)||[];setScans(prev=>{const someJustFinished=prev.some(p=>p.running)&&!next.some(s=>s.running);if(someJustFinished)api.get("/stats").then(setD).catch(()=>{});return next})};window.addEventListener("athenascout:scans-updated",onUpdate);return()=>window.removeEventListener("athenascout:scans-updated",onUpdate)},[]);
 if(!d)return<Load/>;
@@ -45,8 +45,9 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
   {label:"Authors",value:d.authors,color:t.purt,icon:"✍",nav:()=>onNav("authors")},
   {label:"Series",value:d.total_series,color:t.cyant,icon:"📖"},
   {label:"Upcoming",value:d.upcoming_books||0,color:t.cyant,icon:"📅",nav:()=>onNav("upcoming")},
-  // Phase 3c: only render the Suggestions card when there's something to review.
-  // Conditionally appended via spread so the grid layout collapses cleanly when 0.
+  // Only render the Suggestions stat card when there's something to
+  // review. Conditionally appended via spread so the grid layout
+  // collapses cleanly when the count is 0.
   ...(sugCount>0?[{label:"Suggestions",value:sugCount,color:t.accent,icon:"💡",nav:()=>onNav("suggestions")}]:[]),
 ].map(c=><div key={c.label} onClick={c.nav} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:"16px 18px",cursor:c.nav?"pointer":"default",transition:"border-color 0.2s"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:20}}>{c.icon}</span><span style={{fontSize:24,fontWeight:700,color:c.color}}>{c.value}</span></div><div style={{fontSize:12,color:t.td,marginTop:6}}>{c.label}</div></div>)}
 </div>
@@ -115,11 +116,14 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 </div>
 </div>
 
-{/* ── Phase 3d-1: Unified Scan Progress ── One row per active or recently-completed
-     scan, regardless of where it was triggered. Each row is keyed by scan kind
-     so multiple scan types (lookup + MAM) can show side-by-side when both are
-     running concurrently. The widget auto-hides entirely when nothing has run.
-     Per-row Stop buttons route cancellation to the right kind-specific endpoint. */}
+{/* ── Unified scan progress ── One row per active or recently
+     completed scan, regardless of where it was triggered. Rows are
+     keyed by scan kind so author lookup + MAM + Calibre sync can
+     all show side-by-side when running concurrently. The widget
+     auto-hides entirely when nothing has run yet. Per-row Stop
+     buttons route cancellation to the right kind-specific endpoint
+     (Calibre sync has no Stop because there's no cancel endpoint
+     to call). */}
 {scans.map(scan=>{const isLookup=scan.kind==="lookup";const isMam=scan.kind==="mam";const isCalibre=scan.kind==="calibre";const ex=scan.extra||{};const pctVal=scan.total>0?Math.round((scan.current/scan.total)*100):0;const cancelEndpoint=isLookup?"/lookup/cancel":scan.type==="full_scan"?"/mam/full-scan/cancel":"/mam/scan/cancel";return<div key={scan.kind} style={{marginTop:12,background:t.bg4,borderRadius:8,padding:"10px 14px"}}>{scan.running?<div>
 <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:t.td,marginBottom:6}}>
 <span><b style={{color:t.text2}}>{scan.label}</b>{scan.status==="paused"?" — Paused, resuming soon":scan.status==="waiting (calibre sync running)"?" — Waiting for Calibre sync...":scan.current_label?` — ${scan.current_label}${scan.current_book?` · ${scan.current_book}`:""}`:scan.current_book?` — ${scan.current_book}`:""}</span>

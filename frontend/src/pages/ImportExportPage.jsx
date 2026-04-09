@@ -1,3 +1,12 @@
+// Import / Export page.
+//
+// Two flows:
+//   - Import: paste a list of Goodreads / Hardcover URLs, preview
+//     the parsed metadata, and add the survivors to the library as
+//     unowned books. The preview step is intentional so the user can
+//     drop bad matches before they hit the database.
+//   - Export: ExportModal handles the actual download — this page
+//     just opens it.
 import { useState } from "react";
 import { useTheme } from "../theme";
 import { api } from "../api";

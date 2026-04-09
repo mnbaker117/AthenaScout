@@ -10,6 +10,14 @@ import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
 
 // ─── MAM Page ───────────────────────────────────────────────
+// Three-tab view of MAM scan results:
+//   - upload:       owned books that aren't on MAM (potential uploads)
+//   - download:     unowned books MAM has (find/possible matches)
+//   - missing_everywhere: unowned books MAM also doesn't have
+// Tabs are paginated and searchable. The page is a thin shell over
+// /api/mam/books — the heavy lifting happens server-side. The unified
+// scan widget on the Dashboard is what shows live scan progress; this
+// page just displays the latest results.
 export default function MAMPage({onNav}){const t=useTheme();
 // Tab + section data
 const[tab,setTab]=usePersist("mam_tab","upload");

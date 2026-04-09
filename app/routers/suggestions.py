@@ -1,12 +1,20 @@
 """
-Series suggestion endpoints for AthenaScout.
+Series suggestion review and disposition endpoints.
 
-Phase 3c: source-consensus series suggestions. The suggestion rows are
-written by lookup.py:_compute_series_suggestions() during scans whenever
-2+ sources agree on a series name/index that differs from what's
-currently stored on a book row. This router exposes the review and
-disposition surface: list pending, apply (write back to the book),
-ignore (suppress re-suggestion of the same value), and delete.
+Source-consensus suggestion rows are written by
+`lookup.py:_compute_series_suggestions` during author scans whenever
+2+ sources agree on a series name or index that differs from what's
+currently stored on the book. This router is the user-facing surface
+for those rows: list pending suggestions, apply one (write the
+consensus value back to the book), ignore one (suppress re-suggestion
+of the same value), or delete a row entirely.
+
+Drift detection: each suggestion stores a snapshot of the book's
+series state at the time it was created. The list endpoint also
+returns the LIVE series state via a JOIN, so the frontend can flag
+when the two have diverged — typically because the user manually
+edited the book between suggestion creation and review, in which
+case the diff may no longer reflect a real disagreement.
 """
 import json
 import logging

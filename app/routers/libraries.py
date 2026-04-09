@@ -1,8 +1,18 @@
 """
-Library discovery, switching, and validation endpoints for AthenaScout.
+Library discovery, switching, and validation endpoints.
 
-Holds /api/libraries, /api/libraries/active, /api/libraries/validate-path,
-/api/libraries/rescan.
+AthenaScout supports multiple libraries (typically separate Calibre
+installations) and exposes one as "active" at a time. The active
+library determines which per-library SQLite database backs every
+other endpoint, so switching libraries means tearing down any
+in-flight scans cleanly first — otherwise a scan started against
+library A would commit half its results to library B's database.
+
+Endpoints:
+  GET  /api/libraries                — list discovered libraries + active flag
+  POST /api/libraries/active         — switch active library (cancels scans)
+  POST /api/libraries/validate-path  — pre-flight check for setup wizard
+  POST /api/libraries/rescan         — re-discover libraries from disk + env
 """
 import logging
 import os

@@ -1,11 +1,32 @@
-"""AthenaScout — Main FastAPI Application
+"""AthenaScout — application entry point.
 
-This file is the application entry point. It creates the FastAPI app, sets up
-the lifespan context manager (library discovery, initial sync, scheduler,
-shutdown cleanup), and registers all route modules from app/routers/.
+Wires up the FastAPI application: lifespan setup (auth DB init, library
+discovery, initial Calibre sync, scheduled background tasks), the auth
+middleware, every route module under `app/routers/`, and the SPA static
+serving fallback.
 
-For individual endpoints, see app/routers/. For shared background-task state
-(scan tasks, library discovery cache), see app/state.py.
+The lifespan handler is the most important thing in this file. It runs
+once at process start, in this exact order:
+
+  1. Apply user logging preferences and reload source rate limits.
+  2. Initialize the (deployment-global) auth database.
+  3. Discover Calibre / library_apps libraries from disk + env.
+  4. Migrate any legacy single-DB layout to per-library layout.
+  5. Initialize each library's database file.
+  6. Set the active library to whatever the user last picked, falling
+     back to the first discovered library.
+  7. mtime-skip an initial sync of every library that hasn't changed
+     since last run, otherwise sync it now.
+  8. Register the scheduled-Calibre-sync, scheduled-author-lookup, and
+     periodic-MAM-scan jobs.
+  9. Start the APScheduler.
+
+Shutdown reverses the relevant pieces: stop the scheduler, then close
+the long-lived MAM HTTP client.
+
+For individual endpoints see `app/routers/`. For shared background-task
+state (scan tasks, library discovery cache, progress dicts) see
+`app/state.py`.
 """
 import asyncio
 import logging
@@ -250,14 +271,12 @@ async def lifespan(app: FastAPI):
                 continue
             if state._mam_scan_progress.get("running"):
                 continue
-            # Phase 3d-1 (post-feedback): no longer deferring on a
-            # concurrent author scan — WAL + busy_timeout absorbs the
-            # contention from per-row updates from both sides. Only
-            # Calibre sync (which holds the lock for tens of seconds
-            # during bulk inserts) still gets deferred.
+            # Defer ONLY on a Calibre sync — concurrent author scans
+            # are tolerated because WAL + the 30s busy_timeout absorb
+            # the small per-row contention. Calibre sync, by contrast,
+            # holds the write lock for tens of seconds during bulk
+            # inserts, longer than busy_timeout is willing to wait.
             if state._calibre_sync_in_progress:
-                # Calibre bulk sync holds the SQLite write lock; defer
-                # this scheduled MAM scan tick and try again next cycle.
                 logger.debug("MAM scheduled scan deferred — Calibre sync in progress")
                 continue
             last_val = s.get("last_mam_validated_at") or 0
@@ -287,12 +306,11 @@ async def lifespan(app: FastAPI):
                 logger.info("MAM scheduled scan: no books need scanning")
                 last_scan_at = time.time()
                 continue
-            # Phase 3d-1 (post-feedback): scheduled MAM scans run a
-            # single 150-book batch per cycle (was 100). The interval
-            # in Settings controls ONLY this scheduler — it does NOT
-            # trigger a full library scan, just a regular bounded
-            # batch via mam_scan_batch (same code path as the
-            # Dashboard MAM Scan button, just smaller/single-batch).
+            # Each scheduler tick runs a single bounded batch via
+            # mam_scan_batch (same code path as the Dashboard "MAM
+            # Scan" button, just one batch instead of looping until
+            # done). The interval setting controls how often the
+            # scheduler fires; it does NOT trigger a full library scan.
             scan_limit = min(150, total_remaining)
             logger.info(f"MAM scheduled scan starting ({scan_limit} books, {total_remaining} total remaining)")
             state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_limit,
@@ -307,14 +325,11 @@ async def lifespan(app: FastAPI):
                     "possible": stats["possible"],
                     "not_found": stats["not_found"],
                     "errors": stats["errors"],
-                    # Phase 3d-2: forward in-flight book title.
+                    # Forward in-flight book title from the source layer.
                     "current_book": stats.get("current_book", ""),
                 })
             db = await get_db()
             try:
-                # Phase 3d-1 (post-feedback): no cancel_check anymore
-                # (concurrent author scans are now allowed). Limit
-                # raised 100→150 to match the manual scan batch size.
                 result = await mam_scan_batch(
                     db, session_id=s["mam_session_id"], limit=150,
                     delay=s.get("rate_mam", 2), skip_ip_update=True,
@@ -349,9 +364,9 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     yield
     scheduler.shutdown()
-    # Tear down the MAM httpx.AsyncClient (Batch C). aclose_session is a
-    # coroutine — must be awaited so the underlying transport actually closes
-    # before uvicorn finishes shutting down the event loop.
+    # Tear down the long-lived MAM httpx client. Must be awaited so
+    # the underlying transport actually closes before uvicorn finishes
+    # shutting down the event loop.
     await mam_aclose_session()
 
 
@@ -432,15 +447,14 @@ if FD.exists():
 
     # ─── SPA fallback whitelist ───────────────────────────
     # Top-level files that vite emits to dist/. Built ONCE at startup
-    # from the trusted dist directory; user input is only used as a
-    # dict key, never concatenated into a path. CodeQL recognizes the
-    # membership lookup as a sanitizer for py/path-injection.
+    # from the trusted dist directory. User input is only used as a
+    # dict key, never concatenated into a path — that's what makes
+    # path traversal structurally impossible here.
     #
-    # This replaces the earlier resolve()/is_relative_to() approach,
-    # which was functionally correct (verified by smoke tests blocking
-    # /etc/passwd, /proc/self/environ, etc.) but which CodeQL's data-
-    # flow analysis couldn't recognize as safe. The whitelist pattern
-    # is simpler AND CodeQL-friendly. Phase 22B.3 Stage 2 follow-up.
+    # The dict-membership pattern is a deliberate choice over a
+    # resolve() + is_relative_to() check: it's simpler, equally safe,
+    # and CodeQL recognizes the membership lookup as a sanitizer for
+    # `py/path-injection`, which the resolve() pattern doesn't.
     _INDEX_HTML = (FD / "index.html").resolve()
     _SERVE_FE_FILES: dict[str, Path] = {
         p.name: p.resolve() for p in FD.iterdir() if p.is_file()

@@ -1,9 +1,38 @@
 """
-Hardcover.app — GraphQL API.
-Based on the official Calibre Hardcover plugin approach:
-1. Search returns flat ids list  
-2. Fetch books by ids with fragments
-3. Auth: 'Authorization' header with full value (user pastes 'Bearer ...')
+Hardcover.app source — GraphQL-backed metadata provider.
+
+Hardcover is the only source with a real public API (GraphQL at
+api.hardcover.app/v1/graphql), so this module skips HTML scraping
+entirely and uses two queries per author scan:
+
+  1. SEARCH_QUERY (`query_type: "Book"`) — returns a flat list of
+     book IDs. Fired multiple times per author: once for the bare
+     author name plus once per owned title in `owned_titles[:25]`.
+     The result IDs are unioned and capped at 100.
+  2. FIND_BOOKS_BY_IDS — pulls full metadata (book + first edition)
+     for the entire ID set in a single round-trip, with English
+     editions preferred via the `language.code3` filter.
+
+Two non-obvious things in this module worth knowing about:
+
+  - **Search expansion**: a bare-name query returns at most ~10
+    results, dominated by samplers and edge-case omnibuses for
+    prolific authors. To find a real Sanderson catalog we have to
+    fan out queries against the user's owned titles too. The IDs
+    are accumulated across ALL queries; do not early-break when
+    one query returns hits.
+  - **Namesake disambiguation**: Hardcover often has multiple
+    authors who share a name (the "David Burke" problem — three
+    distinct people, each with their own book list). The
+    `search_author` function tallies each book's
+    `contributions[].author.id`, vote-ranks them by owned-title
+    overlap, and keeps only the winning ID's books before merging.
+    Without this filter, AthenaScout would silently glue another
+    person's catalog onto the user's author.
+
+Auth: the API key goes into the `Authorization` header. Users paste
+the raw token from hardcover.app; we add the `Bearer ` prefix if it's
+not already present.
 """
 import asyncio
 import re
@@ -46,18 +75,19 @@ def _norm_series(name: str) -> str:
 def _pick_best_series(candidates: list, owned_norms: set) -> dict:
     """Pick the best series candidate for a Hardcover book.
 
-    Phase 3b-H2: previously this used a fixed scoring heuristic that
-    favored sub-series with colons (`+10 for ":"`) and longer names.
-    That works for "Star Wars: Empire and Rebellion" but breaks for
-    Sanderson's Mistborn books — Hardcover returns
-    `['The Mistborn Saga: The Original Trilogy', 'The Mistborn Saga',
-    'The Cosmere']` and the colon bonus picked the deepest sub-series
-    while the user's Calibre data uses the parent name "The Mistborn
-    Saga". Now we accept the user's owned series names as the strongest
-    signal: an exact normalized match wins (+1000), a substring/prefix
-    overlap wins next (+500), and the original colon/word-count
-    heuristic only kicks in as a fallback for books whose owned-side
-    series is unknown (e.g., new authors, missing Calibre tags).
+    Hardcover frequently returns multiple `book_series` entries for
+    the same book at different levels of taxonomy: Sanderson's
+    Mistborn novels come back as `['The Mistborn Saga: The Original
+    Trilogy', 'The Mistborn Saga', 'The Cosmere']`. Picking the most-
+    nested or most-detailed name is wrong — the user's Calibre data
+    uses "The Mistborn Saga", and the parent name is what matches.
+
+    Selection logic, ordered by strength of signal:
+      1. Exact normalized match against an owned series name (+1000).
+      2. Substring/prefix overlap with an owned name (+300 to +500).
+      3. Fallback colon / word-count / position heuristic for books
+         whose owned-side series isn't known (new authors, missing
+         Calibre tags).
     """
     if not candidates:
         return None
@@ -213,17 +243,15 @@ class HardcoverSource(BaseSource):
     async def _query(self, query: str, variables: dict = None) -> dict:
         """POST a GraphQL query with retry on transient failures.
 
-        Before Phase 3a this was a single-shot request — one transient 5xx
-        or a momentary connection reset would skip the entire author scan
-        silently. Goodreads (via BaseSource) retries; Hardcover didn't.
-        This retries up to 3 times with a 2s → 4s backoff on:
-          - httpx.TransportError (network-layer failures, connection reset)
+        Up to 3 attempts, 2s → 4s backoff. Retries fire on:
+          - httpx.TransportError (network-layer / connection reset)
           - httpx.ReadTimeout / WriteTimeout / ConnectTimeout
-          - HTTP 5xx responses (server-side errors)
-        GraphQL-level errors (HTTP 200 + "errors" key) are NOT retried —
-        those usually mean the query is bad, which won't fix itself. Same
-        for 4xx (auth/bad request) — retrying won't help and would waste
-        the user's rate budget.
+          - HTTP 5xx (server-side errors)
+
+        GraphQL-level errors (HTTP 200 + `errors` key) are NOT
+        retried — those mean the query itself is bad and won't
+        self-heal. Same for 4xx (auth / bad request) — retrying
+        won't help and would waste the user's rate budget.
         """
         if not self.api_key:
             return {}
@@ -269,25 +297,24 @@ class HardcoverSource(BaseSource):
 
     async def search_author(self, author_name: str, owned_titles: list = None,
                             owned_series_names: list = None) -> Optional[AuthorResult]:
-        """Search for author by searching their known books, then finding all books by same author.
+        """Find an author by searching for their books, then merging by same author.
 
-        Phase 3b-H2 changes:
-          - **Search expansion**: previously this method ran one search per
-            entry in `[author_name] + [f"{t} {author}" for t in owned_titles[:3]]`
-            and STOPPED at the first non-empty response. For prolific authors
-            (Brandon Sanderson, Stephen King, …) the bare-author-name query
-            returns ~10 dominated by sampler/omnibus/edge-case titles and the
-            actual bestsellers never make the cut. The early-break meant
-            owned-title queries never ran. Sanderson's first scan returned
-            10 IDs, of which only 1 (Hero of Ages) matched anything in the
-            user's library — Goodreads matched 14 of his 16 owned books in
-            the same scan. Fix: accumulate IDs across ALL queries, expand
-            owned_titles slice from [:3] → [:10], and dedupe via set.
-          - **owned_series_names** kwarg: passed through to the per-book
-            series picker so we can prefer Hardcover series candidates that
-            match what the user's Calibre data already uses (avoids picking
-            "The Mistborn Saga: The Original Trilogy" when Calibre says
-            "The Mistborn Saga"). See _pick_series() below.
+        Two important behaviors:
+
+        **Query expansion** — fires one SEARCH_QUERY for the bare
+        author name PLUS one for each entry in `owned_titles[:25]`,
+        and accumulates the result IDs across ALL queries (no early
+        break). This is the only way prolific authors return more
+        than ~10 books on Hardcover; without expansion, a Sanderson
+        scan once returned 10 IDs of which only 1 actually matched
+        the user's library, while Goodreads matched 14 of 16 owned
+        books in the same scan.
+
+        **owned_series_names** — passed through to the per-book
+        series picker so Hardcover candidates that match the user's
+        Calibre series names beat deeper sub-series like "The
+        Mistborn Saga: The Original Trilogy" when Calibre says
+        "The Mistborn Saga". See `_pick_best_series` above.
         """
         if not self.api_key:
             return None
@@ -304,16 +331,13 @@ class HardcoverSource(BaseSource):
             # "which books got searched in priority order" debug story.
             search_queries = [author_name]
             if owned_titles:
-                # Phase 3b-H2: was [:3], bumped to [:25] in 3b-H2-fix.
-                # First Sanderson re-scan with [:10] still missed 6 of his
-                # 16 owned books (Rhythm of War, Tress, Awakening, Isles of
-                # the Emberdark, The Gathering Storm, Towers of Midnight) —
-                # those just happened to be positions 11-16 in the SQL
-                # return order. With [:25] we cover users with up to ~25
-                # owned books per prolific author, which is ~95th-percentile
-                # for fiction collections. Cost: 26 GraphQL searches ×
-                # ~250ms = ~6.5s of search time, only on first Hardcover
-                # scan of an author this large.
+                # `[:25]` is sized to cover the ~95th-percentile of
+                # owned books for prolific authors. A smaller slice
+                # silently misses books at positions 11-16 in the SQL
+                # return order — verified by a Sanderson scan that
+                # missed Rhythm of War, Tress, etc. with `[:10]`.
+                # Cost is bounded: 26 searches × ~250ms = ~6.5s, and
+                # only on the first Hardcover scan of a large author.
                 for t in owned_titles[:25]:
                     search_queries.append(f"{t} {author_name}")
 
@@ -322,11 +346,9 @@ class HardcoverSource(BaseSource):
                 data = await self._query(SEARCH_QUERY, {"query": sq})
                 # Defensive: Hardcover can return `search: null` or
                 # `search: {ids: null}` for queries that match nothing
-                # (or partially fail server-side). Dict-default `{}` only
-                # protects against MISSING keys, not null VALUES — so use
-                # `or` chains to coerce both null cases to safe defaults.
-                # The post-3c Sanderson scan tripped this on one of the
-                # 26 expanded queries: 'NoneType' object is not subscriptable.
+                # or partially fail server-side. Dict-default `{}`
+                # only protects against MISSING keys, not null VALUES,
+                # so coerce both null cases via `or` chains.
                 search = data.get("search") or {}
                 ids = search.get("ids") or []
                 for bid in ids[:10]:
@@ -334,17 +356,16 @@ class HardcoverSource(BaseSource):
                         all_book_ids.add(int(bid))
                     except (ValueError, TypeError):
                         pass
-                # No early break (was the bug). Continue accumulating.
+                # No early-break: every search contributes to the union.
 
             if not all_book_ids:
                 logger.info(f"  Hardcover: no search results for '{author_name}'")
                 return None
 
-            # Cap at 100 IDs (was 50). With [:25] owned-title queries we
-            # routinely accumulate 60-90 unique IDs for prolific authors,
-            # and Hardcover's books-by-id query handles batches this size
-            # comfortably (the Sanderson 40-ID fetch took ~270ms in the
-            # 3b-H2 verification scan).
+            # Cap at 100 IDs. With 25 owned-title queries we
+            # routinely accumulate 60-90 unique IDs for prolific
+            # authors, and Hardcover's books-by-id query handles
+            # batches this size comfortably (~270ms for ~40 IDs).
             book_ids = list(all_book_ids)[:100]
             logger.info(
                 f"  Hardcover: search yielded {len(all_book_ids)} unique IDs "
@@ -418,25 +439,21 @@ class HardcoverSource(BaseSource):
                         return [{"name": raw}]
                 return []
             
-            # ── Phase 3b-H1: namesake disambiguation ──────────────────
-            # Hardcover often has multiple authors who share a name
-            # ("David Burke" returns 3 distinct people on hardcover.app:
-            # a LitRPG writer with 32 books, a music journalist with 7,
-            # and a Cold War espionage writer with 3). The bare name
-            # search and owned-title searches are both name-based, so
-            # the accumulated book set can mix all three. Without
-            # filtering, AthenaScout would silently glue another David
-            # Burke's non-fiction back catalog onto the user's LitRPG
-            # author.
+            # ── Namesake disambiguation ────────────────────────────
+            # Hardcover often has multiple authors with the same name
+            # — "David Burke" returns three distinct people: a LitRPG
+            # writer with 32 books, a music journalist with 7, and a
+            # Cold War espionage writer with 3. Both the bare-name
+            # query and the owned-title queries above are name-based,
+            # so the accumulated book set can mix all three. Without
+            # filtering, AthenaScout would silently glue another
+            # David Burke's catalog onto the user's LitRPG author.
             #
-            # Strategy: tally each book.contributions[].author.id whose
-            # name matches our target, vote-rank them, then keep only
-            # books contributed by the winning ID. Tiebreaks favor the
-            # ID with the most overlap against the user's owned titles
-            # (the owned-title search expansion at line 317 reliably
-            # surfaces that ID with extra book matches). When only one
-            # candidate ID exists — the common case — no filtering
-            # happens and behavior is unchanged from before this fix.
+            # Strategy: tally each `book.contributions[].author.id`
+            # whose name matches our target, vote-rank by owned-title
+            # overlap (book count is the tiebreaker), and keep only
+            # the winning ID's books. With one candidate ID — the
+            # common case — no filtering happens.
             id_to_books = {}  # author_id (str) → [book dict, ...]
             id_to_name = {}   # author_id (str) → display name
             for book in books:
@@ -553,13 +570,12 @@ class HardcoverSource(BaseSource):
                     logger.info(f"  Hardcover: skipping '{book.get('title')}' — contributors: {all_names[:5] if all_names else '(none)'}")
                     continue
 
-                # Phase 3d-2: emit per-book progress. Hardcover has no
-                # per-book HTTP fetch (all data comes from one GraphQL
-                # round-trip), so this loop tears through fast — but it's
-                # consistent with Goodreads/Kobo and useful for very large
-                # catalogs where the merge loop itself takes a perceptible
-                # moment. Skipped (non-author) books above are filtered out
-                # because they consume no downstream work.
+                # Per-book progress hook. Hardcover has no per-book
+                # HTTP fetch (everything comes from one GraphQL round-
+                # trip), so this loop tears through fast — but the
+                # widget feed stays consistent with Goodreads/Kobo,
+                # which is useful when many large catalogs are being
+                # merged in sequence.
                 on_book = getattr(self, '_on_book', None)
                 if on_book:
                     on_book(book.get("title", ""))
@@ -572,11 +588,12 @@ class HardcoverSource(BaseSource):
                 elif cached_img and isinstance(cached_img, str):
                     cover = cached_img
 
-                # Language: code3 is an ISO 639-2 3-letter code (e.g. "eng").
-                # Map "eng"/"en" → "English" so downstream _lang_ok() and
-                # UI display work consistently with the other sources (which
-                # emit the human-readable form). Leave others as the raw code
-                # so multi-language users can filter meaningfully.
+                # Language: `code3` is an ISO 639-2 3-letter code
+                # ("eng"). Map "eng"/"en" → "English" so downstream
+                # `_lang_ok` and the UI display match the other
+                # sources (which already emit the human-readable
+                # form). Leave other codes raw so multi-language
+                # users can still filter meaningfully.
                 lang_obj = edition.get("language") or {}
                 lang_code = (lang_obj.get("code3") if isinstance(lang_obj, dict) else "") or ""
                 if lang_code.lower() in ("eng", "en"):
@@ -595,11 +612,12 @@ class HardcoverSource(BaseSource):
                     except (ValueError, TypeError):
                         page_count = None
 
-                # Unreleased detection: compare release_date to today. If
-                # it's in the future, the book is upcoming, so move the date
-                # to expected_date and clear pub_date (matching the exact
-                # pattern Goodreads uses at goodreads.py:122-126). This is
-                # what makes Upcoming-tab entries appear from Hardcover.
+                # Unreleased detection: compare release_date to
+                # today. If it's in the future, the book is upcoming
+                # — move the date to `expected_date` and clear
+                # `pub_date`. Mirror of the Goodreads pattern, and
+                # what makes Upcoming-tab entries appear from
+                # Hardcover.
                 release_date = edition.get("release_date")
                 pub_date = release_date
                 expected_date = None
@@ -645,9 +663,9 @@ class HardcoverSource(BaseSource):
                                     "id": sr_obj.get("id"),
                                 })
                     if candidates:
-                        # Phase 3b-H2: owned-series-aware picker. Picks
-                        # the candidate that matches what Calibre already
-                        # has, falling back to the colon/word-count
+                        # Owned-series-aware picker: prefer the
+                        # candidate matching what Calibre already
+                        # has, fall back to the colon/word-count
                         # heuristic when there's no owned-side hint.
                         best = _pick_best_series(candidates, owned_norms)
                         sname = best["name"]
@@ -699,22 +717,20 @@ class HardcoverSource(BaseSource):
             return None
 
     async def get_author_books(self, author_id: str, **kw) -> Optional[AuthorResult]:
-        """No-op override: Hardcover's search_author() already returns a
-        fully-populated AuthorResult (books + series + metadata) in one
-        GraphQL round-trip, so lookup.py's two-phase
+        """No-op override.
+
+        Hardcover's `search_author` already returns a fully-populated
+        AuthorResult (books + series + metadata) in one GraphQL
+        round-trip, so lookup.py's two-phase
         search_author → get_author_books flow collapses into phase 1.
+        `_try_source` takes the fast path whenever the search result
+        already carries books or series, which is always true for
+        Hardcover.
 
-        lookup.py `_try_source()` checks `has_data = len(found.books) > 0 or
-        len(found.series) > 0` and takes the fast path when true, which is
-        always the case for Hardcover. This stub exists only to satisfy
-        the BaseSource contract — removing it would raise NotImplementedError
-        if the code ever reaches the slow path (e.g. for an author whose
-        search returned an external_id but zero books). Returning None
-        here degrades gracefully: the caller logs "No books returned" and
-        moves to the next source in the priority chain.
-
-        The `**kw` accepts lookup.py's `existing_titles`/`owned_titles`
-        kwargs without blowing up — the try/except TypeError fallback in
-        `_try_source` is therefore never triggered for Hardcover.
+        This stub exists to satisfy the BaseSource contract.
+        Returning None degrades gracefully on the unreachable slow
+        path: the caller logs "No books returned" and moves on.
+        `**kw` swallows lookup.py's extra kwargs so the TypeError-
+        fallback in `_try_source` never fires for Hardcover.
         """
         return None

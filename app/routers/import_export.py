@@ -1,9 +1,24 @@
 """
-Import / Export endpoints for AthenaScout.
+Import / Export endpoints.
 
-Holds /api/export, /api/books/search-url, /api/books/import-preview,
-/api/books/import-add, plus the Goodreads/Hardcover fetch helpers used by
-the import routes.
+Two flows live here:
+
+  - **Export**: dumps the active library to a JSON snapshot the user
+    can download from the Settings page. Includes books, authors,
+    series, suggestions — everything except the on-disk cover files
+    (which are owned by Calibre, not us).
+  - **Import**: lets the user paste a Goodreads or Hardcover URL,
+    pre-fetches the metadata for review (preview), and on confirmation
+    upserts the result as a new book in the active library. The
+    fetch helpers in this file talk to the same source modules that
+    the regular author scans use, so manual additions get the same
+    series/language detection.
+
+Endpoints:
+  GET  /api/export
+  POST /api/books/search-url
+  POST /api/books/import-preview
+  POST /api/books/import-add
 """
 import asyncio
 import json

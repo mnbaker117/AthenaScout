@@ -1,22 +1,23 @@
 import { useState, useEffect, useRef } from "react";
 import { useTheme } from "../theme";
 
-// Phase 3d-1 follow-up: iPhone-style top-banner toast notification
-// system. Listens for "athenascout:toast" window events (dispatched
-// via lib/toast.js) and renders a vertical stack of fading banners
-// at the top of the viewport.
+// Top-banner toast notification system. Listens for the
+// `athenascout:toast` window event (dispatched via `lib/toast.js`)
+// and renders a vertical stack of fading banners at the top of the
+// viewport. Mounted once at the App level so every page shares the
+// same stack and no two pages can render competing toasters.
 //
 // Lifecycle per toast:
-//   1. Event arrives → push to state with `entering: true`
-//   2. After 1 frame → flip `entering: false` so the slide-down
-//      animation runs
-//   3. After 5s → flip `exiting: true` so the slide-up + fade
-//      animation runs
-//   4. After 300ms exit → remove from state
-//   5. Click anywhere on the toast → skip to step 3 immediately
+//   1. Event arrives → push to state with `entering: true`.
+//   2. Next animation frame → flip `entering: false` so the
+//      slide-down transition runs.
+//   3. After 5s → flip `exiting: true` to run the slide-up + fade.
+//   4. After 300ms exit → remove the toast from state.
+//   5. A click anywhere on the toast jumps straight to step 3.
 //
-// Mounted once at the App level so every page sees the same toast
-// stack and pages don't fight over which one renders.
+// The two-step entering/false flip is required because if we mounted
+// in the final position immediately, the CSS transition would have
+// nothing to interpolate from and the animation wouldn't run.
 
 let nextId = 1;
 

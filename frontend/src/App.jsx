@@ -29,10 +29,13 @@ export default function App(){
   const[pa,setPa]=usePersist("page_arg",null);
   const[tn,setTn]=useState(()=>{try{return localStorage.getItem("cl_theme")||"dark"}catch{return"dark"}});
   const[showAdd,setShowAdd]=useState(null);
-// Phase 22B.3 Stage 2A — auth state. Three meaningful values:
-//   {loading:true}                  → render loading spinner (initial check in flight)
-//   {authenticated:false,firstRun:true|false} → render LoginPage (setup or sign-in)
-//   {authenticated:true,...}        → render the rest of the app
+// Auth state — three meaningful shapes:
+//   {loading:true}                                    → initial /auth/check is in flight, render spinner
+//   {authenticated:false,firstRun:true|false}         → render LoginPage (setup or sign-in mode)
+//   {authenticated:true,...}                          → render the rest of the app
+// The `athenascout:auth-required` event (dispatched by api.js when any
+// fetch returns 401) drops us back to the unauthenticated state so the
+// user gets the login screen instead of stale UI fed by failed fetches.
 const[authState,setAuthState]=useState({loading:true,authenticated:false,firstRun:false});
 const checkAuth=async()=>{try{const r=await api.get("/auth/check");setAuthState({loading:false,authenticated:!!r.authenticated,firstRun:!!r.first_run})}catch{setAuthState({loading:false,authenticated:false,firstRun:false})}};
 useEffect(()=>{checkAuth();const onAuthRequired=()=>setAuthState(s=>s.authenticated?{loading:false,authenticated:false,firstRun:false}:s);window.addEventListener("athenascout:auth-required",onAuthRequired);return()=>window.removeEventListener("athenascout:auth-required",onAuthRequired)},[]);
@@ -50,27 +53,28 @@ useEffect(()=>{if(!authState.authenticated)return;api.get("/platform").then(r=>s
 // refetch on every `pg` change (page nav) as a lazy refresh trigger, which
 // cost 1 API call per nav click. Event-driven is surgical and free.
 useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{});refresh();window.addEventListener("athenascout:mam-state-changed",refresh);return()=>window.removeEventListener("athenascout:mam-state-changed",refresh)},[authState.authenticated]);
-// Phase 3c: pending series-suggestion count drives whether the
-// "Suggestions" nav item appears at all (hidden when 0 to keep the
-// navbar clean) and the badge number shown next to it. Refetched on
-// page changes via the explicit "athenascout:suggestions-changed"
-// event that SuggestionsPage dispatches after Apply/Ignore/Delete,
-// plus a one-shot fetch on initial auth.
+// Pending series-suggestion count drives the badge number on the
+// Suggestions nav item. Refetched via the explicit
+// "athenascout:suggestions-changed" event that SuggestionsPage
+// dispatches after Apply/Ignore/Delete actions, plus a one-shot fetch
+// on initial auth — no polling.
 const[sugCount,setSugCount]=useState(0);
 useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[authState.authenticated]);
 
-// Phase 3d-1 (post-feedback): app-level scan progress poller. Runs once
-// per app-mount (not per page) so the unified Dashboard widget AND any
-// other page that cares about scan completion (AuthorDetailPage refresh,
-// AuthorsPage bulk action) see consistent data without each maintaining
-// its own polling effect. Dispatches:
-//   - athenascout:scans-updated  on every poll, with the new scans array
-//   - athenascout:scan-completed when a scan transitions running→idle
+// App-level scan-progress poller. Runs ONCE per app-mount (not per
+// page) so the unified Dashboard widget and every other page that
+// cares about scan completion (AuthorDetailPage refresh, AuthorsPage
+// bulk action) see consistent data without each maintaining its own
+// polling effect.
 //
-// Polling cadence: 3s while any scan is in flight, 30s idle watchdog.
-// Page Visibility API pause to skip polling on backgrounded tabs.
-// Initial fetch fires immediately and any time athenascout:scan-started
-// is dispatched (so trigger sites can demand instant refresh).
+// Dispatches two custom events:
+//   athenascout:scans-updated   — on every poll, detail.scans = next
+//   athenascout:scan-completed  — when a scan transitions running→idle
+//
+// Cadence: 3s while any scan is in flight, 30s idle watchdog. Pauses
+// on backgrounded tabs via the Page Visibility API. Trigger sites can
+// dispatch `athenascout:scan-started` to demand an immediate poll
+// (no waiting for the next interval tick).
 useEffect(()=>{if(!authState.authenticated)return;let prev=[];let cancelled=false;let iv=null;const tick=async()=>{if(document.hidden||cancelled)return;try{const r=await api.get("/scan-status");const next=r.scans||[];for(const ns of next){const ps=prev.find(p=>p.kind===ns.kind);if(ps&&ps.running&&!ns.running){try{window.dispatchEvent(new CustomEvent("athenascout:scan-completed",{detail:{kind:ns.kind,scan:ns}}))}catch{}}}prev=next;try{window.dispatchEvent(new CustomEvent("athenascout:scans-updated",{detail:{scans:next}}))}catch{}const anyRunning=next.some(s=>s.running);const want=anyRunning?3000:30000;if(iv){clearInterval(iv);iv=setInterval(tick,want)}}catch{}};tick();iv=setInterval(tick,30000);const onStarted=()=>tick();const onVis=()=>{if(!document.hidden)tick()};window.addEventListener("athenascout:scan-started",onStarted);document.addEventListener("visibilitychange",onVis);return()=>{cancelled=true;if(iv)clearInterval(iv);window.removeEventListener("athenascout:scan-started",onStarted);document.removeEventListener("visibilitychange",onVis)}},[authState.authenticated]);
   const theme=THEMES[tn]||THEMES.dark;
   const nav=(p,a=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
@@ -136,10 +140,10 @@ input,select{font-family:inherit}
 {pg==="dashboard"?<div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:theme.accent,borderRadius:1}}/>:null}
 </button>
 <div className="nav-items" style={{display:"flex",alignItems:"center",gap:2,overflowX:"auto",flex:1,minWidth:0}}>
-{/* Suggestions nav stays permanent (3d-2 follow-up) so users can
-    reach previously-ignored items and delete them to let the next
-    scan re-suggest. The badge bubble at line below only appears when
-    sugCount>0 — empty state shows just the icon+label. */}
+{/* Suggestions nav is always shown so users can reach
+    ignored items and delete them to let the next scan re-suggest.
+    The badge bubble below only renders when sugCount>0; empty
+    state shows just the icon and label. */}
 {NAV.filter(n=>(n.id!=="mam"||mamOn)).map(n=><button key={n.id} onClick={()=>nav(n.id)} style={{padding:"8px 14px",borderRadius:8,fontSize:14,fontWeight:500,border:"none",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,height:36,whiteSpace:"nowrap",flexShrink:0,background:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.bg4:"transparent",color:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.accent:theme.tf}}>
 <span style={{fontSize:15,lineHeight:1}}>{n.icon}</span>{n.label}
 {n.id==="suggestions"&&sugCount>0?<span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:18,height:18,padding:"0 5px",borderRadius:9,fontSize:11,fontWeight:700,background:theme.accent,color:theme.bg,marginLeft:2}}>{sugCount}</span>:null}
