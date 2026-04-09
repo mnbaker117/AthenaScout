@@ -136,8 +136,19 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 
 </div>
 
-{/* Quick nav */}
+{/* Quick nav — order matches the top navbar. MAM is gated on the
+    feature being enabled in /api/stats; Suggestions is gated on
+    there being something to review (matching the top-nav badge
+    behavior). */}
 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:10}}>
-{[{label:"Library",icon:"📖",pg:"library"},{label:"Authors",icon:"◉",pg:"authors"},{label:"Missing",icon:"◌",pg:"missing"},{label:"Upcoming",icon:"📅",pg:"upcoming"},{label:"Settings",icon:"⚙",pg:"settings"}].map(n=><button key={n.pg} onClick={()=>onNav(n.pg)} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:10,padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:10,fontSize:14,fontWeight:500,color:t.text2}}><span style={{fontSize:18}}>{n.icon}</span>{n.label}</button>)}
+{[
+  {label:"Library",icon:"📖",pg:"library"},
+  {label:"Authors",icon:"◉",pg:"authors"},
+  {label:"Missing",icon:"◌",pg:"missing"},
+  {label:"Upcoming",icon:"📅",pg:"upcoming"},
+  ...(d.mam_enabled?[{label:"MAM",icon:"🔍",pg:"mam"}]:[]),
+  ...(sugCount>0?[{label:"Suggestions",icon:"💡",pg:"suggestions",badge:sugCount}]:[]),
+  {label:"Settings",icon:"⚙",pg:"settings"},
+].map(n=><button key={n.pg} onClick={()=>onNav(n.pg)} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:10,padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:10,fontSize:14,fontWeight:500,color:t.text2}}><span style={{fontSize:18}}>{n.icon}</span>{n.label}{n.badge?<span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:18,height:18,padding:"0 5px",borderRadius:9,fontSize:11,fontWeight:700,background:t.accent,color:t.bg,marginLeft:"auto"}}>{n.badge}</span>:null}</button>)}
 </div>
 </div>}

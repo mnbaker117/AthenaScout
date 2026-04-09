@@ -2,7 +2,9 @@ name: Build and Publish Docker Image
 
 on:
   push:
-    branches: [main]
+    # `main` publishes :latest plus semver tags from any v* tag.
+    # `athena-dev` publishes :athena-dev for pre-merge smoke testing.
+    branches: [main, athena-dev]
     tags: ['v*']
   workflow_dispatch:
 

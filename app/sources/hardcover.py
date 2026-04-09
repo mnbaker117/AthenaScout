@@ -579,6 +579,16 @@ class HardcoverSource(BaseSource):
                 on_book = getattr(self, '_on_book', None)
                 if on_book:
                     on_book(book.get("title", ""))
+                # Bump the new-candidate counter alongside the
+                # title display. Hardcover has no slow per-book fetch
+                # phase so this fires in a tight burst at merge time
+                # rather than smoothly during a network loop, but
+                # the count still arrives at the correct value via
+                # the on_progress(total) sync after the source
+                # completes regardless.
+                on_new_candidate = getattr(self, '_on_new_candidate', None)
+                if on_new_candidate:
+                    on_new_candidate()
 
                 edition = book.get("editions", [{}])[0] if book.get("editions") else {}
                 cover = None

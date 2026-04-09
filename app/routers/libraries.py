@@ -163,8 +163,19 @@ async def validate_library_path(body: dict = Body(...)):
         Py 3.12+ made Path.exists() propagate permission errors. Since
         this endpoint runs under the non-root container user, unreadable
         subdirs must not crash the whole validate/rescan flow.
+
+        Note on the path-injection suppression below: this helper is
+        called from within the validate-path endpoint, which is the
+        intentional filesystem browser. The path argument is the same
+        admin-supplied value that the top of the function already
+        validates and that we already documented in SECURITY.md as a
+        deliberate design choice. CodeQL re-flags it on every fresh
+        data-flow path, hence the inline suppression here in addition
+        to the one further up.
         """
         try:
+            # codeql[py/path-injection] -- See the docstring above and
+            # SECURITY.md "validate-path endpoint" exception.
             return pth.exists()
         except (PermissionError, OSError):
             return False
@@ -174,8 +185,16 @@ async def validate_library_path(body: dict = Body(...)):
         root = Path(path)
         try:
             children = sorted(root.iterdir())
-        except (PermissionError, OSError) as e:
-            return {"valid": False, "error": f"Cannot list directory ({e})"}
+        except (PermissionError, OSError):
+            # Log the full exception server-side (admin can grep
+            # container logs); return a generic message to the user
+            # so we don't leak filesystem-level error details — same
+            # pattern as the MAM handlers in app/sources/mam.py.
+            logger.exception(f"validate-path: cannot list directory at {path!r}")
+            return {
+                "valid": False,
+                "error": "Cannot list directory (permission denied or unreadable)",
+            }
         for child in children:
             # Skip hidden directories — .dbus, .cache, .Trash, etc are
             # never real libraries and are often unreadable as uid 1000.
