@@ -545,6 +545,15 @@ class GoodreadsSource(BaseSource):
                 on_book = getattr(self, '_on_book', None)
                 if on_book:
                     on_book(rb["title"])
+                # And bump the new-candidate counter so the
+                # `new_books` count climbs in real time during the
+                # rate-limited fetch instead of waiting for merge.
+                # Only fired here on the DETAIL fetch path (NOT the
+                # URL-backfill path above), so already-known books
+                # don't inflate the count.
+                on_new_candidate = getattr(self, '_on_new_candidate', None)
+                if on_new_candidate:
+                    on_new_candidate()
 
                 details = await self._get_book_details(rb["book_id"], rb["title"])
                 logger.debug(f"    PAGE: '{rb['title']}' → lang={details.get('language')}, set={details.get('is_set')}, trans={details.get('is_translation')}, series={details.get('series_name')}, date={details.get('pub_date') or details.get('expected_date')}")

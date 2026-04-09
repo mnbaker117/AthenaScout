@@ -28,7 +28,7 @@ Three things to know before reading:
      is created. This prevents orphaned series rows from leaking into
      the DB during library-only scans.
 """
-import asyncio, time, re, logging, json
+import time, re, logging, json
 from difflib import SequenceMatcher
 from app.config import load_settings
 from app.database import get_db
@@ -1234,27 +1234,39 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     hardcover._on_book = _on_book
     kobo._on_book = _on_book
 
-    # Per-book new-book counter. Fired by `_merge_result` from inside
-    # its INSERT branches, once per book inserted, while a source is
-    # still mid-scan. The closure tracks the running per-author total
-    # that lookup_author manages outside of any single source's
-    # contribution, so each callback reports the live cumulative.
+    # Per-book new-candidate counter. Fired by each source from inside
+    # its slow DETAIL-fetch loop — same call sites as `_on_book` but
+    # only on the paths that produce a *new* candidate (the URL-
+    # backfill paths for already-known books deliberately don't fire
+    # this).
     #
-    # `running_in_source` resets at the start of each source so the
-    # `total + running_in_source` arithmetic stays correct: `total`
-    # holds the post-completion sum of all PRIOR sources and gets
-    # bumped by `n` after each source completes.
-    running_in_source = [0]
-    def _on_new_book():
-        running_in_source[0] += 1
+    # This is what makes the new_books count climb in real time during
+    # the rate-limited fetch phase instead of bursting at the source-
+    # completion boundary. The count is an estimate during the scan —
+    # some candidates get filtered/deduped at merge time — and gets
+    # synced to the accurate post-merge total via the on_progress(total)
+    # call after each source finishes. That sync may visibly correct
+    # the count slightly downward if any candidates got filtered, but
+    # the per-second tick in the widget feels right and the final
+    # number always lands at the accurate value.
+    visible = [0]
+    def _on_new_candidate():
+        visible[0] += 1
         if on_progress:
-            on_progress(total + running_in_source[0])
+            on_progress(visible[0])
+    goodreads._on_new_candidate = _on_new_candidate
+    hardcover._on_new_candidate = _on_new_candidate
+    kobo._on_new_candidate = _on_new_candidate
 
     # 1. Goodreads (PRIMARY)
     if settings.get("goodreads_enabled", True):
-        running_in_source[0] = 0
-        n = await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=_on_new_book)
+        n = await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
         total += n
+        # Sync the visible count to the accurate post-merge total.
+        # If candidates over-counted (filters/dedupe at merge time
+        # discarded some), this corrects downward. If under-counted
+        # (a source path fires no candidates), it catches up.
+        visible[0] = total
         if on_progress:
             on_progress(total)
 
@@ -1263,17 +1275,17 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         hardcover.update_api_key(settings["hardcover_api_key"])
         hardcover._owned_titles = our_titles
         hardcover._owned_series_names = our_series_names
-        running_in_source[0] = 0
-        n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=_on_new_book)
+        n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
         total += n
+        visible[0] = total
         if on_progress:
             on_progress(total)
 
     # 3. Kobo
     if settings.get("kobo_enabled", True):
-        running_in_source[0] = 0
-        n = await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=_on_new_book)
+        n = await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
         total += n
+        visible[0] = total
         if on_progress:
             on_progress(total)
 

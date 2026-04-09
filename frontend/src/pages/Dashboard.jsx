@@ -136,8 +136,22 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 
 </div>
 
-{/* Quick nav */}
+{/* Quick nav — order matches the top navbar. MAM is gated on the
+    feature being enabled in /api/stats; Suggestions is gated on
+    there being something to review (matching the top-nav visibility
+    rule). The top-nav badge is intentionally NOT mirrored here —
+    on the dashboard quick-nav grid the badge would overflow the
+    button on large counts and crowd into the next cell. The
+    appearance of the Suggestions button at all is enough signal. */}
 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:10}}>
-{[{label:"Library",icon:"📖",pg:"library"},{label:"Authors",icon:"◉",pg:"authors"},{label:"Missing",icon:"◌",pg:"missing"},{label:"Upcoming",icon:"📅",pg:"upcoming"},{label:"Settings",icon:"⚙",pg:"settings"}].map(n=><button key={n.pg} onClick={()=>onNav(n.pg)} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:10,padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:10,fontSize:14,fontWeight:500,color:t.text2}}><span style={{fontSize:18}}>{n.icon}</span>{n.label}</button>)}
+{[
+  {label:"Library",icon:"📖",pg:"library"},
+  {label:"Authors",icon:"◉",pg:"authors"},
+  {label:"Missing",icon:"◌",pg:"missing"},
+  {label:"Upcoming",icon:"📅",pg:"upcoming"},
+  ...(d.mam_enabled?[{label:"MAM",icon:"🔍",pg:"mam"}]:[]),
+  ...(sugCount>0?[{label:"Suggestions",icon:"💡",pg:"suggestions"}]:[]),
+  {label:"Settings",icon:"⚙",pg:"settings"},
+].map(n=><button key={n.pg} onClick={()=>onNav(n.pg)} style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:10,padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:10,fontSize:14,fontWeight:500,color:t.text2}}><span style={{fontSize:18}}>{n.icon}</span>{n.label}</button>)}
 </div>
 </div>}

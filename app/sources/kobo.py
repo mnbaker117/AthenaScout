@@ -523,6 +523,12 @@ class KoboSource(BaseSource):
                 on_book = getattr(self, '_on_book', None)
                 if on_book:
                     on_book(rb["title"])
+                # Bump the new-candidate counter so the new_books
+                # count climbs during the slow fetch (NOT on the URL-
+                # backfill path above, which would over-count).
+                on_new_candidate = getattr(self, '_on_new_candidate', None)
+                if on_new_candidate:
+                    on_new_candidate()
 
                 # Unknown book — visit the detail page for full metadata
                 details = await self._get_book_details(rb["kobo_url"])
