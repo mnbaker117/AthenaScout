@@ -9,7 +9,7 @@ missing from both your library AND MAM.
 ## Requirements
 
 - An active MyAnonamouse account
-- A current MAM session token (the `mam_id` cookie from your browser)
+- A current MAM session token (the `mam_id` or `mbsc` cookie that you have created in Preferences -> Security)
 
 If you don't have a MAM account, skip this doc — AthenaScout works
 fine on Goodreads + Hardcover + Kobo alone.
@@ -19,11 +19,11 @@ fine on Goodreads + Hardcover + Kobo alone.
 ## Getting your session token
 
 1. Log in to MyAnonamouse in your browser.
-2. Open developer tools (`F12`).
-3. Go to **Application** (Chrome) or **Storage** (Firefox) →
-   **Cookies** → `https://www.myanonamouse.net`.
-4. Find the cookie named `mam_id`.
-5. Copy the entire value. It's a long string.
+2. Go to Sessions / Create session settings (`Profile -> Preferences -> Security`).
+3. Create a session (IP or ASN locked) and set `Allow Session to set Dynamic Seedbox` to `No`.
+4. Give session a label or note for its usage (Optional)
+5. Once created, Click the `View ASN/Ip address locked session cookie` button.
+6. Copy the entire value. It's a long string.
 
 > 🔐 **Treat this token like a password.** It grants full account
 > access. AthenaScout stores it in `settings.json` inside your data
@@ -49,7 +49,7 @@ fine on Goodreads + Hardcover + Kobo alone.
 
 If validation fails, the most common cause is a stale token. Tokens
 rotate when you log in from a new IP or after a long time. Re-grab
-the cookie from your browser and try again.
+the session cookie from your MAM Security settings and try again.
 
 ---
 
@@ -193,7 +193,7 @@ right-but-single-format match.
 ## Troubleshooting
 
 **Validation fails with an authentication error.**
-Your token is stale. Grab a fresh `mam_id` from your browser cookies
+Your token is stale. Grab a fresh `mam_id` from your MAM Security settings
 and re-paste.
 
 **Validation succeeds but scans return zero results for everything.**
@@ -219,7 +219,7 @@ token banned.
 **Settings says my session expired.**
 The scheduler runs a daily background validation against your token.
 If it fails, the UI surfaces a warning banner and pauses scheduled
-scans until you re-validate. Grab a fresh cookie, re-paste, click
+scans until you re-validate. Grab a fresh cookie from Security settings, re-paste, click
 Validate, and the warning clears.
 
 ---

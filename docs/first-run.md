@@ -120,7 +120,7 @@ If you have multiple libraries, the switcher is in the top-left:
 
 Go to **Settings → Sources**.
 
-![Settings → Sources page](images/settings-sources.png)
+![Settings → Sources page](images/settings-sources-2.png)
 
 You'll see four metadata sources, each with its own enable toggle and
 rate-limit setting:
