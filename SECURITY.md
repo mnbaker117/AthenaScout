@@ -5,7 +5,8 @@
 AthenaScout is designed for **single-administrator self-hosted deployment**.
 The admin is trusted by definition — anyone with access to the AthenaScout
 admin account is assumed to also have legitimate access to the underlying
-Calibre library and the host system.
+library backend (Calibre's `metadata.db` today; the `LibraryApp` interface
+allows additional backends in the future) and the host system.
 
 The application authenticates incoming requests against a single admin
 account (configured during first-run setup). All API routes except a small
@@ -141,14 +142,14 @@ transparency and may be addressed in future versions.
   SQLite. This is intentional — automated password recovery flows are
   a common vulnerability surface and unnecessary for a single-admin
   self-hosted app.
-- **No 2FA / TOTP.** Out of scope for v2.0; may be added in a future
-  release.
+- **No 2FA / TOTP.** Out of scope for the initial release; may be
+  added later.
 - **No audit log of admin actions.** Login events (success and failure)
   are written to the application logs, but there's no separate audit
   trail of "what scans the admin triggered" or "what books they edited".
 - **The `/api/libraries/validate-path` endpoint is intentionally a
   filesystem browser.** It allows the authenticated admin to navigate
-  their own filesystem to find Calibre libraries during library setup.
+  their own filesystem to find library directories during setup.
   CodeQL flags this as "uncontrolled data used in path expression".
   The endpoint is gated by auth, performs only read-only filesystem
   operations, and includes input sanitization that rejects null bytes
@@ -159,14 +160,13 @@ transparency and may be addressed in future versions.
 
 ## Supported Versions
 
-| Version | Supported          |
-|---------|--------------------|
-| v2.0.x  | ✓                  |
-| v1.x    | ✗ (please upgrade) |
-| < 1.0   | ✗                  |
+| Version | Supported |
+|---------|-----------|
+| v1.0.x  | ✓         |
+| < 1.0   | ✗         |
 
-Only the latest minor release of v2.0 receives security fixes. Older
-patch releases should upgrade.
+Only the latest patch release of the current minor receives security
+fixes. Older patch releases should upgrade.
 
 ## Reporting a Vulnerability
 

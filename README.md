@@ -39,13 +39,13 @@ collector, I think you'll like it. **Please enjoy.**
 
 | | Feature | Description |
 |---|---|---|
-| 📚 | **Calibre sync** | Reads your existing Calibre `metadata.db` directly. Read-only. No re-tagging, no parallel database to maintain. |
+| 📚 | **Library sync** | Reads your existing Calibre `metadata.db` directly. Read-only. No re-tagging, no parallel database to maintain. The sync layer is backend-agnostic — Calibre is the only supported backend today, but the [`LibraryApp`](app/library_apps/base.py) interface is built to grow. |
 | 🗂️ | **Multi-library** | Point at a parent directory and AthenaScout discovers every Calibre library inside it. Switch between them from the dashboard. |
 | 🔍 | **Three free sources** | Goodreads, Hardcover, and Kobo. Goodreads is the primary; the others fill gaps and act as a vote in the consensus pass. |
 | 🎯 | **Author + series scanning** | Find every book an author has written, every entry in a series, and exactly which ones you're missing. Library-only mode lets you enrich your existing books without adding discovery noise. |
 | 💡 | **Series-consensus suggestions** | When 2+ sources disagree with your stored series data, AthenaScout writes a *suggestion* you can review and Apply or Ignore — never a silent overwrite. |
 | 🎫 | **MAM integration (optional)** | Cross-reference missing books against MyAnonamouse with format priority, multi-language scanning, and scheduled background scans. Single-book, single-author, and full-library scan flavors. |
-| 📊 | **Live unified scan widget** | Calibre sync, source scans, and MAM scans all surface in a single Dashboard widget with per-book progress and per-row Stop buttons — even when multiple scans run concurrently. |
+| 📊 | **Live unified scan widget** | Library sync, source scans, and MAM scans all surface in a single Dashboard widget with per-book progress and per-row Stop buttons — even when multiple scans run concurrently. |
 | 🛠️ | **Database editor** | Built-in browser/editor for AthenaScout's SQLite databases. Inline cell editing with foreign-key resolution. |
 | 🔐 | **Single-admin auth** | bcrypt password hashing, signed session cookies, brute-force lockout. Designed for self-hosters with trusted network access. |
 | 🎨 | **Three themes** | Light, dark, and dim. Inline-styled React, no CSS framework bloat. |
@@ -58,7 +58,7 @@ collector, I think you'll like it. **Please enjoy.**
 
 <div align="center">
 
-![Theme showcase: light, dark, and dim](docs/images/themes-showcase.png)
+![Theme showcase: light, dark, and dim](docs/images/themes-showcase.gif)
 
 *Light · Dark · Dim — switchable from the dashboard at any time.*
 
@@ -119,7 +119,7 @@ for native binaries on Linux, Windows, and macOS.
 
 The database editor, the bulk import/export flows, the per-book and
 per-author MAM rescans, the series-consensus suggestion review queue,
-the source-priority merge layer with field-level Calibre protection
+the source-priority merge layer with field-level protection for your curated library data
 — there's a lot under the hood for the kind of person who wants their
 library to be exactly correct. Most of it is documented inline in the
 [first-run walkthrough](docs/first-run.md); the rest is discoverable

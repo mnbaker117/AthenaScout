@@ -164,7 +164,11 @@ async def trigger_author_lookup(aid: int):
 
     async def _runner():
         state._lookup_progress.update({"current_author": name})
-        new_books = await lookup_author(aid, name)
+        # Surface running new_books count after each source so the
+        # widget climbs in real time instead of jumping 0 → final.
+        def _on_source(running):
+            state._lookup_progress["new_books"] = int(running)
+        new_books = await lookup_author(aid, name, on_progress=_on_source)
         state._lookup_progress.update({
             "checked": 1, "new_books": int(new_books or 0),
         })
@@ -190,7 +194,9 @@ async def trigger_author_full_rescan(aid: int):
 
     async def _runner():
         state._lookup_progress.update({"current_author": name})
-        new_books = await lookup_author(aid, name, full_scan=True)
+        def _on_source(running):
+            state._lookup_progress["new_books"] = int(running)
+        new_books = await lookup_author(aid, name, full_scan=True, on_progress=_on_source)
         state._lookup_progress.update({
             "checked": 1, "new_books": int(new_books or 0),
         })
@@ -280,8 +286,14 @@ async def scan_authors_sources(data: dict = Body(...)):
         for row in rows:
             aid, name = row[0], row[1]
             state._lookup_progress.update({"current_author": name})
+            # Capture the cumulative-so-far baseline at closure-creation
+            # time. The default-arg trick freezes the value per author —
+            # without it, every closure would share the live `nonlocal_state["new"]`
+            # and the running widget count would be wrong.
+            def _on_source(running, _baseline=nonlocal_state["new"]):
+                state._lookup_progress["new_books"] = _baseline + int(running)
             try:
-                new_books = await lookup_author(aid, name)
+                new_books = await lookup_author(aid, name, on_progress=_on_source)
                 nonlocal_state["new"] += int(new_books or 0)
                 nonlocal_state["scanned"] += 1
             except asyncio.CancelledError:

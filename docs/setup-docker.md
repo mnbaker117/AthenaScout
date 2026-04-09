@@ -55,7 +55,7 @@ there's no reason not to enforce that at the mount level too.
 | `CALIBRE_PATH` | `/calibre` | Discovery root. AthenaScout walks this directory and registers every immediate subdirectory containing a `metadata.db` as a separate library. |
 | `CALIBRE_EXTRA_PATHS` | *(empty)* | Comma-separated list of **container-side** paths to additional Calibre libraries beyond the discovery root. See [Multiple libraries](#multiple-libraries) below. |
 | `WEBUI_PORT` | `8787` | Port the app listens on inside the container. |
-| `SYNC_INTERVAL_MINUTES` | `60` | How often the scheduler re-syncs Calibre. Set to `0` to disable scheduled sync (manual still works). |
+| `SYNC_INTERVAL_MINUTES` | `60` | How often the scheduler re-syncs the active library backend. Set to `0` to disable scheduled sync (manual still works). |
 | `LOOKUP_INTERVAL_MINUTES` | `4320` | How often the scheduler runs source scans across all authors. `4320` is 3 days. Set to `0` to disable. |
 | `MAM_SCAN_INTERVAL_MINUTES` | `360` | How often the scheduler runs MAM availability scans. Only used when MAM is enabled. |
 | `HARDCOVER_API_KEY` | *(empty)* | Optional. Seeds the Hardcover API key on first run. You can also paste it in Settings later. |
@@ -246,7 +246,7 @@ You'll be prompted to create a new admin account on next page load.
 **Calibre updates aren't showing up in AthenaScout.**
 AthenaScout uses mtime checking on `metadata.db` to skip libraries
 that haven't changed since the last sync. If a sync seems stale,
-trigger a manual one from the dashboard ("Sync Calibre" button) — it
+trigger a manual one from the dashboard ("Sync Library" button) — it
 ignores the mtime cache.
 
 **Permission denied on `/app/data` after upgrade.**

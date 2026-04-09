@@ -1165,7 +1165,16 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
         return 0
 
 
-async def lookup_author(author_id: int, author_name: str, full_scan: bool = False):
+async def lookup_author(author_id: int, author_name: str, full_scan: bool = False, on_progress=None):
+    """Scan all enabled sources for one author and merge results.
+
+    `on_progress`, if supplied, is called after each source completes
+    with the running per-author `new_books` total. Callers wire this
+    to update `state._lookup_progress["new_books"]` so the unified
+    Dashboard scan widget shows the count climbing in real time
+    instead of jumping from 0 to the final value at the end. Up to
+    three callbacks fire per author scan (one per enabled source).
+    """
     logger.info(f"{'Full re-scan' if full_scan else 'Looking up'} author: {author_name}")
     total = 0
     settings = load_settings()
@@ -1224,6 +1233,8 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     # 1. Goodreads (PRIMARY)
     if settings.get("goodreads_enabled", True):
         total += await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        if on_progress:
+            on_progress(total)
 
     # 2. Hardcover
     if settings.get("hardcover_api_key") and settings.get("hardcover_enabled", True):
@@ -1231,10 +1242,14 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         hardcover._owned_titles = our_titles
         hardcover._owned_series_names = our_series_names
         total += await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        if on_progress:
+            on_progress(total)
 
     # 3. Kobo
     if settings.get("kobo_enabled", True):
         total += await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        if on_progress:
+            on_progress(total)
 
     # Clear current_book so the next author's scan widget doesn't show
     # the last book of THIS author until its first DETAIL fetch lands.
@@ -1290,7 +1305,14 @@ async def run_full_lookup(on_progress=None):
         for a in authors:
             if on_progress:
                 on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": total})
-            try: total += await lookup_author(a["id"], a["name"]); checked += 1
+            # Per-source closure: forward the running per-author total
+            # added to the cumulative-so-far baseline so the widget
+            # climbs in real time within each author's scan, not just
+            # at author boundaries.
+            def _bump(running, _baseline=total):
+                if on_progress:
+                    on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": _baseline + int(running)})
+            try: total += await lookup_author(a["id"], a["name"], on_progress=_bump); checked += 1
             except Exception as e: logger.error(f"Error for {a['name']}: {e}")
         if on_progress:
             on_progress({"checked": checked, "total": len(authors), "current_author": "", "new_books": total})
@@ -1342,7 +1364,12 @@ async def run_full_rescan(on_progress=None):
         for a in authors:
             if on_progress:
                 on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": total})
-            try: total += await lookup_author(a["id"], a["name"], full_scan=True); checked += 1
+            # Per-source closure: see run_full_lookup above for the
+            # rationale (real-time widget climb within each author).
+            def _bump(running, _baseline=total):
+                if on_progress:
+                    on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": _baseline + int(running)})
+            try: total += await lookup_author(a["id"], a["name"], full_scan=True, on_progress=_bump); checked += 1
             except Exception as e: logger.error(f"Full re-scan error for {a['name']}: {e}")
         if on_progress:
             on_progress({"checked": checked, "total": len(authors), "current_author": "", "new_books": total})

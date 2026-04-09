@@ -28,7 +28,7 @@ glance what's still missing.
 | # | Filename | Used in | What to capture |
 |---|---|---|---|
 | 1 | `dashboard-hero.png` | `README.md` (top hero), `docs/first-run.md` | Main dashboard, dim or dark theme. Library stats, scan widget (running or recently complete), and the main nav all visible. This is the showcase image — make it look good. |
-| 2 | `themes-showcase.png` | `README.md` (themes section) | A single composite showing the dashboard in light, dark, and dim themes side-by-side. Three columns. Capture three separate shots and stitch them in any image editor. |
+| 2 | `themes-showcase.gif` | `README.md` (themes section) | An animated GIF cycling through the dashboard in the three themes (light, dark, dim). The README markdown reference uses the `.gif` extension; GitHub renders animated GIFs inline. |
 | 3 | `database-editor.png` | `README.md` (power-user section) | The DB editor with a table loaded — ideally something visually rich like the books table with multiple rows visible. Shows off the inline-edit and FK-resolution features. |
 | 4 | `first-run-wizard.png` | `docs/first-run.md` | The admin account creation form on first launch. Empty fields are fine. |
 | 5 | `dashboard-library-switcher.png` | `docs/first-run.md` | Dashboard with the library switcher dropdown **open**, showing at least two libraries. Skip if you only have one library — the markdown reference can be removed from `first-run.md` if so. |

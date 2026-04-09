@@ -104,7 +104,7 @@ The dashboard is the home base. From top to bottom:
   upcoming releases, and (when there are pending series suggestions)
   a Suggestions card.
 - **Unified scan widget** — empty when nothing has run, but as soon
-  as you kick off a Calibre sync, source scan, or MAM scan it shows a
+  as you kick off a library sync, source scan, or MAM scan it shows a
   live row per active scan with progress bar, current item, and a
   per-row Stop button. Multiple scans can show side-by-side.
 - **Quick actions** — buttons to trigger sync, source scans, and the
@@ -246,8 +246,9 @@ either).
 Open **Settings** and scroll to the **Scheduling** section. The three
 periodic jobs are:
 
-- **Calibre sync** — re-imports from `metadata.db`. Runs every 60
-  minutes by default. Set to `0` to disable.
+- **Library sync** — re-imports from your active library backend
+  (Calibre's `metadata.db` today). Runs every 60 minutes by default.
+  Set to `0` to disable.
 - **Author scans** — re-scans authors whose last lookup is older than
   the cache window. Default: every 3 days. The cache window itself is
   configurable on the same page.
@@ -257,7 +258,7 @@ periodic jobs are:
 
 Sensible starting cadences for most users:
 
-- Calibre sync: hourly
+- Library sync: hourly
 - Author rescans: every few days
 - MAM: every 4–6 hours if you use it heavily, daily otherwise
 

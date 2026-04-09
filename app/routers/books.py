@@ -318,8 +318,14 @@ async def scan_books_sources(data: dict = Body(...)):
         for row in rows:
             aid, name = row["id"], row["name"]
             state._lookup_progress.update({"current_author": name})
+            # Capture cumulative-so-far baseline at closure-creation
+            # time so the live new_books count climbs in real time
+            # instead of jumping per-author. See routers/authors.py for
+            # the same pattern with the same default-arg trick.
+            def _on_source(running, _baseline=nonlocal_state["new"]):
+                state._lookup_progress["new_books"] = _baseline + int(running)
             try:
-                new_books = await lookup_author(aid, name)
+                new_books = await lookup_author(aid, name, on_progress=_on_source)
                 nonlocal_state["new"] += int(new_books or 0)
                 nonlocal_state["scanned"] += 1
             except asyncio.CancelledError:

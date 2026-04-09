@@ -48,7 +48,7 @@ LABEL org.opencontainers.image.title="AthenaScout"
 LABEL org.opencontainers.image.description="A self-hosted book library completionist tracker"
 LABEL org.opencontainers.image.source="https://github.com/mnbaker117/AthenaScout"
 LABEL org.opencontainers.image.url="https://github.com/mnbaker117/AthenaScout"
-LABEL org.opencontainers.image.version="2.0.0"
+LABEL org.opencontainers.image.version="1.0.0"
 
 # ─── Library Discovery ───────────────────────────────────────
 # CALIBRE_PATH is the primary multi-library discovery root. AthenaScout
