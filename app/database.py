@@ -1,6 +1,12 @@
 """
 Database layer.
 
+Includes a startup-time idempotent cleanup pass
+(`_dedupe_intra_author_series`) that collapses any series rows under
+the same author whose names normalize to the same canonical form.
+This catches historical residue from before the lazy series upsert in
+lookup.py was in place, and stays inert on healthy databases.
+
 AthenaScout's per-library SQLite databases live under DATA_DIR with
 filenames like `athenascout_{slug}.db`. The active library is selected
 at runtime via `set_active_library` and read by `get_db` so every
@@ -21,6 +27,8 @@ The connection pragmas worth knowing about:
     holding the write lock.
 """
 import logging
+import re
+from collections import defaultdict
 import aiosqlite
 from app.config import APP_DB_PATH, DATA_DIR
 
@@ -385,6 +393,108 @@ async def get_db(slug=None) -> aiosqlite.Connection:
     return db
 
 
+# ─── Series-name normalization (mirrors lookup.py) ───────────
+# Used by `_dedupe_intra_author_series` to detect series rows under
+# the same author whose names canonicalize to the same form. Kept in
+# this module rather than imported from `lookup.py` so the cleanup pass
+# stays self-contained and the database layer has no import-cycle risk
+# against the source-scan stack.
+_RX_DEDUPE_LEAD = re.compile(r'^(the|a|an)\s+', re.IGNORECASE)
+_RX_DEDUPE_TAIL = re.compile(
+    r'\s+(saga|series|trilogy|cycle|chronicles|novels|books)\s*$',
+    re.IGNORECASE,
+)
+_RX_DEDUPE_PUNCT = re.compile(r'[^\w\s]')
+
+
+def _norm_series_name(name: str) -> str:
+    """Normalize a series name for canonical-form comparison.
+
+    Strips leading articles ("the", "a", "an"), trailing tail words
+    ("Saga", "Series", "Trilogy", "Cycle", "Chronicles", "Novels",
+    "Books"), all punctuation, and lowercases. Iterates the tail
+    strip up to 3 times to handle stacked suffixes like "The Mistborn
+    Saga Series". Returns "" for falsy input so callers can skip.
+    """
+    if not name:
+        return ""
+    n = name.strip()
+    n = _RX_DEDUPE_LEAD.sub('', n)
+    for _ in range(3):
+        nn = _RX_DEDUPE_TAIL.sub('', n)
+        if nn == n:
+            break
+        n = nn
+    n = _RX_DEDUPE_PUNCT.sub(' ', n).lower()
+    return re.sub(r'\s+', ' ', n).strip()
+
+
+async def _dedupe_intra_author_series(db) -> int:
+    """Collapse series rows under the same author whose names normalize equal.
+
+    Walks every (author_id, normalized_name) group with 2+ rows and:
+      1. Picks a canonical row — the one with the most linked books,
+         tiebreaking on lowest id (stable, deterministic).
+      2. Re-points every book in the duplicates at the canonical's id.
+      3. Deletes the now-orphan duplicate rows.
+
+    Inert on healthy databases (no groups means no work). Cross-author
+    name collisions are intentionally LEFT ALONE because they represent
+    different physical series that just happen to share a normalized
+    form (e.g., one author's "Remnant" vs another's "The Remnant
+    Chronicles"). Returns the number of duplicate rows that were
+    collapsed, for logging.
+    """
+    rows = await (await db.execute(
+        "SELECT id, name, author_id FROM series"
+    )).fetchall()
+    groups: dict[tuple[int, str], list[dict]] = defaultdict(list)
+    for r in rows:
+        norm = _norm_series_name(r["name"])
+        if not norm:
+            continue
+        groups[(r["author_id"], norm)].append(
+            {"id": r["id"], "name": r["name"]}
+        )
+
+    collapsed = 0
+    for (author_id, norm), members in groups.items():
+        if len(members) < 2:
+            continue
+        # Pick canonical: most-linked row wins, ties broken by lowest id.
+        # Counting via a per-row scalar query is fine here — this loop
+        # only fires for actual duplicate groups, which is a tiny set
+        # on a healthy database.
+        scored = []
+        for m in members:
+            cnt_row = await (await db.execute(
+                "SELECT COUNT(*) FROM books WHERE series_id = ?", (m["id"],)
+            )).fetchone()
+            scored.append((cnt_row[0] if cnt_row else 0, -m["id"], m))
+        scored.sort(reverse=True)
+        canonical = scored[0][2]
+        duplicates = [s[2] for s in scored[1:]]
+
+        for dup in duplicates:
+            await db.execute(
+                "UPDATE books SET series_id = ? WHERE series_id = ?",
+                (canonical["id"], dup["id"]),
+            )
+            await db.execute(
+                "DELETE FROM series WHERE id = ?", (dup["id"],)
+            )
+            collapsed += 1
+            _db_logger.info(
+                f"  Collapsed series '{dup['name']}' (id={dup['id']}) → "
+                f"'{canonical['name']}' (id={canonical['id']}) "
+                f"for author_id={author_id}"
+            )
+
+    if collapsed:
+        await db.commit()
+    return collapsed
+
+
 async def init_db(slug=None):
     """Initialize schema and run migrations for a library database.
 
@@ -459,5 +569,20 @@ async def init_db(slug=None):
                 if "already exists" not in str(e).lower():
                     _db_logger.warning(f"Index creation failed: {e}")
         await db.commit()
+
+        # ── Step 5: Idempotent intra-author series dedupe ──────────
+        # Collapses any historical residue where the same author has
+        # multiple series rows whose names normalize to the same form
+        # (e.g. "The Witcher" + "Witcher Series"). The lazy upsert in
+        # lookup.py prevents NEW drift on the source-scan path, and
+        # calibre_sync.py's normalized fallback prevents it on the
+        # Calibre-sync path, so this cleanup is purely a one-shot
+        # safety net for older installs. No-op when nothing matches.
+        collapsed = await _dedupe_intra_author_series(db)
+        if collapsed:
+            _db_logger.info(
+                f"Series dedupe collapsed {collapsed} duplicate "
+                f"intra-author rows"
+            )
     finally:
         await db.close()

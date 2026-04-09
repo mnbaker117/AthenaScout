@@ -843,6 +843,14 @@ async def _compute_series_suggestions(author_id, series_collector):
             cur_name, cur_idx, book_title = current_state[book_id]
             cur_norm_name = _norm_consensus_series(cur_name)
             cur_norm_idx = _norm_consensus_index(cur_idx)
+            # A series_index without a series_id is meaningless — coerce
+            # it to None so a standalone book doesn't spuriously diverge
+            # from a "standalone" consensus just because the index column
+            # carries a stale numeric value (Calibre and old imports
+            # sometimes leave series_index=1.0 on books whose series
+            # association has been removed).
+            if not cur_norm_name:
+                cur_norm_idx = None
 
             # Group sources by their normalized claim. Key is the
             # normalized tuple; value is a list of (source_name,

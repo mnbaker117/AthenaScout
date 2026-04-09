@@ -25,7 +25,7 @@ import logging
 import os
 from pathlib import Path
 from app.config import CALIBRE_DB_PATH, CALIBRE_LIBRARY_PATH
-from app.database import get_db
+from app.database import get_db, _norm_series_name
 from app import state
 
 logger = logging.getLogger("athenascout.calibre_sync")
@@ -262,7 +262,17 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                 if key in series_map:
                     continue
 
-                # Look for series globally (supports multi-author series)
+                # Lookup order matters:
+                #   1. Exact LOWER(name) match — fast path for the
+                #      common case where Calibre's series name already
+                #      matches what we have stored.
+                #   2. Normalized-name match scoped to THIS author —
+                #      catches drift like "The Witcher" vs "Witcher
+                #      Series" without the lazy upsert in lookup.py
+                #      having to clean up after us. Cross-author hits
+                #      are deliberately ignored: two authors who
+                #      happen to share a series name are different
+                #      physical series.
                 row = await (await db.execute(
                     "SELECT id FROM series WHERE LOWER(name) = LOWER(?)",
                     (s["name"],)
@@ -270,11 +280,25 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                 if row:
                     series_map[key] = row["id"]
                 else:
-                    cur = await db.execute(
-                        "INSERT INTO series (name, author_id) VALUES (?, ?)",
-                        (s["name"], our_author_id)
-                    )
-                    series_map[key] = cur.lastrowid
+                    target_norm = _norm_series_name(s["name"])
+                    matched = None
+                    if target_norm:
+                        author_series = await (await db.execute(
+                            "SELECT id, name FROM series WHERE author_id = ?",
+                            (our_author_id,),
+                        )).fetchall()
+                        for ar in author_series:
+                            if _norm_series_name(ar["name"]) == target_norm:
+                                matched = ar["id"]
+                                break
+                    if matched is not None:
+                        series_map[key] = matched
+                    else:
+                        cur = await db.execute(
+                            "INSERT INTO series (name, author_id) VALUES (?, ?)",
+                            (s["name"], our_author_id)
+                        )
+                        series_map[key] = cur.lastrowid
 
         # Pass 3: upsert books
         for i, book in enumerate(calibre_data["books"]):
