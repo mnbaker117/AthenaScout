@@ -365,7 +365,7 @@ async def _validate_author(author_name: str, our_titles: list[str], result: Auth
     return False
 
 
-async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None):
+async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None, on_new_book=None):
     """Merge an AuthorResult, filtering by language. In full_scan mode, updates metadata on existing books.
 
     When owned_only=True (the "Library-only source scan" setting), the
@@ -663,6 +663,8 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,series_id,series_index,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,{source_name}_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,?)",
                     (bk.title, author_id, sid_use, bk.series_index, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, bk.external_id))
                 existing.add(norm); new_books += 1
+                if on_new_book:
+                    on_new_book()
                 logger.debug(f"    NEW: '{bk.title}' → series '{sr.name}' from {source_name}")
 
         for bk in result.books:
@@ -697,6 +699,8 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,{source_name}_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,1,?)",
                 (bk.title, author_id, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, bk.external_id))
             existing.add(norm); new_books += 1
+            if on_new_book:
+                on_new_book()
             logger.debug(f"    NEW: '{bk.title}' → standalone from {source_name}")
 
         # ── Orphan series safety net ─────────────────────────────────
@@ -1080,7 +1084,7 @@ async def _compute_series_suggestions(author_id, series_collector):
         await db.close()
 
 
-async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None):
+async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None):
     """Try a single source with validation and detailed logging."""
     try:
         logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
@@ -1151,7 +1155,7 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
             logger.info(f"  [{source_name}] Author validation failed — skipping (likely wrong author)")
             return 0
 
-        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=on_new_book)
         parts = []
         if n > 0: parts.append(f"{n} new")
         if u > 0: parts.append(f"{u} updated")
@@ -1230,9 +1234,27 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     hardcover._on_book = _on_book
     kobo._on_book = _on_book
 
+    # Per-book new-book counter. Fired by `_merge_result` from inside
+    # its INSERT branches, once per book inserted, while a source is
+    # still mid-scan. The closure tracks the running per-author total
+    # that lookup_author manages outside of any single source's
+    # contribution, so each callback reports the live cumulative.
+    #
+    # `running_in_source` resets at the start of each source so the
+    # `total + running_in_source` arithmetic stays correct: `total`
+    # holds the post-completion sum of all PRIOR sources and gets
+    # bumped by `n` after each source completes.
+    running_in_source = [0]
+    def _on_new_book():
+        running_in_source[0] += 1
+        if on_progress:
+            on_progress(total + running_in_source[0])
+
     # 1. Goodreads (PRIMARY)
     if settings.get("goodreads_enabled", True):
-        total += await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        running_in_source[0] = 0
+        n = await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=_on_new_book)
+        total += n
         if on_progress:
             on_progress(total)
 
@@ -1241,13 +1263,17 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         hardcover.update_api_key(settings["hardcover_api_key"])
         hardcover._owned_titles = our_titles
         hardcover._owned_series_names = our_series_names
-        total += await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        running_in_source[0] = 0
+        n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=_on_new_book)
+        total += n
         if on_progress:
             on_progress(total)
 
     # 3. Kobo
     if settings.get("kobo_enabled", True):
-        total += await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        running_in_source[0] = 0
+        n = await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=_on_new_book)
+        total += n
         if on_progress:
             on_progress(total)
 
