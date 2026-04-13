@@ -71,7 +71,11 @@ _NEEDS_SCAN_STRICT_ALIASED = "b.mam_url IS NULL AND b.mam_status IS NULL AND b.i
 # so a threshold of 0.65 means moderate title + good author, or
 # excellent title + no author info.
 MATCH_MIN_SCORE = 0.20     # below this → junk, skip
-MATCH_PROMOTE_SCORE = 0.85 # at or above → promote to "found" (high bar since MAM is now #1 priority source)
+MATCH_PROMOTE_SCORE = 0.70 # at or above → promote to "found"
+# Note: MAM is #1 priority for merge conflicts (SOURCE_PRIORITY in
+# lookup.py), but the found threshold stays moderate because MAM
+# commonly has series bundles where individual title matching naturally
+# scores lower (e.g., "Kingdom's Dawn" vs "The Kingdom Series Bundle").
 
 # Legacy thresholds kept for the _word_match_pct fallback paths
 MATCH_MIN_PCT = 25.0

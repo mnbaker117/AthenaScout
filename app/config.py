@@ -106,7 +106,7 @@ DEFAULT_SETTINGS = {
     "rate_kobo": 3,
     "rate_amazon": 2,
     "rate_ibdb": 1,
-    "rate_google_books": 0.5,
+    "rate_google_books": 1.5,
     "verbose_logging": False,
     "author_scanning_enabled": True,
     # When True, source scans only enrich metadata on books the user already

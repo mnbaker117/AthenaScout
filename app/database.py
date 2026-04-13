@@ -377,9 +377,6 @@ MIGRATIONS = [
     # Pen-name linking: maps author aliases to a canonical author.
     # When two authors are linked, source scans for either one check
     # owned books under BOTH for dedup and series matching.
-    # IBDB + Google Books sources
-    "ALTER TABLE books ADD COLUMN ibdb_id TEXT",
-    "ALTER TABLE books ADD COLUMN google_books_id TEXT",
     """CREATE TABLE IF NOT EXISTS pen_name_links (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         canonical_author_id INTEGER NOT NULL,
@@ -389,6 +386,10 @@ MIGRATIONS = [
         FOREIGN KEY (alias_author_id) REFERENCES authors(id) ON DELETE CASCADE,
         UNIQUE(canonical_author_id, alias_author_id)
     )""",
+    # IBDB + Google Books sources — MUST be after pen_name_links (v40)
+    # since existing DBs already have user_version=40 from Sprint 3.
+    "ALTER TABLE books ADD COLUMN ibdb_id TEXT",
+    "ALTER TABLE books ADD COLUMN google_books_id TEXT",
 ]
 
 
