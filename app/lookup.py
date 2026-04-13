@@ -533,7 +533,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         }
 
         # Source priority: Goodreads can overwrite series from any other source
-        SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "amazon": 4, "ibdb": 5, "google_books": 5, "manual": 6, "import": 6, "calibre": 0}
+        SOURCE_PRIORITY = {"mam": 1, "goodreads": 2, "amazon": 3, "hardcover": 4, "kobo": 5, "ibdb": 6, "google_books": 6, "manual": 7, "import": 7, "calibre": 0}
         
         def _update_existing(matched_row, bk, series_id=None):
             """Build UPDATE for an existing book — URL merge always, series with priority, metadata in full_scan.
@@ -1158,7 +1158,7 @@ async def _compute_series_suggestions(author_id, series_collector):
 
         # Source priority for tiebreaking the consensus vote. Mirrors
         # SOURCE_PRIORITY in _merge_result; lower number = higher trust.
-        SOURCE_RANK = {"goodreads": 1, "hardcover": 2, "kobo": 3, "amazon": 4, "ibdb": 5, "google_books": 5}
+        SOURCE_RANK = {"mam": 1, "goodreads": 2, "amazon": 3, "hardcover": 4, "kobo": 5, "ibdb": 6, "google_books": 6}
 
         suggestions_created = 0
         suggestions_updated = 0

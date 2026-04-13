@@ -39,7 +39,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from app.scoring import title_similarity, author_overlap, score_match, split_authors
+from app.scoring import score_match
 
 logger = logging.getLogger("athenascout.mam")
 
@@ -71,7 +71,7 @@ _NEEDS_SCAN_STRICT_ALIASED = "b.mam_url IS NULL AND b.mam_status IS NULL AND b.i
 # so a threshold of 0.65 means moderate title + good author, or
 # excellent title + no author info.
 MATCH_MIN_SCORE = 0.20     # below this → junk, skip
-MATCH_PROMOTE_SCORE = 0.65 # at or above → promote to "found"
+MATCH_PROMOTE_SCORE = 0.85 # at or above → promote to "found" (high bar since MAM is now #1 priority source)
 
 # Legacy thresholds kept for the _word_match_pct fallback paths
 MATCH_MIN_PCT = 25.0
