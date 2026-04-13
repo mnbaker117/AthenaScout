@@ -28,8 +28,8 @@ function STog({on,onToggle,disabled}){const t=useTheme();return<div onClick={dis
 function SSection({title,defaultOpen=true,children}){const t=useTheme();const[open,setOpen]=useState(defaultOpen);return<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12}}><div onClick={()=>setOpen(!open)} style={{display:"flex",alignItems:"center",gap:8,padding:"14px 20px",cursor:"pointer",userSelect:"none"}}><span style={{transform:open?"rotate(0)":"rotate(-90deg)",transition:"transform 0.2s",fontSize:11,color:t.tg}}>▼</span><span style={{fontSize:13,fontWeight:600,color:t.text,textTransform:"uppercase",letterSpacing:"0.05em"}}>{title}</span></div>{open?<div style={{padding:"0 20px 16px"}}>{children}</div>:null}</div>}
 
 // ─── Settings ───────────────────────────────────────────────
-export default function SettingsPage(){const t=useTheme();const[s,setS]=useState(null);const[sv,setSv]=useState(false);const[msg,setMsg]=useState("");
-const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState(null);const[dragIdx,setDragIdx]=useState(null);const[testRun,setTestRun]=useState(false);const[testRes,setTestRes]=useState(null);const[newSrcPath,setNewSrcPath]=useState("");const[newSrcType,setNewSrcType]=useState("root");const[newSrcApp,setNewSrcApp]=useState("calibre");const[pathVld,setPathVld]=useState(false);const[pathRes,setPathRes]=useState(null);useEffect(()=>{api.get("/settings").then(setS).catch(console.error)},[]);
+export default function SettingsPage(){const t=useTheme();const[s,setS]=useState(null);const[sv,setSv]=useState(false);const[msg,setMsg]=useState("");const[buildSha,setBuildSha]=useState("");
+const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState(null);const[dragIdx,setDragIdx]=useState(null);const[testRun,setTestRun]=useState(false);const[testRes,setTestRes]=useState(null);const[newSrcPath,setNewSrcPath]=useState("");const[newSrcType,setNewSrcType]=useState("root");const[newSrcApp,setNewSrcApp]=useState("calibre");const[pathVld,setPathVld]=useState(false);const[pathRes,setPathRes]=useState(null);useEffect(()=>{api.get("/settings").then(setS).catch(console.error);api.get("/version").then(r=>setBuildSha(r.short_sha||"")).catch(()=>{})},[]);
 // Debounced author search for the "Clear scan data by author" field.
 // Waits 300ms after the last keystroke before firing, and skips the
 // search entirely for queries shorter than 2 characters. The naive
@@ -234,5 +234,7 @@ return<div style={{paddingBottom:40}}>
 </div>
 </div>
 </div>
+
+{buildSha?<div style={{marginTop:20,textAlign:"center",fontSize:11,color:t.tg}}>Build: <span style={{fontFamily:"monospace",letterSpacing:"0.05em"}}>{buildSha}</span></div>:null}
 
 </div>}

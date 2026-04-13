@@ -24,6 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+ARG GIT_SHA=unknown
+RUN echo "${GIT_SHA}" > /app/VERSION
+
 COPY app/ ./app/
 COPY --from=frontend-build /frontend/dist ./frontend/dist/
 

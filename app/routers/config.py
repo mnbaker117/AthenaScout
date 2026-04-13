@@ -93,6 +93,15 @@ async def health():
     return {"status": "ok", "time": time.time()}
 
 
+@router.get("/version")
+async def version_info():
+    """Return the build version (git SHA) baked into the Docker image."""
+    from pathlib import Path
+    version_file = Path("/app/VERSION")
+    sha = version_file.read_text().strip() if version_file.exists() else "dev"
+    return {"sha": sha, "short_sha": sha[:7] if len(sha) > 7 else sha}
+
+
 @router.get("/platform")
 async def platform_info():
     """Return platform/runtime info for the frontend.

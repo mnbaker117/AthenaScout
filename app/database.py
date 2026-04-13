@@ -607,6 +607,23 @@ async def init_db(slug=None):
             await db.execute(f"PRAGMA user_version = {target_version}")
             await db.commit()
 
+        # ── Step 3.5: Ensure columns exist (migration-order safety net) ──
+        # Some columns may have been skipped due to migration reordering
+        # bugs (Sprint 4 ibdb_id issue). This runs every startup and is
+        # idempotent — "duplicate column" is silently caught.
+        _ensure_columns = [
+            ("books", "ibdb_id", "TEXT"),
+            ("books", "google_books_id", "TEXT"),
+            ("books", "amazon_id", "TEXT"),
+            ("books", "is_omnibus", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+        for table, col, coltype in _ensure_columns:
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+                _db_logger.info(f"Added missing column {table}.{col}")
+            except aiosqlite.OperationalError:
+                pass  # already exists — expected
+
         # ── Step 4: Ensure indexes exist (cheap, idempotent) ───────
         # Indexes are always checked because adding a new index to SCHEMA
         # without a corresponding migration entry should still work.
