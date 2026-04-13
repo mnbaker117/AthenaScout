@@ -71,6 +71,7 @@ from app.routers import (
     db_editor,
     import_export,
     libraries,
+    logs,
     mam,
     scan,
     series,
@@ -111,6 +112,10 @@ async def lifespan(app: FastAPI):
     s = load_settings()
     apply_logging(s.get("verbose_logging", False))
     reload_sources()
+
+    # ─── Log buffer for the log viewer page ──────────────
+    from app.log_buffer import init_log_buffer
+    init_log_buffer(capacity=2000)
 
     # ─── MAM cookie rotation ─────────────────────────────
     # Seed the in-memory token from settings and register a callback
@@ -443,7 +448,7 @@ app.add_middleware(AuthMiddleware)
 
 # All API routes live in app/routers/ — see individual files for endpoints.
 # `auth` is registered first by convention since it gates everything else.
-for r in (auth, config, libraries, books, authors, series, suggestions, covers, scan, mam, db_editor, import_export):
+for r in (auth, config, libraries, books, authors, series, suggestions, covers, scan, mam, db_editor, import_export, logs):
     app.include_router(r.router)
 
 

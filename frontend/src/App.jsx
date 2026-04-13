@@ -14,6 +14,7 @@ import LoginPage from "./pages/LoginPage";
 import Dashboard from "./pages/Dashboard";
 import ImportExportPage from "./pages/ImportExportPage";
 import HiddenPage from "./pages/HiddenPage";
+import LogsPage from "./pages/LogsPage";
 import AuthorsPage from "./pages/AuthorsPage";
 import BooksPage from "./pages/BooksPage";
 import AuthorDetailPage from "./pages/AuthorDetailPage";
@@ -161,6 +162,7 @@ input,select{font-family:inherit}
 </div>
 <button onClick={nextT} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:"transparent",color:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title={`Theme: ${theme.name}`}>{tn==="dark"?Ic.moon:tn==="light"?Ic.sun:Ic.cloudsun}</button>
 <button onClick={()=>nav("importexport")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="importexport"?theme.bg4:"transparent",color:pg==="importexport"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Import / Export">{Ic.arrows}</button>
+<button onClick={()=>nav("logs")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="logs"?theme.bg4:"transparent",color:pg==="logs"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Logs">&#x1f4cb;</button>
 <button onClick={()=>nav("database")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="database"?theme.bg4:"transparent",color:pg==="database"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Database">{Ic.database}</button>
 <button onClick={()=>nav("settings")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="settings"?theme.bg4:"transparent",color:pg==="settings"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Settings">{Ic.gear}</button>
 </div></div></nav>
@@ -182,6 +184,7 @@ input,select{font-family:inherit}
 {pg==="importexport"&&<ImportExportPage/>}
 {pg==="mam"&&<MAMPage onNav={nav}/>}
 {pg==="suggestions"&&<SuggestionsPage onNav={nav}/>}
+{pg==="logs"&&<LogsPage/>}
 {pg==="database"&&<DatabasePage/>}
 {pg==="settings"&&<SettingsPage/>}
 </div></ErrorBoundary></main>
