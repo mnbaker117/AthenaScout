@@ -192,7 +192,7 @@ class AmazonSource(BaseSource):
             if not html:
                 break
 
-            page_asins = _extract_search_results(html)
+            page_asins = _extract_search_results(html, author_name)
             if not page_asins:
                 break
 
@@ -308,17 +308,27 @@ def _count_result_asins(html: str) -> int:
     return len(re.findall(r'data-asin="[A-Z0-9]{10}"', html))
 
 
-def _extract_search_results(html: str) -> list[tuple[str, str]]:
+def _extract_search_results(html: str, author_name: str = "") -> list[tuple[str, str]]:
     """Extract (asin, title) tuples from an Amazon search results page.
 
     Uses BeautifulSoup to parse the search result cards. Each card
-    has a data-asin attribute and a nested title span.
+    has a data-asin attribute and a nested title span. When author_name
+    is provided, filters out results where the card's author attribution
+    doesn't match (prevents false positives from Amazon returning books
+    by other authors in search results).
     """
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "lxml")
     results = []
     seen = set()
+    author_lower = author_name.lower().strip() if author_name else ""
+    # Split author name into parts for flexible matching:
+    # "William D. Arand" → ["william", "arand"] (skip initials/dots)
+    author_parts = [
+        p for p in re.sub(r'[^\w\s]', '', author_lower).split()
+        if len(p) > 2
+    ] if author_lower else []
 
     # Primary: data-asin cards in the main results container
     for card in soup.select("[data-asin]"):
@@ -337,6 +347,15 @@ def _extract_search_results(html: str) -> list[tuple[str, str]]:
 
         if not title:
             continue
+
+        # Author validation: check if the card mentions the target author.
+        # Amazon shows "by Author Name" in the card text below the title.
+        # Skip results where the author doesn't appear at all.
+        if author_parts:
+            card_text = card.get_text(" ", strip=True).lower()
+            if not all(part in card_text for part in author_parts):
+                logger.debug(f"    SKIP (wrong author): '{title}' — no '{author_name}' in card text")
+                continue
 
         seen.add(asin)
         results.append((asin, title))
