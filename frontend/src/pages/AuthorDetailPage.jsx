@@ -20,8 +20,18 @@ import { toast } from "../lib/toast";
 function IS({series,vm,onAction,onBookClick,collapsed,authorId}){const t=useTheme();const[ld,setLd]=useState(false);const[bks,setBks]=useState(null);const load=()=>{if(bks)return;setLd(true);api.get(`/series/${series.id}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
 const isMulti=!!series.multi_author;
 const header=isMulti?<span>{series.name} <span style={{fontSize:11,color:useTheme().cyant,fontWeight:600,textTransform:"none",background:useTheme().cyan+"22",padding:"2px 8px",borderRadius:4,marginLeft:4}}>shared series</span></span>:series.name;
-const countStr=isMulti?`${series.owned_count||0}/${series.author_book_count||0} · ${series.book_count||0} total`:`${series.owned_count||0}/${series.book_count||0}`;
-return<Section title={header} count={countStr} ownedCount={series.owned_count} totalCount={isMulti?series.author_book_count:series.book_count} defaultOpen={!collapsed}>{ld?<Load/>:bks?(vm==="list"?<BList books={bks} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>:<BGrid books={bks} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>):null}</Section>}
+// Separate regular books from omnibus entries for display
+const regular=bks?bks.filter(b=>!b.is_omnibus):null;
+const omnibus=bks?bks.filter(b=>b.is_omnibus):null;
+// Count excludes omnibus entries
+const regCount=regular?regular.length:(series.book_count||0);
+const ownCount=regular?regular.filter(b=>b.owned===1).length:(series.owned_count||0);
+const countStr=isMulti?`${ownCount}/${regCount} · ${series.book_count||0} total`:`${ownCount}/${regCount}`;
+return<Section title={header} count={countStr} ownedCount={ownCount} totalCount={regCount} defaultOpen={!collapsed}>{ld?<Load/>:bks?<>
+{vm==="list"?<BList books={regular} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>:<BGrid books={regular} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>}
+{omnibus&&omnibus.length>0?<><div style={{display:"flex",alignItems:"center",gap:8,margin:"12px 0 8px"}}><div style={{flex:1,height:1,background:t.borderL}}/><span style={{fontSize:10,fontWeight:600,color:t.tg,textTransform:"uppercase",letterSpacing:"0.06em",flexShrink:0}}>Omnibus / Collections</span><div style={{flex:1,height:1,background:t.borderL}}/></div>
+{vm==="list"?<BList books={omnibus} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>:<BGrid books={omnibus} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>}</>:null}
+</>:null}</Section>}
 
 // ─── Standalone Section ─────────────────────────────────────
 function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
