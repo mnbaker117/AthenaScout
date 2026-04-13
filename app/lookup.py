@@ -509,6 +509,16 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if isbn and len(isbn) >= 10:
                 rows_by_isbn[isbn] = r
 
+        # Series names for this author — used by the omnibus guard to
+        # distinguish "BookTitle: SeriesName" (omnibus) from
+        # "BookTitle: Subtitle" (dedup candidate).
+        author_series_rows = await (await db.execute(
+            "SELECT name FROM series WHERE author_id = ?", (author_id,)
+        )).fetchall()
+        author_series_norms = {
+            _normalize(r["name"]): r["name"] for r in author_series_rows if r["name"]
+        }
+
         # Source priority: Goodreads can overwrite series from any other source
         SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "amazon": 4, "manual": 5, "import": 5, "calibre": 0}
         
@@ -727,6 +737,29 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                         if _fuzzy_match(bk.title, r["title"]):
                             matched_row = r
                             break
+                # ── Omnibus guard: "BookTitle: SeriesName" detection ──
+                # If the fuzzy match found a candidate via colon-prefix
+                # (the title before ":" matches an existing book) AND the
+                # suffix after ":" matches a known series name for this
+                # author, this is an omnibus — not a dedup merge. Reject
+                # the match so it falls through to the INSERT path with
+                # is_omnibus=1. Example: "Otherlife Dreams: The Selfless
+                # Hero Trilogy" → prefix "Otherlife Dreams" matches owned
+                # book, suffix "The Selfless Hero Trilogy" matches series
+                # → omnibus, don't merge into the owned book.
+                if matched_row and ':' in bk.title:
+                    prefix_norm = _normalize(bk.title.split(':', 1)[0])
+                    suffix_norm = _normalize(bk.title.split(':', 1)[1])
+                    matched_norm = _normalize(matched_row["title"])
+                    if (prefix_norm == matched_norm and
+                            suffix_norm in author_series_norms):
+                        logger.debug(
+                            f"    OMNIBUS GUARD: '{bk.title}' — prefix matches "
+                            f"'{matched_row['title']}' but suffix matches series "
+                            f"'{author_series_norms[suffix_norm]}' → treating as "
+                            f"omnibus, not merge"
+                        )
+                        matched_row = None  # reject the merge
                 if matched_row:
                     # Lazy series upsert: only create the series row
                     # now that we know a real book is going to link to it.
@@ -757,7 +790,15 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 # Insert path: also needs the series row to exist.
                 sid_use = await _ensure_series()
                 initial_urls = json.dumps({source_name: bk.source_url}) if bk.source_url else "{}"
+                # Omnibus detection: regex patterns OR context-aware
+                # "BookTitle: SeriesName" pattern (the omnibus guard above
+                # rejected the merge for this reason).
                 omnibus = _is_omnibus(bk.title)
+                if not omnibus and ':' in bk.title:
+                    suffix_norm = _normalize(bk.title.split(':', 1)[1])
+                    prefix_norm = _normalize(bk.title.split(':', 1)[0])
+                    if suffix_norm in author_series_norms and prefix_norm in rows_by_norm:
+                        omnibus = True
                 s_idx = None if omnibus else bk.series_index
                 await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,series_id,series_index,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,is_omnibus,{source_name}_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?)",
                     (bk.title, author_id, sid_use, s_idx, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, 1 if omnibus else 0, bk.external_id))
