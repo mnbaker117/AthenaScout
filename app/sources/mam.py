@@ -825,6 +825,7 @@ def _evaluate_results(
     search_title: str,
     authors: str,
     lang_ids: Optional[list[int]] = None,
+    known_series: str = "",
 ) -> list[dict]:
     """
     Evaluate all MAM search results for a book. Returns a list of viable
@@ -832,7 +833,7 @@ def _evaluate_results(
 
     Each returned match dict:
       torrent_id, mam_title, formats, format_str, match_pct,
-      author_matched, search_link, raw
+      confidence, author_matched, seeders, my_snatched
     """
     if not lang_ids:
         lang_ids = [_ENGLISH_LANG_ID]
@@ -880,19 +881,28 @@ def _evaluate_results(
             logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — audio-only formats ({filetypes_raw.strip()})")
             continue
 
+        # Category-based audiobook rejection: MAM categories like
+        # "AudioBooks - Fantasy" vs "Ebooks - Fantasy".
+        category = str(item.get("category") or "").strip()
+        if category.lower().startswith("audiobook"):
+            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — audiobook category ({category})")
+            continue
+
         # ── Improved scoring via scoring.py ──
         # Extract MAM author names for overlap scoring
         mam_authors = _parse_author_info(item.get("author_info"))
 
         # Combined score: 70% title similarity + 30% author overlap
-        # Try both the full calibre title and the search title variant
+        # + series boost when known_series matches in the MAM title
         score_full = score_match(
             record_title=mam_title, record_authors=mam_authors,
             search_title=calibre_title, search_authors=authors,
+            known_series=known_series,
         )
         score_search = score_match(
             record_title=mam_title, record_authors=mam_authors,
             search_title=search_title, search_authors=authors,
+            known_series=known_series,
         )
         confidence = max(score_full, score_search)
 
@@ -939,6 +949,7 @@ async def check_book(
     format_priority: list[str] = None,
     delay: float = DEFAULT_DELAY,
     lang_ids: Optional[list[int]] = None,
+    series_name: str = "",
 ) -> dict:
     """
     Five-pass search cascade for a single book, with format preference scoring.
@@ -996,7 +1007,7 @@ async def check_book(
                     )
             except (ValueError, TypeError):
                 pass
-        matches = _evaluate_results(data, title, search_title, authors, lang_ids)
+        matches = _evaluate_results(data, title, search_title, authors, lang_ids, known_series=series_name)
 
         if not matches:
             return False
@@ -1161,17 +1172,21 @@ async def scan_books_batch(
                     "errors": 0, "error": None}
         placeholders = ",".join("?" * len(book_ids))
         rows = await db.execute_fetchall(f"""
-            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased
+            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased,
+                   s.name as series_name
             FROM books b
             JOIN authors a ON b.author_id = a.id
+            LEFT JOIN series s ON b.series_id = s.id
             WHERE b.id IN ({placeholders})
             ORDER BY b.owned DESC, b.id ASC
         """, tuple(book_ids))
     else:
         rows = await db.execute_fetchall(f"""
-            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased
+            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased,
+                   s.name as series_name
             FROM books b
             JOIN authors a ON b.author_id = a.id
+            LEFT JOIN series s ON b.series_id = s.id
             WHERE {_NEEDS_SCAN_BASIC_ALIASED}
             ORDER BY b.owned DESC, b.id ASC
             LIMIT ?
@@ -1188,6 +1203,7 @@ async def scan_books_batch(
 
     for i, row in enumerate(rows):
         book_id, book_title, author_name = row[0], row[1], row[2]
+        book_series = row[5] if len(row) > 5 else ""
 
         logger.debug(f"MAM [{i+1}/{len(rows)}] {book_title[:65]} — {author_name[:35]}")
 
@@ -1198,7 +1214,7 @@ async def scan_books_batch(
         if on_progress:
             on_progress(dict(stats))
 
-        check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids)
+        check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids, series_name=book_series or "")
         stats["scanned"] += 1
 
         # Write result to DB
