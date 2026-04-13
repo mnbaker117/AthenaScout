@@ -418,3 +418,77 @@ async def reset_all_source_scan_data():
         return {"status": "ok", "books_deleted": affected, "series_cleaned": cleaned}
     finally:
         await db.close()
+
+
+# ─── Pen-Name Linking ───────────────────────────────────────
+
+@router.get("/authors/{aid}/pen-names")
+async def get_pen_name_links(aid: int):
+    """Get all pen-name links for an author (both directions)."""
+    db = await get_db()
+    try:
+        rows = await (await db.execute(
+            "SELECT p.id, p.canonical_author_id, p.alias_author_id, "
+            "a1.name as canonical_name, a2.name as alias_name "
+            "FROM pen_name_links p "
+            "JOIN authors a1 ON p.canonical_author_id = a1.id "
+            "JOIN authors a2 ON p.alias_author_id = a2.id "
+            "WHERE p.canonical_author_id = ? OR p.alias_author_id = ?",
+            (aid, aid),
+        )).fetchall()
+        return {"links": [dict(r) for r in rows]}
+    finally:
+        await db.close()
+
+
+@router.post("/authors/link-pen-names")
+async def link_pen_names(data: dict = Body(...)):
+    """Link two authors as pen names of the same person.
+
+    The canonical_author_id is the 'primary' identity; alias_author_id
+    is the pen name. This is purely organizational — the canonical author
+    is preferred for display but both authors retain their own books.
+    """
+    canonical_id = data.get("canonical_author_id")
+    alias_id = data.get("alias_author_id")
+    if not canonical_id or not alias_id:
+        raise HTTPException(400, "Both canonical_author_id and alias_author_id required")
+    if canonical_id == alias_id:
+        raise HTTPException(400, "Cannot link an author to themselves")
+    db = await get_db()
+    try:
+        # Verify both authors exist
+        for aid in (canonical_id, alias_id):
+            row = await (await db.execute("SELECT id FROM authors WHERE id=?", (aid,))).fetchone()
+            if not row:
+                raise HTTPException(404, f"Author {aid} not found")
+        # Check for existing link (either direction)
+        existing = await (await db.execute(
+            "SELECT id FROM pen_name_links WHERE "
+            "(canonical_author_id=? AND alias_author_id=?) OR "
+            "(canonical_author_id=? AND alias_author_id=?)",
+            (canonical_id, alias_id, alias_id, canonical_id),
+        )).fetchone()
+        if existing:
+            return {"status": "already_linked", "link_id": existing["id"]}
+        cur = await db.execute(
+            "INSERT INTO pen_name_links (canonical_author_id, alias_author_id) VALUES (?, ?)",
+            (canonical_id, alias_id),
+        )
+        await db.commit()
+        logger.info(f"Linked pen names: author {canonical_id} ↔ {alias_id}")
+        return {"status": "ok", "link_id": cur.lastrowid}
+    finally:
+        await db.close()
+
+
+@router.delete("/authors/pen-name-link/{link_id}")
+async def unlink_pen_names(link_id: int):
+    """Remove a pen-name link."""
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM pen_name_links WHERE id=?", (link_id,))
+        await db.commit()
+        return {"status": "ok"}
+    finally:
+        await db.close()

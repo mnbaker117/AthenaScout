@@ -28,6 +28,11 @@ function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Sta
 
 // ─── Author Detail ──────────────────────────────────────────
 export default function AuthorDetailPage({authorId,onNav}){const t=useTheme();const[a,setA]=useState(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[mamRef,setMamRef]=useState(false);const[vm,setVm]=usePersist("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);const[mamOn,setMamOn]=useState(false);
+const[penLinks,setPenLinks]=useState([]);const[penQ,setPenQ]=useState("");const[penResults,setPenResults]=useState([]);const[penBusy,setPenBusy]=useState(false);
+useEffect(()=>{if(!authorId)return;api.get(`/authors/${authorId}/pen-names`).then(r=>setPenLinks(r.links||[])).catch(()=>{})},[authorId]);
+useEffect(()=>{if(penQ.length<2){setPenResults([]);return}const tm=setTimeout(()=>{api.get(`/authors?search=${encodeURIComponent(penQ)}`).then(r=>setPenResults((r.authors||[]).filter(x=>x.id!==parseInt(authorId)))).catch(()=>{})},300);return()=>clearTimeout(tm)},[penQ,authorId]);
+const linkPen=async(aliasId)=>{setPenBusy(true);try{await api.post("/authors/link-pen-names",{canonical_author_id:parseInt(authorId),alias_author_id:aliasId});const r=await api.get(`/authors/${authorId}/pen-names`);setPenLinks(r.links||[]);setPenQ("");setPenResults([]);toast.success("Pen name linked")}catch(e){toast.error(e.message||"Link failed")}setPenBusy(false)};
+const unlinkPen=async(linkId)=>{try{await api.del(`/authors/pen-name-link/${linkId}`);setPenLinks(penLinks.filter(l=>l.id!==linkId));toast.success("Pen name unlinked")}catch{}};
 useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
@@ -64,7 +69,15 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <Btn size="sm" onClick={()=>refresh(false)} disabled={ref} style={{height:34}}>{ref?<Spin/>:Ic.sync} Re-sync</Btn>
 <Btn size="sm" variant="ghost" onClick={()=>{if(confirm("Full Re-Scan visits every book page to refresh metadata. This may take a few minutes. Continue?"))refresh(true)}} disabled={ref} style={{height:34}}>{Ic.refresh} Full</Btn>
 {mamOn?<Btn size="sm" onClick={scanMam} disabled={mamRef} title="Scan all un-scanned books for this author against MAM" style={{height:34}}>{mamRef?<Spin/>:null} Scan MAM</Btn>:null}
+{penLinks.length===0?<Btn size="sm" variant="ghost" onClick={()=>setPenQ(" ")} title="Link this author to a pen name" style={{height:34}}>Pen Names</Btn>:null}
 </div></div></div>
+{/* ── Pen Names ── */}
+{(penLinks.length>0||penQ.length>0)?<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:12}}>
+<span style={{fontWeight:600,color:t.tg,textTransform:"uppercase",letterSpacing:"0.05em"}}>Pen Names</span>
+{penLinks.map(l=>{const other=l.canonical_author_id===parseInt(authorId)?{id:l.alias_author_id,name:l.alias_name}:{id:l.canonical_author_id,name:l.canonical_name};return<span key={l.id} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:4,background:t.purb,color:t.purt,border:`1px solid ${t.pur}33`}}><button onClick={()=>onNav("author",other.id)} style={{background:"none",border:"none",color:t.purt,cursor:"pointer",padding:0,fontSize:12,fontWeight:500}}>{other.name}</button><button onClick={()=>unlinkPen(l.id)} style={{background:"none",border:"none",color:t.tg,cursor:"pointer",padding:0,fontSize:13}}>×</button></span>})}
+<div style={{position:"relative"}}><input value={penQ} onChange={e=>setPenQ(e.target.value)} placeholder="Link pen name..." style={{padding:"4px 8px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:4,color:t.text2,fontSize:12,width:140}}/>
+{penResults.length>0?<div style={{position:"absolute",top:"100%",left:0,minWidth:200,background:t.bg2,border:`1px solid ${t.border}`,borderRadius:6,zIndex:10,boxShadow:"0 4px 12px rgba(0,0,0,0.3)",maxHeight:140,overflowY:"auto"}}>{penResults.map(r=><div key={r.id} onClick={()=>linkPen(r.id)} style={{padding:"6px 10px",cursor:"pointer",fontSize:12,color:t.text2,borderBottom:`1px solid ${t.borderL}`}}>{r.name} <span style={{color:t.tg}}>({r.total_books||0} books)</span></div>)}</div>:null}</div>
+</div>:null}
 {(a.series||[]).map(s=><IS key={`${s.id}_${rk}`} series={s} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol} authorId={authorId}/>)}
 {(a.standalone_books||[]).length>0?<SA books={a.standalone_books} vm={vm} onAction={onAction} onBookClick={toggleSb} collapsed={allCol}/>:null}
 {sb?<BookSidebar book={sb} closing={sbClosing} onClose={closeSb} onAction={onAction} onEdit={loadA}/>:null}

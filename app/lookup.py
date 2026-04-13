@@ -315,6 +315,28 @@ def _fuzzy_match(a: str, b: str) -> bool:
         if na in pb and _len_ratio_ok(len(na), len(pb)): return True
     if _strip_prefix_ok(pa) and _strip_prefix_ok(pb) and pa == pb: return True
 
+    # Strip-suffix path: handles "BookTitle: SeriesName" against bare
+    # "BookTitle". The strip-prefix path above handles the inverse
+    # layout; this catches the case where the book title IS the prefix
+    # and the subtitle is a series name or edition tag. Example:
+    # "Otherlife Dreams: The Selfless Hero Trilogy" → prefix "otherlife
+    # dreams" matches bare "Otherlife Dreams".
+    #
+    # Two-word minimum on the prefix to prevent "A: Novel" style
+    # single-word matches from false-linking.
+    def _colon_prefix(t: str) -> str:
+        if ':' not in t:
+            return ''
+        p = t.split(':', 1)[0]
+        return _normalize(p)
+
+    ca = _colon_prefix(a)
+    cb = _colon_prefix(b)
+    if ca and len(ca.split()) >= 2:
+        if ca == nb: return True
+    if cb and len(cb.split()) >= 2:
+        if cb == na: return True
+
     return False
 
 
@@ -464,7 +486,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         # current value to decide whether to overwrite.
         rows = await (await db.execute(
             "SELECT id, title, source_url, series_id, series_index, source, "
-            "pub_date, expected_date, description "
+            "pub_date, expected_date, description, isbn "
             "FROM books WHERE author_id = ?",
             (author_id,)
         )).fetchall()
@@ -478,6 +500,14 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         # linear loop stays as the fallback for substring and sequence-
         # matching cases the dict can't catch.
         rows_by_norm = {_normalize(r["title"]): r for r in rows}
+        # ISBN prefilter: ISBN → row for O(1) merge by ISBN. Strongest
+        # dedup signal — if a source's book has the same ISBN as an
+        # existing row, it's definitely the same book regardless of title.
+        rows_by_isbn = {}
+        for r in rows:
+            isbn = (r["isbn"] or "").strip().replace("-", "")
+            if isbn and len(isbn) >= 10:
+                rows_by_isbn[isbn] = r
 
         # Source priority: Goodreads can overwrite series from any other source
         SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "amazon": 4, "manual": 5, "import": 5, "calibre": 0}
@@ -686,6 +716,12 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 if exclude_audiobooks and _is_audiobook(bk.title): continue
                 norm = _normalize(bk.title)
                 matched_row = rows_by_norm.get(norm)
+                # ISBN merge: strongest dedup signal — same ISBN = same book
+                if matched_row is None and bk.isbn:
+                    clean_isbn = bk.isbn.strip().replace("-", "")
+                    if clean_isbn in rows_by_isbn:
+                        matched_row = rows_by_isbn[clean_isbn]
+                        logger.debug(f"    ISBN MERGE: '{bk.title}' → '{matched_row['title']}' (isbn={clean_isbn})")
                 if matched_row is None:
                     for r in rows:
                         if _fuzzy_match(bk.title, r["title"]):
@@ -738,6 +774,11 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if exclude_audiobooks and _is_audiobook(bk.title): continue
             norm = _normalize(bk.title)
             matched_row = rows_by_norm.get(norm)
+            if matched_row is None and bk.isbn:
+                clean_isbn = bk.isbn.strip().replace("-", "")
+                if clean_isbn in rows_by_isbn:
+                    matched_row = rows_by_isbn[clean_isbn]
+                    logger.debug(f"    ISBN MERGE: '{bk.title}' → '{matched_row['title']}' (isbn={clean_isbn})")
             if matched_row is None:
                 for r in rows:
                     if _fuzzy_match(bk.title, r["title"]):
@@ -1419,9 +1460,33 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
 
     db = await get_db()
     try:
-        rows = await (await db.execute("SELECT title FROM books WHERE author_id = ? AND owned = 1", (author_id,))).fetchall()
+        # ── Pen-name expansion: include linked authors' books for dedup ──
+        # If this author has pen-name links, owned titles and existing
+        # titles from the linked author(s) are included so dedup works
+        # across identities (e.g., William D. Arand ↔ Randi Darren).
+        linked_ids = [author_id]
+        pen_rows = await (await db.execute(
+            "SELECT canonical_author_id, alias_author_id FROM pen_name_links "
+            "WHERE canonical_author_id = ? OR alias_author_id = ?",
+            (author_id, author_id),
+        )).fetchall()
+        for pr in pen_rows:
+            for col in ("canonical_author_id", "alias_author_id"):
+                if pr[col] != author_id and pr[col] not in linked_ids:
+                    linked_ids.append(pr[col])
+        if len(linked_ids) > 1:
+            logger.info(f"  Pen-name expansion: {author_name} linked to {len(linked_ids)-1} other author(s)")
+
+        id_placeholders = ",".join("?" * len(linked_ids))
+        rows = await (await db.execute(
+            f"SELECT title FROM books WHERE author_id IN ({id_placeholders}) AND owned = 1",
+            linked_ids,
+        )).fetchall()
         our_titles = [r["title"] for r in rows]
-        all_rows = await (await db.execute("SELECT title FROM books WHERE author_id = ?", (author_id,))).fetchall()
+        all_rows = await (await db.execute(
+            f"SELECT title FROM books WHERE author_id IN ({id_placeholders})",
+            linked_ids,
+        )).fetchall()
         existing_titles = set()
         for r in all_rows:
             t = re.sub(r'[^\w\s]', '', r["title"].lower()).strip()
@@ -1432,10 +1497,10 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         # uses this to prefer matching series candidates over deeper
         # sub-series in its own taxonomy.
         series_rows = await (await db.execute(
-            "SELECT DISTINCT s.name FROM series s "
-            "JOIN books b ON b.series_id = s.id "
-            "WHERE b.author_id = ? AND b.owned = 1 AND s.name IS NOT NULL",
-            (author_id,)
+            f"SELECT DISTINCT s.name FROM series s "
+            f"JOIN books b ON b.series_id = s.id "
+            f"WHERE b.author_id IN ({id_placeholders}) AND b.owned = 1 AND s.name IS NOT NULL",
+            linked_ids,
         )).fetchall()
         our_series_names = [r["name"] for r in series_rows]
     finally:

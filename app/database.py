@@ -374,6 +374,18 @@ MIGRATIONS = [
     # Omnibus flag — marks compilations/box-sets that should display
     # separately from numbered series entries (don't shift numbering).
     "ALTER TABLE books ADD COLUMN is_omnibus INTEGER NOT NULL DEFAULT 0",
+    # Pen-name linking: maps author aliases to a canonical author.
+    # When two authors are linked, source scans for either one check
+    # owned books under BOTH for dedup and series matching.
+    """CREATE TABLE IF NOT EXISTS pen_name_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        canonical_author_id INTEGER NOT NULL,
+        alias_author_id INTEGER NOT NULL,
+        created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+        FOREIGN KEY (canonical_author_id) REFERENCES authors(id) ON DELETE CASCADE,
+        FOREIGN KEY (alias_author_id) REFERENCES authors(id) ON DELETE CASCADE,
+        UNIQUE(canonical_author_id, alias_author_id)
+    )""",
 ]
 
 

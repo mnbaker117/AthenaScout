@@ -169,8 +169,9 @@ async def update_book(bid: int, data: dict = Body(...)):
                 fields.extend(["mam_url=?", "mam_status=?", "mam_torrent_id=?"])
                 vals.extend([mam_url, "found", torrent_id])
             else:
+                # Explicitly cleared → mark as "not_found" (not just null)
                 fields.extend(["mam_url=?", "mam_status=?", "mam_torrent_id=?"])
-                vals.extend([None, None, None])
+                vals.extend([None, "not_found", None])
         if "is_unreleased" in data:
             fields.append("is_unreleased=?"); vals.append(1 if data["is_unreleased"] else 0)
         # Handle series assignment — find or create series by name
