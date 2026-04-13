@@ -1653,8 +1653,14 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
             on_progress(total)
 
     # 2. Hardcover
-    if settings.get("hardcover_api_key") and settings.get("hardcover_enabled", True):
-        hardcover.update_api_key(settings["hardcover_api_key"])
+    # Read API key from encrypted store (preferred) or settings (legacy)
+    try:
+        from app.secrets import get_secret as _get_secret
+        _hc_key = await _get_secret("hardcover_api_key") or settings.get("hardcover_api_key")
+    except Exception:
+        _hc_key = settings.get("hardcover_api_key")
+    if _hc_key and settings.get("hardcover_enabled", True):
+        hardcover.update_api_key(_hc_key)
         hardcover._owned_titles = our_titles
         hardcover._owned_series_names = our_series_names
         n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)

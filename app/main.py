@@ -114,21 +114,29 @@ async def lifespan(app: FastAPI):
     apply_logging(s.get("verbose_logging", False))
     reload_sources()
 
+    # ─── Encrypted credential store ─────────────────────
+    from app.secrets import init_secrets_table, migrate_from_settings
+    await init_secrets_table()
+    migrated = await migrate_from_settings()
+    if migrated:
+        s = load_settings()  # reload after migration blanked keys
+
     # ─── Log buffer for the log viewer page ──────────────
     from app.log_buffer import init_log_buffer
     init_log_buffer(capacity=2000)
 
     # ─── MAM cookie rotation ─────────────────────────────
-    # Seed the in-memory token from settings and register a callback
+    # Seed the in-memory token from the encrypted store (preferred)
+    # or settings.json (legacy fallback), and register a callback
     # for debounced persistence when MAM rotates the cookie.
-    if s.get("mam_session_id"):
-        mam_set_token(s["mam_session_id"])
+    from app.secrets import get_secret, set_secret
+    mam_token = await get_secret("mam_session_id") or s.get("mam_session_id")
+    if mam_token:
+        mam_set_token(mam_token)
 
         async def _persist_mam_token(new_token: str):
-            current = load_settings()
-            current["mam_session_id"] = new_token
-            save_settings(current)
-            logger.info(f"MAM cookie persisted to settings.json ({new_token[:8]}...)")
+            await set_secret("mam_session_id", new_token)
+            logger.info(f"MAM cookie persisted to encrypted store ({new_token[:8]}...)")
         mam_set_rotation_callback(_persist_mam_token)
 
     # ─── Auth database ────────────────────────────────────

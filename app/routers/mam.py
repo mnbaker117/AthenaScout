@@ -43,10 +43,29 @@ from app.sources.mam import (
     _resolve_mam_languages,
 )
 from app import state
+from app.sources.mam import get_current_token as mam_get_current_token
 
 logger = logging.getLogger("athenascout")
 
 router = APIRouter(prefix="/api/mam", tags=["mam"])
+
+
+async def _get_mam_token() -> str:
+    """Get the active MAM token from the best source.
+
+    Priority: in-memory (cookie rotation) → encrypted store → settings.json.
+    """
+    token = mam_get_current_token()
+    if token:
+        return token
+    try:
+        from app.secrets import get_secret
+        token = await get_secret("mam_session_id")
+        if token:
+            return token
+    except Exception:
+        pass
+    return load_settings().get("mam_session_id", "")
 
 
 @router.post("/validate")
