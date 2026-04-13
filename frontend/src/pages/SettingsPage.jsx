@@ -178,18 +178,7 @@ return<div style={{paddingBottom:40}}>
 
 </SSection>
 
-</div>
-
-</div>
-
-{/* ═══════════ FULL-WIDTH SECTIONS BELOW ═══════════
-    Destructive operations live here in their own visually distinct
-    sections so they don't get mixed with config toggles above. Two
-    sections: Data Management for the per-author and bulk wipes,
-    Danger Zone for the full-app reset. */}
-
-{/* ── DATA MANAGEMENT ── */}
-<div style={{marginTop:20}}>
+{/* ── DATA MANAGEMENT (in right column) ── */}
 <SSection title="Data Management" defaultOpen={false}>
 
 <div style={{padding:"4px 0 10px",fontSize:12,color:t.tg,fontStyle:"italic"}}>Per-author and bulk cleanup operations. The MAM Full Library Scan and Sources Full Re-Scan triggers live on the Dashboard under Heavy Tasks — this section is just for clearing existing data.</div>
@@ -223,9 +212,12 @@ return<div style={{paddingBottom:40}}>
 </SF>:null}
 
 </SSection>
+
 </div>
 
-{/* ── DANGER ZONE ── */}
+</div>
+
+{/* ── DANGER ZONE (full-width) ── */}
 <div style={{marginTop:20}}>
 <div style={{background:t.bg2,border:`1px solid ${t.red}44`,borderRadius:12}}>
 <div style={{display:"flex",alignItems:"center",gap:8,padding:"14px 20px",borderBottom:`1px solid ${t.red}22`}}>

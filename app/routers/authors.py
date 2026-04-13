@@ -318,9 +318,8 @@ async def scan_authors_sources(data: dict = Body(...)):
 async def scan_authors_mam(data: dict = Body(...)):
     """Run a MAM scan for every un-scanned book belonging to the given authors.
 
-    Mirrors mam_scan_single_author from app.routers.mam but for a list of
-    authors. Per-author state isn't tracked in state._mam_scan_progress
-    because this is a synchronous bulk action driven from the Select bar.
+    Runs as a background task with progress tracked in state._mam_scan_progress
+    so the Dashboard scan widget shows progress in real time.
     """
     from app.sources.mam import check_book as mam_check_book, _resolve_mam_languages
     from app import state
@@ -346,46 +345,70 @@ async def scan_authors_mam(data: dict = Body(...)):
             f"AND b.is_unreleased=0 AND b.hidden=0 ORDER BY a.sort_name, b.title",
             author_ids,
         )
-        if not book_rows:
-            return {"status": "complete", "message": "No un-scanned books for these authors",
-                    "scanned": 0, "found": 0, "possible": 0, "not_found": 0}
-
-        delay = s.get("rate_mam", 2)
-        format_priority = s.get("mam_format_priority")
-        token = s["mam_session_id"]
-        lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
-        stats = {"scanned": 0, "found": 0, "possible": 0, "not_found": 0, "errors": 0}
-
-        for row in book_rows:
-            bid, btitle, aname = row[0], row[1], row[2]
-            try:
-                check = await mam_check_book(token, btitle, aname, format_priority, delay, lang_ids=lang_ids)
-            except Exception as e:
-                logger.error(f"Bulk author MAM scan error on book {bid} ({btitle[:40]}): {e}")
-                stats["errors"] += 1
-                continue
-            await db.execute("""
-                UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
-                       mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
-                WHERE id=?
-            """, (
-                check["mam_url"], check["status"], check["mam_formats"],
-                check["mam_torrent_id"],
-                1 if check["mam_has_multiple"] else 0,
-                1 if check.get("mam_my_snatched") else 0,
-                bid,
-            ))
-            stats["scanned"] += 1
-            if check["status"] == "found":
-                stats["found"] += 1
-            elif check["status"] == "possible":
-                stats["possible"] += 1
-            elif check["status"] == "not_found":
-                stats["not_found"] += 1
-        await db.commit()
-        return {"status": "complete", "authors": len(author_ids), **stats}
     finally:
         await db.close()
+
+    if not book_rows:
+        return {"status": "complete", "message": "No un-scanned books for these authors",
+                "scanned": 0, "found": 0, "possible": 0, "not_found": 0}
+
+    total = len(book_rows)
+    delay = s.get("rate_mam", 2)
+    format_priority = s.get("mam_format_priority")
+    token = s["mam_session_id"]
+    lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
+
+    # Track progress via state so Dashboard widget renders
+    state._mam_scan_progress.update({
+        "running": True, "scanned": 0, "total": total,
+        "found": 0, "possible": 0, "not_found": 0, "errors": 0,
+        "status": "scanning", "type": "multi_author",
+        "current_book": "",
+    })
+
+    async def _do():
+        db2 = await get_db()
+        try:
+            for row in book_rows:
+                if not state._mam_scan_progress.get("running"):
+                    state._mam_scan_progress.update({"status": "cancelled"})
+                    break
+                bid, btitle, aname = row[0], row[1], row[2]
+                state._mam_scan_progress["current_book"] = btitle[:60]
+                try:
+                    check = await mam_check_book(token, btitle, aname, format_priority, delay, lang_ids=lang_ids)
+                except Exception as e:
+                    logger.error(f"Bulk author MAM scan error on book {bid} ({btitle[:40]}): {e}")
+                    state._mam_scan_progress["errors"] = state._mam_scan_progress.get("errors", 0) + 1
+                    continue
+                await db2.execute("""
+                    UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
+                           mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
+                    WHERE id=?
+                """, (
+                    check["mam_url"], check["status"], check["mam_formats"],
+                    check["mam_torrent_id"],
+                    1 if check["mam_has_multiple"] else 0,
+                    1 if check.get("mam_my_snatched") else 0,
+                    bid,
+                ))
+                state._mam_scan_progress["scanned"] = state._mam_scan_progress.get("scanned", 0) + 1
+                if check["status"] == "found":
+                    state._mam_scan_progress["found"] = state._mam_scan_progress.get("found", 0) + 1
+                elif check["status"] == "possible":
+                    state._mam_scan_progress["possible"] = state._mam_scan_progress.get("possible", 0) + 1
+                elif check["status"] == "not_found":
+                    state._mam_scan_progress["not_found"] = state._mam_scan_progress.get("not_found", 0) + 1
+            await db2.commit()
+            state._mam_scan_progress.update({"running": False, "status": "complete", "current_book": ""})
+        except Exception as e:
+            logger.error(f"Bulk author MAM scan error: {e}")
+            state._mam_scan_progress.update({"running": False, "status": f"error: {e}", "current_book": ""})
+        finally:
+            await db2.close()
+
+    state._mam_scan_task = asyncio.create_task(_do())
+    return {"status": "started", "total": total}
 
 
 @router.post("/sources/reset")
