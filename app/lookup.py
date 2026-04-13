@@ -382,7 +382,8 @@ _SET_PATTERNS = re.compile(
     r'\d+\s*books?\s+in\s+\d|complete\s+series|book\s+set|'
     r'series\s+set|hardcover\s+set|paperback\s+set|'
     r'volumes?\s+\d+\s*[-–]\s*\d+|'
-    r'\d+\s+books?\s+collection|roleplaying\s+game)\b'
+    r'\d+\s+books?\s+collection|roleplaying\s+game|'
+    r'\d+\s+set)\b'  # "(4 Set)", "(6 Set)" etc.
 )
 # Bound-edition / anthology detector. A title like "The Dragon's Path /
 # Leviathan Wakes" is two distinct books pressed into one publishing
@@ -406,6 +407,11 @@ def _is_book_set(title: str) -> bool:
     if _SET_PATTERNS.search(title):
         return True
     if _RX_ANTHOLOGY.search(title):
+        return True
+    # Semicolon-joined titles: "Book A; Book B; Book C" — almost always
+    # a multi-book bundle. Require 2+ semicolons to avoid false positives
+    # on titles that use a single semicolon as punctuation.
+    if title.count(';') >= 2:
         return True
     return False
 

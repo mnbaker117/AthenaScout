@@ -390,6 +390,11 @@ MIGRATIONS = [
     # since existing DBs already have user_version=40 from Sprint 3.
     "ALTER TABLE books ADD COLUMN ibdb_id TEXT",
     "ALTER TABLE books ADD COLUMN google_books_id TEXT",
+    # Repair: ensure ibdb_id exists on DBs that hit the reordering bug
+    # (Sprint 4 initially placed ibdb_id before pen_name_links, which
+    # caused it to be skipped on v40 DBs). Idempotent — "duplicate
+    # column" is caught by the migration error handler.
+    "ALTER TABLE books ADD COLUMN ibdb_id TEXT",
 ]
 
 

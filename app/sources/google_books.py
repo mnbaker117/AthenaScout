@@ -32,8 +32,17 @@ class GoogleBooksSource(BaseSource):
     }
     default_timeout = 15.0
 
-    def __init__(self, rate_limit: float = 0.5):
+    def __init__(self, rate_limit: float = 1.5):
         super().__init__(rate_limit=rate_limit)
+
+    async def _get(self, url: str, retries: int = 0, **kwargs):
+        """Override base _get with no retries for Google Books.
+
+        Google's free API has a daily quota (~1000 req). Retrying on 429
+        just burns the quota faster — better to fail fast and let the
+        enricher fall through to the next source.
+        """
+        return await super()._get(url, retries=0, **kwargs)
 
     async def search_author(self, author_name: str) -> Optional[AuthorResult]:
         """Search Google Books for an author."""
