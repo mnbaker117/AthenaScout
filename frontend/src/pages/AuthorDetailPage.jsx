@@ -59,7 +59,7 @@ const scanMam=async()=>{if(mamRef)return;setMamRef(true);try{const r=await api.p
 // Listen for scan completion (broadcast by the unified poller in
 // App-level Dashboard) and refresh this page's author data + book grid.
 useEffect(()=>{const onDone=()=>{loadA();setRk(k=>k+1);setRef(false);setMamRef(false)};window.addEventListener("athenascout:scan-completed",onDone);return()=>window.removeEventListener("athenascout:scan-completed",onDone)},[loadA]);
-const onAction=async(act,id)=>{if(act==="hide")await api.post(`/books/${id}/hide`);if(act==="dismiss")await api.post(`/books/${id}/dismiss`);if(act==="delete")await api.del(`/books/${id}`);loadA()};
+const onAction=async(act,id)=>{const scrollY=window.scrollY;if(act==="hide")await api.post(`/books/${id}/hide`);if(act==="dismiss")await api.post(`/books/${id}/dismiss`);if(act==="delete")await api.del(`/books/${id}`);await loadA();requestAnimationFrame(()=>window.scrollTo(0,scrollY))};
 if(ld)return<Load/>;if(!a)return<div style={{color:t.tf}}>Not found</div>;
 const saOwned=(a.standalone_books||[]).filter(b=>b.owned===1).length;const saTotal=(a.standalone_books||[]).length;const serOwned=(a.series||[]).reduce((n,s)=>n+(s.owned_count||0),0);const serTotal=(a.series||[]).reduce((n,s)=>n+(s.book_count||0),0);const oc=saOwned+serOwned;const total=saTotal+serTotal;
 return<div style={{display:"flex",flexDirection:"column",gap:24}}>

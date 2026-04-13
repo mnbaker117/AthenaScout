@@ -486,6 +486,75 @@ def _build_headers(token: str) -> dict:
 
 _client: Optional[httpx.AsyncClient] = None
 
+# ── Cookie auto-rotation state ──────────────────────────────
+# MAM rotates the mam_id session cookie on every response via Set-Cookie.
+# Clients that capture and reuse the new cookie get indefinite session
+# lifetime; clients that ignore it eventually expire (~30 days).
+#
+# The pattern: intercept Set-Cookie after every _do_get/_do_post, compare
+# to the in-memory token, and if different, update + fire a callback that
+# debounce-persists to settings.json.
+_current_token: Optional[str] = None
+_rotation_callback: Optional[Callable] = None
+_last_rotation_save: float = 0.0
+_MAM_ID_RX = re.compile(r"mam_id=([^;\s]+)")
+
+
+def set_current_token(token: str) -> None:
+    """Seed the in-memory token from settings at startup."""
+    global _current_token
+    _current_token = token
+
+
+def get_current_token() -> Optional[str]:
+    """Return the most recently rotated token."""
+    return _current_token
+
+
+def set_rotation_callback(callback: Callable) -> None:
+    """Register a callback for when the token rotates.
+
+    The callback receives the new token string and should persist it
+    to settings.json. Called inline after each response, so it should
+    be fast (the caller handles debouncing).
+    """
+    global _rotation_callback
+    _rotation_callback = callback
+
+
+def _extract_mam_id(response: httpx.Response) -> Optional[str]:
+    """Extract mam_id from a MAM response's Set-Cookie header."""
+    # Primary: httpx cookie jar (handles standard Set-Cookie parsing)
+    jar_val = response.cookies.get("mam_id")
+    if jar_val:
+        return jar_val
+    # Fallback: regex against raw Set-Cookie headers (handles edge cases
+    # where httpx doesn't parse the cookie due to missing attributes)
+    for val in response.headers.get_list("set-cookie"):
+        m = _MAM_ID_RX.search(val)
+        if m:
+            return m.group(1)
+    return None
+
+
+async def _handle_response_cookie(response: httpx.Response) -> None:
+    """Check response for a rotated mam_id and update state if changed."""
+    global _current_token, _last_rotation_save
+    new_token = _extract_mam_id(response)
+    if not new_token or new_token == _current_token:
+        return
+    old = (_current_token or "")[:8]
+    _current_token = new_token
+    logger.info(f"MAM cookie rotated: {old}...→ {new_token[:8]}...")
+    # Debounced persistence: only save if 60+ seconds since last save
+    now = time.time()
+    if _rotation_callback and (now - _last_rotation_save) >= 60:
+        _last_rotation_save = now
+        try:
+            await _rotation_callback(new_token)
+        except Exception as e:
+            logger.warning(f"Cookie rotation callback failed: {e}")
+
 
 def _get_client() -> httpx.AsyncClient:
     """Lazy-initialized module-level httpx.AsyncClient for connection reuse.
@@ -525,23 +594,30 @@ async def aclose_session() -> None:
 
 
 async def _do_get(url: str, token: str, timeout: int = 15) -> httpx.Response:
-    """Async GET to a MAM endpoint with standard headers."""
-    return await _get_client().get(
-        url, headers=_build_headers(token), timeout=timeout
+    """Async GET to a MAM endpoint with standard headers + cookie rotation."""
+    # Use the rotated token if available, fall back to explicit token
+    effective = _current_token or token
+    resp = await _get_client().get(
+        url, headers=_build_headers(effective), timeout=timeout
     )
+    await _handle_response_cookie(resp)
+    return resp
 
 
 async def _do_post(url: str, token: str, payload: str, timeout: int = 20) -> httpx.Response:
-    """Async POST to a MAM endpoint with standard headers.
+    """Async POST to a MAM endpoint with standard headers + cookie rotation.
 
     `payload` MUST be a pre-serialized JSON string. Sent via httpx
     `content=` so the body bytes go on the wire untouched. See the module
     header for why `data=<dict>` and `json=<dict>` both break the search
     API in subtle ways.
     """
-    return await _get_client().post(
-        url, headers=_build_headers(token), content=payload, timeout=timeout
+    effective = _current_token or token
+    resp = await _get_client().post(
+        url, headers=_build_headers(effective), content=payload, timeout=timeout
     )
+    await _handle_response_cookie(resp)
+    return resp
 
 
 async def register_ip(session_id: str, skip_ip_update: bool = True) -> dict:

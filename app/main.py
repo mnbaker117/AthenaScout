@@ -82,6 +82,8 @@ from app.sources.mam import (
     scan_books_batch as mam_scan_batch,
     validate_connection as mam_validate,
     _resolve_mam_languages,
+    set_current_token as mam_set_token,
+    set_rotation_callback as mam_set_rotation_callback,
 )
 from app import state
 
@@ -109,6 +111,19 @@ async def lifespan(app: FastAPI):
     s = load_settings()
     apply_logging(s.get("verbose_logging", False))
     reload_sources()
+
+    # ─── MAM cookie rotation ─────────────────────────────
+    # Seed the in-memory token from settings and register a callback
+    # for debounced persistence when MAM rotates the cookie.
+    if s.get("mam_session_id"):
+        mam_set_token(s["mam_session_id"])
+
+        async def _persist_mam_token(new_token: str):
+            current = load_settings()
+            current["mam_session_id"] = new_token
+            save_settings(current)
+            logger.info(f"MAM cookie persisted to settings.json ({new_token[:8]}...)")
+        mam_set_rotation_callback(_persist_mam_token)
 
     # ─── Auth database ────────────────────────────────────
     # The auth DB is global to the deployment (NOT per-library) so the
