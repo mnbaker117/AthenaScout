@@ -173,6 +173,34 @@ async def update_book(bid: int, data: dict = Body(...)):
                 vals.extend([None, None, None])
         if "is_unreleased" in data:
             fields.append("is_unreleased=?"); vals.append(1 if data["is_unreleased"] else 0)
+        # Handle series assignment — find or create series by name
+        if "series_name" in data:
+            series_name = (data["series_name"] or "").strip()
+            if series_name:
+                # Get the book's author_id for series scoping
+                book_row = await (await db.execute(
+                    "SELECT author_id FROM books WHERE id=?", (bid,)
+                )).fetchone()
+                if book_row:
+                    aid = book_row["author_id"]
+                    # Case-insensitive lookup for existing series
+                    srow = await (await db.execute(
+                        "SELECT id FROM series WHERE LOWER(name) = LOWER(?) AND author_id = ?",
+                        (series_name, aid),
+                    )).fetchone()
+                    if srow:
+                        sid = srow["id"]
+                    else:
+                        cur = await db.execute(
+                            "INSERT INTO series (name, author_id) VALUES (?, ?)",
+                            (series_name, aid),
+                        )
+                        sid = cur.lastrowid
+                        logger.info(f"Created new series '{series_name}' (id={sid}) for author_id={aid}")
+                    fields.append("series_id=?"); vals.append(sid)
+            else:
+                # Empty series name → remove from series (make standalone)
+                fields.append("series_id=?"); vals.append(None)
         if not fields:
             return {"status": "no changes"}
         vals.append(bid)

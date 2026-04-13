@@ -62,6 +62,23 @@ _MAX_SEARCH_PAGES = 2
 # Maximum detail page fetches per author scan
 _MAX_DETAIL_FETCHES = 25
 
+# Junk marketplace listing detection. Amazon search results include
+# third-party seller listings with garbled titles like:
+#   "[(Kingdom's Hope )] [Author: Chuck Black] [May-2006]"
+#   "By BLACK CHUCK - SIR KENDRICK..."
+#   "By Chuck Black - Kingdom's Edge (2006-05-16) [Paperback]"
+_RX_JUNK_TITLE = re.compile(
+    r'^\[?\(|'                    # starts with [( or (
+    r'^By\s+[A-Z].*\s+-\s+|'     # "By AUTHOR - Title" seller format
+    r'\[\s*(?:Paperback|Hardcover|Mass Market|Library Binding)\s*\]',  # format in brackets
+    re.IGNORECASE,
+)
+
+# Audiobook format indicators found in RPI cards or page text.
+# Amazon audiobook pages use "Listening Length" instead of page count
+# and show "Audible Audiobook" in the format area.
+_AUDIO_FORMAT_KEYWORDS = {"audible", "audiobook", "audio cd", "listening length"}
+
 
 class AmazonSource(BaseSource):
     """Amazon Kindle Store metadata source.
@@ -204,6 +221,11 @@ class AmazonSource(BaseSource):
         detail_fetches = 0
 
         for asin, search_title in all_asins:
+            # Skip junk marketplace listings before any processing
+            if search_title and _RX_JUNK_TITLE.search(search_title):
+                logger.debug(f"    SKIP (junk title): '{search_title}'")
+                continue
+
             norm_title = _quick_norm(search_title) if search_title else ""
 
             # URL-backfill optimization: if the book is already known,
@@ -371,6 +393,25 @@ def _parse_detail_page(html: str, asin: str) -> Optional[BookResult]:
             "value": val_el.get_text(strip=True) if val_el else "",
             "label": lab_el.get_text(strip=True) if lab_el else "",
         }
+
+    # ── Audiobook detection ──
+    # Check RPI cards and page text for audiobook format indicators.
+    # Amazon audiobook pages show "Audible Audiobook" in format areas
+    # and use "Listening Length" instead of page count.
+    rpi_text = " ".join(
+        f"{v.get('label', '')} {v.get('value', '')}" for v in rpi.values()
+    ).lower()
+    if any(kw in rpi_text for kw in _AUDIO_FORMAT_KEYWORDS):
+        logger.debug("amazon: skipping audiobook page for %s (%s)", asin, title[:60])
+        return None
+
+    # Also check the product subtitle / category breadcrumb area
+    subtitle_el = soup.select_one("#productSubtitle")
+    if subtitle_el:
+        subtitle = subtitle_el.get_text(strip=True).lower()
+        if any(kw in subtitle for kw in _AUDIO_FORMAT_KEYWORDS):
+            logger.debug("amazon: skipping audiobook (subtitle) for %s", asin)
+            return None
 
     # ── Series extraction (primary value of this source) ──
     series_name = None
