@@ -367,6 +367,13 @@ MIGRATIONS = [
     # snapshot. Tolerated by the migration loop's "duplicate column"
     # handler if it's already present.
     "ALTER TABLE mam_scan_log ADD COLUMN book_ids_snapshot TEXT",
+    # Amazon source — add amazon_id columns for author/series/book tracking
+    "ALTER TABLE authors ADD COLUMN amazon_id TEXT",
+    "ALTER TABLE series ADD COLUMN amazon_id TEXT",
+    "ALTER TABLE books ADD COLUMN amazon_id TEXT",
+    # Omnibus flag — marks compilations/box-sets that should display
+    # separately from numbered series entries (don't shift numbering).
+    "ALTER TABLE books ADD COLUMN is_omnibus INTEGER NOT NULL DEFAULT 0",
 ]
 
 

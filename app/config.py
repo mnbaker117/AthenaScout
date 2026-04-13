@@ -94,6 +94,7 @@ DEFAULT_SETTINGS = {
     "goodreads_enabled": True,
     "hardcover_enabled": True,
     "kobo_enabled": True,
+    "amazon_enabled": False,
     "theme": "dark",
     "languages": ["English"],
     "lookup_interval_days": 3,
@@ -101,6 +102,7 @@ DEFAULT_SETTINGS = {
     "rate_goodreads": 2,
     "rate_hardcover": 1,
     "rate_kobo": 3,
+    "rate_amazon": 2,
     "verbose_logging": False,
     "author_scanning_enabled": True,
     # When True, source scans only enrich metadata on books the user already

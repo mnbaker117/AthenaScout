@@ -47,8 +47,8 @@ return<div className={parentClosing?"sidebar-closing":"sidebar-panel"} style={{p
 <SBRow label="Source" value={book.owned?"Calibre":"Unowned"} color={book.owned?t.td:t.tg}/>
 {cwUrl&&book.owned&&book.calibre_id?<div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"}}>Calibre Web</span><a href={`${cwUrl.replace(/\/$/,"")}/book/${book.calibre_id}`} target="_blank" rel="noopener noreferrer" style={{fontSize:13,color:t.accent,textDecoration:"none",display:"flex",alignItems:"center",gap:4}}>Open in Calibre Web <span style={{fontSize:10}}>↗</span></a></div>:null}
 {(()=>{
-  const badgeColors={goodreads:{bg:"#553b1a",fg:"#e8c070",br:"#88642a"},hardcover:{bg:"#1a3355",fg:"#70a8e8",br:"#2a5588"},kobo:{bg:"#1a4533",fg:"#70e8a8",br:"#2a8855"},manual:{bg:t.bg4,fg:t.td,br:t.border}};
-  const order=["goodreads","hardcover","kobo"];
+  const badgeColors={goodreads:{bg:"#553b1a",fg:"#e8c070",br:"#88642a"},hardcover:{bg:"#1a3355",fg:"#70a8e8",br:"#2a5588"},kobo:{bg:"#1a4533",fg:"#70e8a8",br:"#2a8855"},amazon:{bg:"#3d2e1a",fg:"#f0a83c",br:"#7a5c2a"},manual:{bg:t.bg4,fg:t.td,br:t.border}};
+  const order=["goodreads","hardcover","kobo","amazon"];
   let urls={};try{urls=JSON.parse(book.source_url||"{}")}catch{if(book.source_url&&book.source_url.startsWith("http"))urls={[book.source||"unknown"]:book.source_url}}
   const entries=order.filter(k=>urls[k]).map(k=>({name:k,url:urls[k]}));
   if(entries.length===0)return null;
