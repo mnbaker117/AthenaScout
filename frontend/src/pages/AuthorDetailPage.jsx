@@ -69,8 +69,8 @@ return<div style={{display:"flex",flexDirection:"column",gap:24}}>
 <Btn size="sm" variant="ghost" onClick={()=>setAllCol(!allCol)} title={allCol?"Expand All":"Collapse All"} style={{height:34,width:34,padding:0,display:"inline-flex",alignItems:"center",justifyContent:"center"}}>{allCol?Ic.expand:Ic.collapse}</Btn>
 <VT mode={vm} setMode={setVm}/>
 <Btn size="sm" onClick={()=>refresh(false)} disabled={ref} style={{height:34}}>{ref?<Spin/>:Ic.sync} Re-sync</Btn>
-<Btn size="sm" variant="ghost" onClick={()=>{if(confirm("Full Re-Scan visits every book page to refresh metadata. This may take a few minutes. Continue?"))refresh(true)}} disabled={ref} style={{height:34}}>{Ic.refresh} Full</Btn>
-{mamOn?<Btn size="sm" onClick={scanMam} disabled={mamRef} title="Scan all un-scanned books for this author against MAM" style={{height:34}}>{mamRef?<Spin/>:null} Scan MAM</Btn>:null}
+<Btn size="sm" onClick={()=>{if(confirm("Full Re-Scan visits every book page to refresh metadata. This may take a few minutes. Continue?"))refresh(true)}} disabled={ref} style={{height:34,background:t.ylw+"22",color:t.ylwt,border:`1px solid ${t.ylw}44`}}>{ref?<Spin/>:Ic.refresh} Full</Btn>
+{mamOn?<Btn size="sm" onClick={scanMam} disabled={mamRef} title="Scan all un-scanned books for this author against MAM" style={{height:34,background:t.cyan+"22",color:t.cyant,border:`1px solid ${t.cyan}44`}}>{mamRef?<Spin/>:null} Scan MAM</Btn>:null}
 </div></div></div>
 {/* ── Pen Name Search (shown when user clicks "+ pen name") ── */}
 {penQ.length>0?<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:8,fontSize:12}}>
