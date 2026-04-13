@@ -447,7 +447,7 @@ async def _validate_author(author_name: str, our_titles: list[str], result: Auth
     return False
 
 
-async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None, on_new_book=None, exclude_audiobooks: bool = True):
+async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None, on_new_book=None, exclude_audiobooks: bool = True, linked_author_ids: list[int] = None):
     """Merge an AuthorResult, filtering by language. In full_scan mode, updates metadata on existing books.
 
     When owned_only=True (the "Library-only source scan" setting), the
@@ -484,11 +484,18 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         # what's currently stored without a second round-trip per book.
         # The smart-description and oldest-pub_date rules need to read the
         # current value to decide whether to overwrite.
+        # Load books for this author + any pen-name-linked authors.
+        # Linked author rows are included so fuzzy match can find them
+        # for dedup, but only the current author's rows get UPDATEd.
+        # Linked matches suppress the INSERT (the book already exists
+        # under the pen name).
+        all_author_ids = [author_id] + (linked_author_ids or [])
+        id_ph = ",".join("?" * len(all_author_ids))
         rows = await (await db.execute(
-            "SELECT id, title, source_url, series_id, series_index, source, "
-            "pub_date, expected_date, description, isbn "
-            "FROM books WHERE author_id = ?",
-            (author_id,)
+            f"SELECT id, title, source_url, series_id, series_index, source, "
+            f"pub_date, expected_date, description, isbn, author_id "
+            f"FROM books WHERE author_id IN ({id_ph})",
+            all_author_ids,
         )).fetchall()
         existing = {_normalize(r["title"]) for r in rows}
         # Build an O(1) prefilter: normalized-title → row. The book-merge
@@ -761,6 +768,17 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                         )
                         matched_row = None  # reject the merge
                 if matched_row:
+                    # ── Pen-name dedup: matched a linked author's book ──
+                    # Don't UPDATE the linked author's row (that's their
+                    # book), just suppress the INSERT so we don't create
+                    # a duplicate under this author.
+                    if matched_row["author_id"] != author_id:
+                        logger.debug(
+                            f"    PEN-NAME DEDUP: '{bk.title}' matches "
+                            f"'{matched_row['title']}' under linked author "
+                            f"(id={matched_row['author_id']}) — skipping"
+                        )
+                        continue
                     # Lazy series upsert: only create the series row
                     # now that we know a real book is going to link to it.
                     sid_use = await _ensure_series()
@@ -826,6 +844,14 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                         matched_row = r
                         break
             if matched_row:
+                # Pen-name dedup for standalone books
+                if matched_row["author_id"] != author_id:
+                    logger.debug(
+                        f"    PEN-NAME DEDUP: '{bk.title}' matches "
+                        f"'{matched_row['title']}' under linked author "
+                        f"(id={matched_row['author_id']}) — skipping"
+                    )
+                    continue
                 sql, vals = _update_existing(matched_row, bk)
                 await db.execute(sql, vals)
                 # Record `(None, None)` — this source thinks the book
@@ -1395,7 +1421,7 @@ async def _compute_series_suggestions(author_id, series_collector):
         await db.close()
 
 
-async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True):
+async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True, linked_author_ids=None):
     """Try a single source with validation and detailed logging."""
     try:
         logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
@@ -1466,7 +1492,7 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
             logger.info(f"  [{source_name}] Author validation failed — skipping (likely wrong author)")
             return 0
 
-        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=on_new_book, exclude_audiobooks=exclude_audiobooks)
+        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=on_new_book, exclude_audiobooks=exclude_audiobooks, linked_author_ids=linked_author_ids)
         parts = []
         if n > 0: parts.append(f"{n} new")
         if u > 0: parts.append(f"{u} updated")
@@ -1517,6 +1543,8 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
                     linked_ids.append(pr[col])
         if len(linked_ids) > 1:
             logger.info(f"  Pen-name expansion: {author_name} linked to {len(linked_ids)-1} other author(s)")
+        # IDs of linked authors (excluding self) — passed to _merge_result
+        pen_linked = [i for i in linked_ids if i != author_id]
 
         id_placeholders = ",".join("?" * len(linked_ids))
         rows = await (await db.execute(
@@ -1598,7 +1626,7 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
 
     # 1. Goodreads (PRIMARY)
     if settings.get("goodreads_enabled", True):
-        n = await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks)
+        n = await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
         total += n
         # Sync the visible count to the accurate post-merge total.
         # If candidates over-counted (filters/dedupe at merge time
@@ -1613,7 +1641,7 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         hardcover.update_api_key(settings["hardcover_api_key"])
         hardcover._owned_titles = our_titles
         hardcover._owned_series_names = our_series_names
-        n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks)
+        n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
         total += n
         visible[0] = total
         if on_progress:
@@ -1621,7 +1649,7 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
 
     # 3. Kobo
     if settings.get("kobo_enabled", True):
-        n = await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks)
+        n = await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
         total += n
         visible[0] = total
         if on_progress:
@@ -1629,7 +1657,7 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
 
     # 4. Amazon (series confirmation — strongest signal for standalone vs series)
     if settings.get("amazon_enabled", False):
-        n = await _try_source(amazon, author_name, author_id, our_titles, languages, "amazon", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks)
+        n = await _try_source(amazon, author_name, author_id, our_titles, languages, "amazon", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
         total += n
         visible[0] = total
         if on_progress:
