@@ -99,6 +99,12 @@ return<div style={{paddingBottom:40}}>
 </div>
 <SF label="Hermeece URL" desc="Full URL to your Hermeece instance (e.g. http://10.0.10.20:8686). Enables 'Send to Hermeece' buttons on Found MAM matches for automatic download."><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.hermeece_url||""} onChange={e=>upd("hermeece_url",e.target.value)} placeholder="http://10.0.10.20:8686" style={{...ist,width:220}}/>{s.hermeece_url?<a href={s.hermeece_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
 
+<div style={{borderTop:`1px solid ${t.borderL}`,marginTop:12,paddingTop:8}}>
+<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"6px 0"}}>Notifications</div>
+</div>
+<SF label="ntfy URL" desc="ntfy server URL (e.g. https://ntfy.sh or your self-hosted instance). Leave empty to disable notifications."><input value={s.ntfy_url||""} onChange={e=>upd("ntfy_url",e.target.value)} placeholder="https://ntfy.sh" style={{...ist,width:220}}/></SF>
+<SF label="ntfy Topic" desc="Topic name for notifications. Not needed if the topic is in the URL (e.g. ntfy.sh/athenascout)."><input value={s.ntfy_topic||""} onChange={e=>upd("ntfy_topic",e.target.value)} placeholder="athenascout" style={{...ist,width:160}}/></SF>
+
 </SSection>
 
 {/* ── SOURCES ── */}

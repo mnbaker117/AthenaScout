@@ -119,6 +119,8 @@ DEFAULT_SETTINGS = {
     # an ebook-focused library.
     "exclude_audiobooks": True,
     "hermeece_url": "",
+    "ntfy_url": "",
+    "ntfy_topic": "",
     "calibre_web_url": "",
     "calibre_url": "",
     "mam_session_id": "",

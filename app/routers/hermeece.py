@@ -99,6 +99,13 @@ async def send_to_hermeece(data: dict = Body(...)):
     sent = result.get("submitted", 0)
     failed = result.get("failed", 0)
 
+    # Fire notification
+    try:
+        from app.notify import notify_hermeece_sent
+        await notify_hermeece_sent(sent, skipped)
+    except Exception:
+        pass
+
     logger.info(
         f"Sent {sent} book(s) to Hermeece ({skipped} skipped non-found, "
         f"{failed} failed at Hermeece)"
