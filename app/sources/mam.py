@@ -39,6 +39,8 @@ from urllib.parse import urlencode
 
 import httpx
 
+from app.scoring import title_similarity, author_overlap, score_match, split_authors
+
 logger = logging.getLogger("athenascout.mam")
 
 # ---------------------------------------------------------------------------
@@ -64,9 +66,16 @@ _NEEDS_SCAN_BASIC_ALIASED = "b.mam_status IS NULL AND b.is_unreleased = 0 AND b.
 _NEEDS_SCAN_STRICT_BARE = "mam_url IS NULL AND mam_status IS NULL AND is_unreleased = 0 AND hidden = 0"
 _NEEDS_SCAN_STRICT_ALIASED = "b.mam_url IS NULL AND b.mam_status IS NULL AND b.is_unreleased = 0 AND b.hidden = 0"
 
-# Match quality thresholds
-MATCH_MIN_PCT = 25.0       # below this → junk, skip
-MATCH_PROMOTE_PCT = 50.0   # at or above + author match → promote to "found"
+# Match quality thresholds (0-1 scale, uses scoring.score_match)
+# The combined score blends 70% title similarity + 30% author overlap,
+# so a threshold of 0.65 means moderate title + good author, or
+# excellent title + no author info.
+MATCH_MIN_SCORE = 0.20     # below this → junk, skip
+MATCH_PROMOTE_SCORE = 0.65 # at or above → promote to "found"
+
+# Legacy thresholds kept for the _word_match_pct fallback paths
+MATCH_MIN_PCT = 25.0
+MATCH_PROMOTE_PCT = 50.0
 
 # Status constants
 STATUS_FOUND = "found"
@@ -779,23 +788,46 @@ def _evaluate_results(
                 logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — non-English lang_code={lang_code} (no numeric language field)")
                 continue
 
-        # Check author match
-        author_ok = _author_match(authors, item)
-
-        # Score title match (take best of full title vs search term)
-        pct_full = _word_match_pct(calibre_title, mam_title)
-        pct_search = _word_match_pct(search_title, mam_title)
-        pct = max(pct_full, pct_search)
-
-        if pct < MATCH_MIN_PCT:
-            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — match {pct}% < {MATCH_MIN_PCT}% min")
-            continue  # junk result
-
         # Parse ebook formats from filetypes field. Same defensive coercion
         # as mam_title above — MAM occasionally returns numeric values here
         # for malformed catalog entries.
         filetypes_raw = str(item.get("filetype") or item.get("filetypes") or "")
         formats = _parse_formats(filetypes_raw)
+
+        # Explicit audiobook rejection: if no ebook formats were parsed,
+        # the torrent is audio-only (mp3, m4a, etc.) — skip it entirely.
+        if not formats and filetypes_raw.strip():
+            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — audio-only formats ({filetypes_raw.strip()})")
+            continue
+
+        # ── Improved scoring via scoring.py ──
+        # Extract MAM author names for overlap scoring
+        mam_authors = _parse_author_info(item.get("author_info"))
+
+        # Combined score: 70% title similarity + 30% author overlap
+        # Try both the full calibre title and the search title variant
+        score_full = score_match(
+            record_title=mam_title, record_authors=mam_authors,
+            search_title=calibre_title, search_authors=authors,
+        )
+        score_search = score_match(
+            record_title=mam_title, record_authors=mam_authors,
+            search_title=search_title, search_authors=authors,
+        )
+        confidence = max(score_full, score_search)
+
+        # Legacy compatibility: also compute the old percentage for the
+        # match_pct field (used by _pick_best_result sorting)
+        pct_full = _word_match_pct(calibre_title, mam_title)
+        pct_search = _word_match_pct(search_title, mam_title)
+        pct = max(pct_full, pct_search)
+
+        if confidence < MATCH_MIN_SCORE:
+            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — confidence {confidence:.2f} < {MATCH_MIN_SCORE} min")
+            continue  # junk result
+
+        # Legacy author match (kept for diagnostic logging)
+        author_ok = _author_match(authors, item)
 
         # MAM marks torrents the user has already snatched via "my_snatched"
         # (truthy when present). Capture so we can show a badge in the UI.
@@ -807,6 +839,7 @@ def _evaluate_results(
             "formats": formats,
             "format_str": ",".join(formats) if formats else filetypes_raw.strip(),
             "match_pct": pct,
+            "confidence": confidence,
             "author_matched": author_ok,
             "seeders": int(item.get("seeders", 0) or 0),
             "my_snatched": my_snatched,
@@ -902,6 +935,7 @@ async def check_book(
             return False
 
         pct = best["match_pct"]
+        conf = best.get("confidence", pct / 100.0)
 
         # Build candidate info
         candidate = {
@@ -911,13 +945,18 @@ async def check_book(
             "formats": best["format_str"],
             "has_multiple": has_multiple,
             "match_pct": pct,
+            "confidence": conf,
             "best_format": best.get("best_format", ""),
             "author_matched": best["author_matched"],
             "my_snatched": best.get("my_snatched", False),
         }
 
-        # Promote to FOUND if match is strong and author checks out
-        if pct >= MATCH_PROMOTE_PCT and best["author_matched"]:
+        # Promote to FOUND using the combined confidence score
+        # (70% title similarity + 30% author overlap from scoring.py).
+        # The old threshold was: pct >= 50 AND author_matched (boolean).
+        # The new threshold uses the blended score which already accounts
+        # for both title and author quality in one number.
+        if conf >= MATCH_PROMOTE_SCORE:
             result["status"] = STATUS_FOUND
             result["passes_tried"].append(pass_num)
             result["mam_url"] = _torrent_url(best["torrent_id"])
@@ -927,11 +966,12 @@ async def check_book(
             result["mam_has_multiple"] = has_multiple
             result["mam_my_snatched"] = best.get("my_snatched", False)
             result["match_pct"] = pct
+            result["confidence"] = conf
             result["best_format"] = best.get("best_format", "")
             return True  # stop cascade
 
         # Otherwise save as best possible so far
-        if best_possible is None or pct > best_possible["match_pct"]:
+        if best_possible is None or conf > best_possible.get("confidence", 0):
             best_possible = candidate
         return False
 
