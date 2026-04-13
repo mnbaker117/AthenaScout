@@ -96,7 +96,10 @@ async def notify_scan_complete(
     author_name: str, new_books: int, total_sources: int,
 ) -> bool:
     if new_books == 0:
-        return False  # don't notify for no-change scans
+        return False
+    s = load_settings()
+    if not s.get("ntfy_on_scan_complete", True):
+        return False
     return await send(
         title=f"Scan complete: {author_name}",
         message=f"{new_books} new book(s) found across {total_sources} source(s)",
@@ -104,9 +107,23 @@ async def notify_scan_complete(
     )
 
 
+async def notify_new_books(author_name: str, count: int) -> bool:
+    s = load_settings()
+    if not s.get("ntfy_on_new_books", True):
+        return False
+    return await send(
+        title=f"New books: {author_name}",
+        message=f"{count} new book(s) discovered",
+        tags=["books", "sparkles"],
+    )
+
+
 async def notify_mam_scan_complete(
     scanned: int, found: int, possible: int, not_found: int,
 ) -> bool:
+    s = load_settings()
+    if not s.get("ntfy_on_mam_complete", True):
+        return False
     return await send(
         title="MAM scan complete",
         message=(
@@ -118,8 +135,36 @@ async def notify_mam_scan_complete(
 
 
 async def notify_hermeece_sent(sent: int, skipped: int) -> bool:
+    s = load_settings()
+    if not s.get("ntfy_on_hermeece_sent", True):
+        return False
     return await send(
         title=f"Sent {sent} book(s) to Hermeece",
         message=f"{sent} queued for download" + (f", {skipped} skipped" if skipped else ""),
         tags=["arrow_down", "books"],
+    )
+
+
+async def notify_library_sync(library_name: str, new: int, updated: int) -> bool:
+    s = load_settings()
+    if not s.get("ntfy_on_library_sync", False):
+        return False
+    if new == 0 and updated == 0:
+        return False
+    return await send(
+        title=f"Library synced: {library_name}",
+        message=f"{new} new, {updated} updated",
+        tags=["books"],
+    )
+
+
+async def notify_mam_cookie_rotated() -> bool:
+    s = load_settings()
+    if not s.get("ntfy_on_mam_cookie_rotated", False):
+        return False
+    return await send(
+        title="MAM cookie rotated",
+        message="Session token automatically refreshed",
+        priority=2,
+        tags=["key"],
     )

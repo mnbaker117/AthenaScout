@@ -99,11 +99,6 @@ return<div style={{paddingBottom:40}}>
 </div>
 <SF label="Hermeece URL" desc="Full URL to your Hermeece instance (e.g. http://10.0.10.20:8686). Enables 'Send to Hermeece' buttons on Found MAM matches for automatic download."><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.hermeece_url||""} onChange={e=>upd("hermeece_url",e.target.value)} placeholder="http://10.0.10.20:8686" style={{...ist,width:220}}/>{s.hermeece_url?<a href={s.hermeece_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
 
-<div style={{borderTop:`1px solid ${t.borderL}`,marginTop:12,paddingTop:8}}>
-<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"6px 0"}}>Notifications</div>
-</div>
-<SF label="ntfy URL" desc="ntfy server URL (e.g. https://ntfy.sh or your self-hosted instance). Leave empty to disable notifications."><input value={s.ntfy_url||""} onChange={e=>upd("ntfy_url",e.target.value)} placeholder="https://ntfy.sh" style={{...ist,width:220}}/></SF>
-<SF label="ntfy Topic" desc="Topic name for notifications. Not needed if the topic is in the URL (e.g. ntfy.sh/athenascout)."><input value={s.ntfy_topic||""} onChange={e=>upd("ntfy_topic",e.target.value)} placeholder="athenascout" style={{...ist,width:160}}/></SF>
 
 </SSection>
 
@@ -186,6 +181,26 @@ return<div style={{paddingBottom:40}}>
 <SF label="MAM scanning" desc={s.mam_scanning_enabled!==false?"MAM scans active — disable to stop all MAM scanning":"MAM scanning disabled — MAM features (badges, pages) still work"}>{s.mam_enabled?<STog on={s.mam_scanning_enabled!==false} onToggle={async()=>{try{const r=await api.post("/scanning/mam/toggle");upd("mam_scanning_enabled",r.enabled)}catch{}}}/>:<span style={{fontSize:12,color:t.tg}}>MAM not enabled</span>}</SF>
 <SF label="Verbose logging" desc="Show detailed debug output in Docker logs. Logs individual book decisions, page visit details, and merge operations."><STog on={!!s.verbose_logging} onToggle={()=>upd("verbose_logging",!s.verbose_logging)}/></SF>
 <div style={{padding:"10px 0 0",fontSize:12,color:t.tg,fontStyle:"italic"}}>Disabling a scan type cancels any running scan and prevents future scans. MAM features (badges, pages) remain visible when MAM scanning is off. Set scan intervals to 0 to disable only scheduled scans.</div>
+
+</SSection>
+
+{/* ── NOTIFICATIONS ── */}
+<SSection title="Notifications">
+
+<SF label="ntfy Server URL" desc="ntfy.sh or your self-hosted instance. Leave empty to disable all notifications."><input value={s.ntfy_url||""} onChange={e=>upd("ntfy_url",e.target.value)} placeholder="https://ntfy.sh" style={{...ist,width:220}}/></SF>
+<SF label="ntfy Topic" desc="Topic name (e.g. athenascout). Not needed if topic is in the URL."><input value={s.ntfy_topic||""} onChange={e=>upd("ntfy_topic",e.target.value)} placeholder="athenascout" style={{...ist,width:160}}/></SF>
+
+<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Notification Events</div>
+<SF label="Source scan complete" desc="When an author source scan finishes and new books were found"><STog on={s.ntfy_on_scan_complete!==false} onToggle={()=>upd("ntfy_on_scan_complete",!(s.ntfy_on_scan_complete!==false))}/></SF>
+<SF label="New books discovered" desc="When source scans find new missing or upcoming books"><STog on={s.ntfy_on_new_books!==false} onToggle={()=>upd("ntfy_on_new_books",!(s.ntfy_on_new_books!==false))}/></SF>
+<SF label="MAM scan complete" desc="When a MAM scan batch finishes with results"><STog on={s.ntfy_on_mam_complete!==false} onToggle={()=>upd("ntfy_on_mam_complete",!(s.ntfy_on_mam_complete!==false))}/></SF>
+<SF label="Sent to Hermeece" desc="When books are sent to Hermeece for download"><STog on={s.ntfy_on_hermeece_sent!==false} onToggle={()=>upd("ntfy_on_hermeece_sent",!(s.ntfy_on_hermeece_sent!==false))}/></SF>
+<SF label="Library sync" desc="When a Calibre library sync detects changes"><STog on={!!s.ntfy_on_library_sync} onToggle={()=>upd("ntfy_on_library_sync",!s.ntfy_on_library_sync)}/></SF>
+<SF label="MAM cookie rotated" desc="When the MAM session cookie is automatically refreshed"><STog on={!!s.ntfy_on_mam_cookie_rotated} onToggle={()=>upd("ntfy_on_mam_cookie_rotated",!s.ntfy_on_mam_cookie_rotated)}/></SF>
+
+<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Digest</div>
+<SF label="Enable digest notifications" desc="Periodic summary of scan activity instead of per-event notifications"><STog on={!!s.ntfy_digest_enabled} onToggle={()=>upd("ntfy_digest_enabled",!s.ntfy_digest_enabled)}/></SF>
+{s.ntfy_digest_enabled?<SF label="Digest schedule" desc="How often to send the digest summary"><select value={s.ntfy_digest_schedule||"daily"} onChange={e=>upd("ntfy_digest_schedule",e.target.value)} style={{...ist,width:120}}><option value="daily">Daily</option><option value="weekly">Weekly</option></select></SF>:null}
 
 </SSection>
 
