@@ -35,7 +35,7 @@ _SERIES_TOTAL_JOIN = """
 LEFT JOIN (
     SELECT series_id, COUNT(*) AS series_total
     FROM books
-    WHERE hidden=0 AND series_id IS NOT NULL
+    WHERE hidden=0 AND series_id IS NOT NULL AND COALESCE(is_omnibus,0)=0
     GROUP BY series_id
 ) st ON st.series_id = b.series_id
 """.strip()

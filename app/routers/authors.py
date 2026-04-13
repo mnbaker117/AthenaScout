@@ -52,7 +52,7 @@ async def get_authors(search: str = Query(None), sort: str = Query("name"), sort
     """
     db = await get_db()
     try:
-        q = f"SELECT a.*, COUNT(DISTINCT CASE WHEN {HF} THEN b.id END) as total_books, SUM(CASE WHEN b.owned=1 AND {HF} THEN 1 ELSE 0 END) as owned_count, SUM(CASE WHEN b.owned=0 AND {HF} THEN 1 ELSE 0 END) as missing_count, SUM(CASE WHEN b.is_new=1 AND b.owned=0 AND {HF} THEN 1 ELSE 0 END) as new_count, COUNT(DISTINCT b.series_id) as series_count FROM authors a LEFT JOIN books b ON a.id=b.author_id"
+        q = f"SELECT a.*, COUNT(DISTINCT CASE WHEN {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as total_books, SUM(CASE WHEN b.owned=1 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as owned_count, SUM(CASE WHEN b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as missing_count, SUM(CASE WHEN b.is_new=1 AND b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as new_count, COUNT(DISTINCT b.series_id) as series_count FROM authors a LEFT JOIN books b ON a.id=b.author_id"
         p = []; c = []
         if search: c.append("a.name LIKE ?"); p.append(f"%{search}%")
         if book_type == "series": c.append("b.series_id IS NOT NULL")
@@ -84,10 +84,10 @@ async def get_author(aid: int):
         # Find series through books (supports multi-author series)
         a["series"] = [dict(s) for s in await (await db.execute(
             f"""SELECT s.*,
-                COUNT(DISTINCT CASE WHEN {HF} THEN b.id END) as book_count,
-                COUNT(DISTINCT CASE WHEN b.author_id=? AND {HF} THEN b.id END) as author_book_count,
-                SUM(CASE WHEN b.owned=1 AND b.author_id=? AND {HF} THEN 1 ELSE 0 END) as owned_count,
-                SUM(CASE WHEN b.owned=0 AND b.author_id=? AND {HF} THEN 1 ELSE 0 END) as missing_count,
+                COUNT(DISTINCT CASE WHEN {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as book_count,
+                COUNT(DISTINCT CASE WHEN b.author_id=? AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as author_book_count,
+                SUM(CASE WHEN b.owned=1 AND b.author_id=? AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as owned_count,
+                SUM(CASE WHEN b.owned=0 AND b.author_id=? AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as missing_count,
                 CASE WHEN COUNT(DISTINCT b.author_id) > 1 THEN 1 ELSE 0 END as multi_author
             FROM series s
             JOIN books b ON s.id=b.series_id
