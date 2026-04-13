@@ -14,7 +14,7 @@ import { BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
 
 export default function HiddenPage({onNav}){const t=useTheme();const[bks,setBks]=useState([]);const[ld,setLd]=useState(true);const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);
-const load=()=>{setLd(true);api.get("/books/hidden").then(d=>{setBks(d.books);setLd(false)}).catch(console.error)};
+const load=()=>{setLd(true);return api.get("/books/hidden").then(d=>{setBks(d.books);setLd(false)}).catch(console.error)};
 useEffect(()=>{load()},[]);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};

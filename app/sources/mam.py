@@ -545,7 +545,7 @@ async def _handle_response_cookie(response: httpx.Response) -> None:
         return
     old = (_current_token or "")[:8]
     _current_token = new_token
-    logger.info(f"MAM cookie rotated: {old}...→ {new_token[:8]}...")
+    logger.debug(f"MAM cookie rotated: {old}...→ {new_token[:8]}...")
     # Debounced persistence: only save if 60+ seconds since last save
     now = time.time()
     if _rotation_callback and (now - _last_rotation_save) >= 60:

@@ -179,7 +179,7 @@ return<div style={{paddingBottom:40}}>
 </SSection>
 
 {/* ── DATA MANAGEMENT (in right column) ── */}
-<SSection title="Data Management" defaultOpen={false}>
+<SSection title="Data Management">
 
 <div style={{padding:"4px 0 10px",fontSize:12,color:t.tg,fontStyle:"italic"}}>Per-author and bulk cleanup operations. The MAM Full Library Scan and Sources Full Re-Scan triggers live on the Dashboard under Heavy Tasks — this section is just for clearing existing data.</div>
 
