@@ -208,6 +208,25 @@ def _label_for(kind: str, scan_type: str) -> str:
     return scan_type or kind
 
 
+def _stamp_completed(p: dict) -> float | None:
+    """Lazily stamp completed_at when a scan first appears as not-running.
+
+    Returns the timestamp if the scan has finished, None if still running
+    or never ran. The stamp is written back into the progress dict so
+    subsequent calls return the same value.
+    """
+    running = bool(p.get("running"))
+    status = p.get("status", "idle")
+    if running:
+        p.pop("completed_at", None)
+        return None
+    if status in ("idle", "none"):
+        return None
+    if "completed_at" not in p:
+        p["completed_at"] = time.time()
+    return p["completed_at"]
+
+
 def _project_lookup() -> dict:
     """Project _lookup_progress into the unified shape."""
     p = state._lookup_progress
@@ -228,6 +247,7 @@ def _project_lookup() -> dict:
         # foreign-language / set-collection / contributor-only noise.
         "current_book": p.get("current_book", "") or None,
         "status": p.get("status", "idle"),
+        "completed_at": _stamp_completed(p),
         "extra": {
             "new_books": p.get("new_books", 0),
         },
@@ -249,6 +269,7 @@ def _project_mam() -> dict:
         # MAM shows EVERY attempt — there's no filter-noise to hide here.
         "current_book": p.get("current_book", "") or None,
         "status": p.get("status", "idle"),
+        "completed_at": _stamp_completed(p),
         "extra": {
             "found":     p.get("found", 0),
             "possible":  p.get("possible", 0),
@@ -293,6 +314,7 @@ def _project_library() -> dict:
         "current_label": None,
         "current_book": p.get("current_book", "") or None,
         "status": p.get("status", "idle"),
+        "completed_at": _stamp_completed(p),
         "extra": {
             "books_new": p.get("books_new", 0),
             "books_updated": p.get("books_updated", 0),

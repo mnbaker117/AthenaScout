@@ -108,6 +108,10 @@ DEFAULT_SETTINGS = {
     # Lets the user fully populate metadata on their existing library before
     # turning the discovery firehose on. Default off preserves existing behavior.
     "author_scan_owned_only": False,
+    # Filter out audiobook-only editions, narrator credits, and non-ebook
+    # formats during source scans. Prevents audiobook entries from cluttering
+    # an ebook-focused library.
+    "exclude_audiobooks": True,
     "calibre_web_url": "",
     "calibre_url": "",
     "mam_session_id": "",

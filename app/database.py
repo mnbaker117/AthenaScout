@@ -393,6 +393,29 @@ async def get_db(slug=None) -> aiosqlite.Connection:
     return db
 
 
+async def cleanup_empty_series(db=None):
+    """Delete series rows with no associated books.
+
+    Called after reset/clear operations that may leave orphaned series.
+    If no db connection is passed, opens and closes one automatically.
+    Returns the number of series rows deleted.
+    """
+    close_after = db is None
+    if db is None:
+        db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM series WHERE id NOT IN "
+            "(SELECT DISTINCT series_id FROM books WHERE series_id IS NOT NULL)"
+        )
+        if cur.rowcount > 0:
+            await db.commit()
+        return cur.rowcount
+    finally:
+        if close_after:
+            await db.close()
+
+
 # ─── Series-name normalization (mirrors lookup.py) ───────────
 # Used by `_dedupe_intra_author_series` to detect series rows under
 # the same author whose names canonicalize to the same form. Kept in

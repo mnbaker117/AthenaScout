@@ -9,6 +9,7 @@ import { Spin } from "./components/Spin";
 import { AddBookModal } from "./components/AddBookModal";
 import { UrlSearchModal } from "./components/UrlSearchModal";
 import { SetupWizard } from "./components/SetupWizard";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import LoginPage from "./pages/LoginPage";
 import Dashboard from "./pages/Dashboard";
 import ImportExportPage from "./pages/ImportExportPage";
@@ -149,6 +150,7 @@ input,select{font-family:inherit}
 {n.id==="suggestions"&&sugCount>0?<span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:18,height:18,padding:"0 5px",borderRadius:9,fontSize:11,fontWeight:700,background:theme.accent,color:theme.bg,marginLeft:2}}>{sugCount}</span>:null}
 </button>)}
 </div>
+<div style={{width:1,height:24,background:theme.borderL,flexShrink:0,margin:"0 6px"}}/>
 <div style={{display:"flex",alignItems:"center",gap:2,flexShrink:0}}>
 <div style={{position:"relative"}}>
 <button onClick={()=>setShowAdd(showAdd==="choose"?null:"choose")} style={{width:36,height:36,borderRadius:8,fontSize:14,border:"none",cursor:"pointer",background:showAdd==="choose"?theme.bg4:"transparent",color:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Add book">{Ic.plus}</button>
@@ -168,7 +170,8 @@ input,select{font-family:inherit}
 
 {/* ── Main Content ── */}
 <main className="main-content" style={{maxWidth:1120,margin:"0 auto",padding:"28px 20px"}}>
-<div className="page-content" key={pg+(pa||"")+activeLib}>
+<ErrorBoundary onReset={()=>nav("dashboard")} key={pg+(pa||"")+activeLib}>
+<div className="page-content">
 {pg==="dashboard"&&<Dashboard onNav={nav} libs={libs} activeLib={activeLib} switchLib={switchLib}/>}
 {pg==="library"&&<BooksPage title="My Library" subtitle="books in your Calibre library" apiPath="/books" extraParams={{owned:true}} exportFilter="library"/>}
 {pg==="authors"&&<AuthorsPage onNav={nav}/>}
@@ -181,7 +184,7 @@ input,select{font-family:inherit}
 {pg==="suggestions"&&<SuggestionsPage onNav={nav}/>}
 {pg==="database"&&<DatabasePage/>}
 {pg==="settings"&&<SettingsPage/>}
-</div></main>
+</div></ErrorBoundary></main>
 
 {showAdd==="manual"&&<AddBookModal onClose={()=>setShowAdd(null)} onAdded={()=>{}}/>}
 {showAdd==="url"&&<UrlSearchModal onClose={()=>setShowAdd(null)} onAdded={()=>{}}/>}

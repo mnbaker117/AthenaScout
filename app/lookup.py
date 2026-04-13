@@ -106,6 +106,23 @@ _RX_FOREIGN_UNICODE = re.compile(
 )
 _RX_SERIES_REF_TITLE = re.compile(r'^.+\s+#\d+\s*$')
 
+# Audiobook / non-ebook format detection. Matches titles and metadata
+# that indicate audiobook-only editions, narrator credits, or non-ebook
+# formats. Two-part detection:
+#   1. Format markers in/around the title: "[Audible Audio]", "Audio CD",
+#      "MP3 CD", "Audiobook" as standalone words or bracketed tags.
+#   2. Contributor-role markers: "(Narrator)", "(Read by)", "(Foreword)",
+#      "(Illustrator)" — these appear in author strings that some sources
+#      pack into the title field.
+_RX_AUDIOBOOK_FORMAT = re.compile(
+    r'(?i)\b(audible\s*audio|audio\s*cd|mp3\s*cd|audiobook)\b'
+    r'|\[audible\b'
+)
+_RX_CONTRIBUTOR_ROLE = re.compile(
+    r'\(\s*(?:narrator|read\s+by|foreword|illustrator|introduction)\s*\)',
+    re.IGNORECASE,
+)
+
 
 def _merge_source_urls(existing_json: str, source_name: str, new_url: str) -> str:
     """Merge a new source URL into the JSON dict stored in source_url column."""
@@ -350,6 +367,22 @@ def _is_book_set(title: str) -> bool:
     return False
 
 
+def _is_audiobook(title: str) -> bool:
+    """Detect audiobook-only editions and non-ebook formats.
+
+    Catches titles like:
+      - "Some Book [Audible Audio]"
+      - "Some Book (Audio CD)"
+      - "Some Book (Ray Porter (Narrator))"
+      - "Some Book: The Audiobook"
+    """
+    if _RX_AUDIOBOOK_FORMAT.search(title):
+        return True
+    if _RX_CONTRIBUTOR_ROLE.search(title):
+        return True
+    return False
+
+
 async def _validate_author(author_name: str, our_titles: list[str], result: AuthorResult) -> bool:
     """Validate found author by checking if ANY of our books fuzzy-match their catalog."""
     if not our_titles: return True
@@ -365,7 +398,7 @@ async def _validate_author(author_name: str, our_titles: list[str], result: Auth
     return False
 
 
-async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None, on_new_book=None):
+async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None, on_new_book=None, exclude_audiobooks: bool = True):
     """Merge an AuthorResult, filtering by language. In full_scan mode, updates metadata on existing books.
 
     When owned_only=True (the "Library-only source scan" setting), the
@@ -623,6 +656,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 if _is_book_set(bk.title): continue
                 if _is_series_ref_title(bk.title): continue
                 if "English" in languages and _looks_foreign(bk.title): continue
+                if exclude_audiobooks and _is_audiobook(bk.title): continue
                 norm = _normalize(bk.title)
                 matched_row = rows_by_norm.get(norm)
                 if matched_row is None:
@@ -672,6 +706,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
             if _is_book_set(bk.title): continue
             if _is_series_ref_title(bk.title): continue
             if "English" in languages and _looks_foreign(bk.title): continue
+            if exclude_audiobooks and _is_audiobook(bk.title): continue
             norm = _normalize(bk.title)
             matched_row = rows_by_norm.get(norm)
             if matched_row is None:
@@ -746,13 +781,29 @@ _RX_CONSENSUS_TAIL = re.compile(
     re.IGNORECASE,
 )
 _RX_CONSENSUS_PUNCT = re.compile(r'[^\w\s]')
+# Parenthetical format/edition tags that sources append to series names
+# but don't affect identity. Example: "86--EIGHTY-SIX (Light Novel)"
+# and "86--EIGHTY-SIX" are the same series. Stripping these before
+# comparison prevents trivial rename suggestions.
+_RX_CONSENSUS_PARENS = re.compile(
+    r'\s*\(\s*(?:light\s+novel|ln|web\s+novel|wn|manga|comic|graphic\s+novel|'
+    r'audio|audiobook|omnibus|hardcover|paperback|ebook|kindle)\s*\)',
+    re.IGNORECASE,
+)
 
 
 def _norm_consensus_series(name):
-    """Normalize a series name for consensus grouping. Returns "" for None."""
+    """Normalize a series name for consensus grouping. Returns "" for None.
+
+    Strips leading articles, trailing tail words (saga/series/trilogy…),
+    and common parenthetical format tags like "(Light Novel)", "(LN)",
+    "(Manga)" — these appear on some sources but not others and don't
+    affect series identity.
+    """
     if not name:
         return ""
     n = name.strip()
+    n = _RX_CONSENSUS_PARENS.sub('', n)
     n = _RX_CONSENSUS_LEAD.sub('', n)
     for _ in range(3):  # iterative tail strip handles "Mistborn Saga Series"
         new_n = _RX_CONSENSUS_TAIL.sub('', n)
@@ -1084,7 +1135,7 @@ async def _compute_series_suggestions(author_id, series_collector):
         await db.close()
 
 
-async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None):
+async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True):
     """Try a single source with validation and detailed logging."""
     try:
         logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
@@ -1155,7 +1206,7 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
             logger.info(f"  [{source_name}] Author validation failed — skipping (likely wrong author)")
             return 0
 
-        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=on_new_book)
+        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=on_new_book, exclude_audiobooks=exclude_audiobooks)
         parts = []
         if n > 0: parts.append(f"{n} new")
         if u > 0: parts.append(f"{u} updated")
@@ -1184,6 +1235,7 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     settings = load_settings()
     languages = settings.get("languages", ["English"])
     owned_only = bool(settings.get("author_scan_owned_only", False))
+    exclude_audiobooks = bool(settings.get("exclude_audiobooks", True))
     if owned_only:
         logger.info(f"  Library-only mode: only enriching owned books for '{author_name}', no new discoveries")
 
@@ -1260,7 +1312,7 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
 
     # 1. Goodreads (PRIMARY)
     if settings.get("goodreads_enabled", True):
-        n = await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        n = await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks)
         total += n
         # Sync the visible count to the accurate post-merge total.
         # If candidates over-counted (filters/dedupe at merge time
@@ -1275,7 +1327,7 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         hardcover.update_api_key(settings["hardcover_api_key"])
         hardcover._owned_titles = our_titles
         hardcover._owned_series_names = our_series_names
-        n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks)
         total += n
         visible[0] = total
         if on_progress:
@@ -1283,7 +1335,7 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
 
     # 3. Kobo
     if settings.get("kobo_enabled", True):
-        n = await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+        n = await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks)
         total += n
         visible[0] = total
         if on_progress:

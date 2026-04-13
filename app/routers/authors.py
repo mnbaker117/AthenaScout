@@ -24,7 +24,7 @@ from fastapi import APIRouter, Body, HTTPException, Query
 
 from app import state
 from app.config import load_settings
-from app.database import get_db, HF
+from app.database import get_db, HF, cleanup_empty_series
 from app.lookup import lookup_author
 
 logger = logging.getLogger("athenascout")
@@ -246,6 +246,10 @@ async def clear_author_scan_data(data: dict = Body(...)):
                 author_ids
             )
         await db.commit()
+        if clear_source and affected > 0:
+            cleaned = await cleanup_empty_series(db)
+            if cleaned:
+                logger.info(f"  Empty series cleanup: removed {cleaned} orphaned series")
         logger.info(f"Cleared scan data for {len(author_ids)} authors (source={clear_source}, mam={clear_mam}), {affected} books deleted")
         return {"status": "ok", "authors_cleared": len(author_ids), "books_deleted": affected}
     finally:
@@ -407,7 +411,10 @@ async def reset_all_source_scan_data():
         # Reset every author's last_lookup_at so the next scheduled scan picks them all up
         await db.execute("UPDATE authors SET last_lookup_at=NULL")
         await db.commit()
+        cleaned = await cleanup_empty_series(db)
+        if cleaned:
+            logger.info(f"  Empty series cleanup: removed {cleaned} orphaned series")
         logger.info(f"Reset all source scan data: {affected} discovered books deleted")
-        return {"status": "ok", "books_deleted": affected}
+        return {"status": "ok", "books_deleted": affected, "series_cleaned": cleaned}
     finally:
         await db.close()

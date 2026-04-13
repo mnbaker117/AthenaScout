@@ -14,7 +14,7 @@ import re
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from app import state
-from app.database import get_db, HF
+from app.database import get_db, HF, cleanup_empty_series
 
 logger = logging.getLogger("athenascout")
 
@@ -109,6 +109,9 @@ async def hide(bid: int):
     db = await get_db()
     try:
         await db.execute("UPDATE books SET hidden=1 WHERE id=?", (bid,))
+        # Clear any pending/ignored suggestion — hidden books shouldn't
+        # carry stale series suggestion cards if the user re-opens them.
+        await db.execute("DELETE FROM book_series_suggestions WHERE book_id=?", (bid,))
         await db.commit()
         return {"status": "ok"}
     finally:
@@ -272,6 +275,8 @@ async def clear_book_scan_data(data: dict = Body(...)):
                 book_ids,
             )
         await db.commit()
+        if clear_source and deleted > 0:
+            await cleanup_empty_series(db)
         logger.info(f"Cleared scan data for {len(book_ids)} books (source={clear_source}, mam={clear_mam}), {deleted} deleted")
         return {"status": "ok", "books_cleared": len(book_ids), "books_deleted": deleted}
     finally:
@@ -428,6 +433,7 @@ async def delete_book(bid: int):
             raise HTTPException(404, "Book not found")
         if row["calibre_id"] and row["source"] == "calibre":
             raise HTTPException(400, "Cannot delete books synced from Calibre. Remove them from Calibre instead.")
+        await db.execute("DELETE FROM book_series_suggestions WHERE book_id=?", (bid,))
         await db.execute("DELETE FROM books WHERE id=?", (bid,))
         await db.commit()
         return {"status": "ok"}
