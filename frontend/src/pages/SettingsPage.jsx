@@ -94,6 +94,11 @@ return<div style={{paddingBottom:40}}>
 <SF label="Calibre Library URL" desc="Full URL to your Calibre content server or management interface, including port (e.g. https://192.168.1.100:8181). Adds a quick-access button on the dashboard."><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.calibre_url||""} onChange={e=>upd("calibre_url",e.target.value)} placeholder="https://10.0.10.20:8787" style={{...ist,width:220}}/>{s.calibre_url?<a href={s.calibre_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
 <SF label="Library sync interval (minutes)" desc="Set to 0 to disable auto-sync"><input {...numP("library_sync_interval_minutes",60)}/></SF>
 
+<div style={{borderTop:`1px solid ${t.borderL}`,marginTop:12,paddingTop:8}}>
+<div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"6px 0"}}>Hermeece Integration</div>
+</div>
+<SF label="Hermeece URL" desc="Full URL to your Hermeece instance (e.g. http://10.0.10.20:8686). Enables 'Send to Hermeece' buttons on Found MAM matches for automatic download."><div style={{display:"flex",alignItems:"center",gap:8}}><input value={s.hermeece_url||""} onChange={e=>upd("hermeece_url",e.target.value)} placeholder="http://10.0.10.20:8686" style={{...ist,width:220}}/>{s.hermeece_url?<a href={s.hermeece_url} target="_blank" rel="noopener noreferrer" style={{fontSize:12,color:t.accent,textDecoration:"none"}}>Test ↗</a>:null}</div></SF>
+
 </SSection>
 
 {/* ── SOURCES ── */}

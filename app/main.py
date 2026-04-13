@@ -69,6 +69,7 @@ from app.routers import (
     config,
     covers,
     db_editor,
+    hermeece,
     import_export,
     libraries,
     logs,
@@ -448,7 +449,7 @@ app.add_middleware(AuthMiddleware)
 
 # All API routes live in app/routers/ — see individual files for endpoints.
 # `auth` is registered first by convention since it gates everything else.
-for r in (auth, config, libraries, books, authors, series, suggestions, covers, scan, mam, db_editor, import_export, logs):
+for r in (auth, config, libraries, books, authors, series, suggestions, covers, scan, mam, db_editor, import_export, logs, hermeece):
     app.include_router(r.router)
 
 

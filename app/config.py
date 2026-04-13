@@ -118,6 +118,7 @@ DEFAULT_SETTINGS = {
     # formats during source scans. Prevents audiobook entries from cluttering
     # an ebook-focused library.
     "exclude_audiobooks": True,
+    "hermeece_url": "",
     "calibre_web_url": "",
     "calibre_url": "",
     "mam_session_id": "",
