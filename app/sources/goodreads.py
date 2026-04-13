@@ -85,6 +85,7 @@ class GoodreadsSource(BaseSource):
         details = {
             "language": None, "pub_date": None, "expected_date": None,
             "is_unreleased": False, "is_set": False, "is_translation": False,
+            "is_audiobook": False,
             "series_name": None, "series_index": None, "description": None,
             "page_count": None, "cover_url": None,
         }
@@ -141,6 +142,10 @@ class GoodreadsSource(BaseSource):
                         details["language"] = data["inLanguage"]
                     if data.get("image"):
                         details["cover_url"] = data["image"]
+                    # bookFormat: "Audiobook", "EBook", "Paperback", etc.
+                    bf = (data.get("bookFormat") or "").lower()
+                    if bf in ("audiobook", "audio", "audio cd", "audible audio"):
+                        details["is_audiobook"] = True
                 except (ValueError, TypeError, AttributeError):
                     pass
 
@@ -388,16 +393,22 @@ class GoodreadsSource(BaseSource):
                     elif "_SY" in cover:
                         cover = re.sub(r'_SY\d+_', '_SY400_', cover)
 
-                # Quick check from list text for translator or contributor
+                # Quick check from list text for translator, contributor, or audiobook format
                 row_text = row.get_text(" ", strip=True)
-                has_translator = "(translator)" in row_text.lower()
-                is_contributor = "(contributor)" in row_text.lower()
+                row_text_lower = row_text.lower()
+                has_translator = "(translator)" in row_text_lower
+                is_contributor = "(contributor)" in row_text_lower
+                is_audio_list = any(kw in row_text_lower for kw in [
+                    "audible audio", "audio cd", "(narrator)", "audiobook",
+                    "(read by)", "mp3 cd",
+                ])
 
                 raw_books.append({
                     "title": full_title, "book_id": book_id,
                     "list_series": sname, "list_series_idx": sidx,
                     "list_cover": cover, "has_translator": has_translator,
                     "is_contributor": is_contributor,
+                    "is_audio_list": is_audio_list,
                 })
 
             # Validate author using list page titles BEFORE visiting individual pages
@@ -461,6 +472,11 @@ class GoodreadsSource(BaseSource):
                     skipped.setdefault("contributor", 0)
                     skipped["contributor"] += 1
                     logger.debug(f"    SKIP (contributor): '{rb['title']}'")
+                    continue
+                if rb.get("is_audio_list"):
+                    skipped.setdefault("audiobook", 0)
+                    skipped["audiobook"] += 1
+                    logger.debug(f"    SKIP (audiobook from list): '{rb['title']}'")
                     continue
 
                 # Quick skip: title looks like a set/collection (no page visit needed)
@@ -556,7 +572,7 @@ class GoodreadsSource(BaseSource):
                     on_new_candidate()
 
                 details = await self._get_book_details(rb["book_id"], rb["title"])
-                logger.debug(f"    PAGE: '{rb['title']}' → lang={details.get('language')}, set={details.get('is_set')}, trans={details.get('is_translation')}, series={details.get('series_name')}, date={details.get('pub_date') or details.get('expected_date')}")
+                logger.debug(f"    PAGE: '{rb['title']}' → lang={details.get('language')}, set={details.get('is_set')}, trans={details.get('is_translation')}, audio={details.get('is_audiobook')}, series={details.get('series_name')}, date={details.get('pub_date') or details.get('expected_date')}")
 
                 # Filter: language
                 lang = (details.get("language") or "").lower()
@@ -575,6 +591,13 @@ class GoodreadsSource(BaseSource):
                 if details.get("is_set"):
                     skipped["set"] += 1
                     logger.debug(f"    SKIP (set/collection from page): '{rb['title']}'")
+                    continue
+
+                # Filter: audiobook edition (from JSON-LD bookFormat)
+                if details.get("is_audiobook"):
+                    skipped.setdefault("audiobook", 0)
+                    skipped["audiobook"] += 1
+                    logger.debug(f"    SKIP (audiobook format): '{rb['title']}'")
                     continue
 
                 # Build the BookResult
