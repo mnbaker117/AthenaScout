@@ -106,12 +106,16 @@ return<div style={{paddingBottom:40}}>
 <SF label="2. Hardcover" desc="GraphQL API, requires key above"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.hardcover_api_key_set&&s.hardcover_enabled!==false?t.grnt:t.tg,fontWeight:600}}>{!s.hardcover_api_key_set?"No key set":(s.hardcover_enabled!==false?"Active":"Disabled")}</span><STog on={s.hardcover_enabled!==false} onToggle={()=>upd("hardcover_enabled",!(s.hardcover_enabled!==false))} disabled={!s.hardcover_api_key_set}/></div></SF>
 <SF label="3. Kobo" desc="Web scraping for ebooks"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.kobo_enabled?t.grnt:t.tg,fontWeight:600}}>{s.kobo_enabled?"Active":"Disabled"}</span><STog on={s.kobo_enabled} onToggle={()=>upd("kobo_enabled",!s.kobo_enabled)}/></div></SF>
 <SF label="4. Amazon" desc="Web scraping for series data. Best source for standalone vs series confirmation. Slower due to anti-bot measures."><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.amazon_enabled?t.grnt:t.tg,fontWeight:600}}>{s.amazon_enabled?"Active":"Disabled"}</span><STog on={!!s.amazon_enabled} onToggle={()=>upd("amazon_enabled",!s.amazon_enabled)}/></div></SF>
+<SF label="5. IBDB" desc="REST API, no auth required. Supplementary source for ISBN and publisher backfill."><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.ibdb_enabled?t.grnt:t.tg,fontWeight:600}}>{s.ibdb_enabled?"Active":"Disabled"}</span><STog on={!!s.ibdb_enabled} onToggle={()=>upd("ibdb_enabled",!s.ibdb_enabled)}/></div></SF>
+<SF label="6. Google Books" desc="Public API, no auth required. Supplementary source for ISBN, publisher, and description."><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.google_books_enabled?t.grnt:t.tg,fontWeight:600}}>{s.google_books_enabled?"Active":"Disabled"}</span><STog on={!!s.google_books_enabled} onToggle={()=>upd("google_books_enabled",!s.google_books_enabled)}/></div></SF>
 
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Rate Limits (seconds between requests)</div>
 <SF label="Goodreads"><input {...numP("rate_goodreads",2)}/></SF>
 <SF label="Hardcover"><input {...numP("rate_hardcover",1)}/></SF>
 <SF label="Kobo"><input {...numP("rate_kobo",3)}/></SF>
 <SF label="Amazon"><input {...numP("rate_amazon",2)}/></SF>
+<SF label="IBDB"><input {...numP("rate_ibdb",1)}/></SF>
+<SF label="Google Books"><input {...numP("rate_google_books",0)}/></SF>
 
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Languages</div>
 <SF label="Preferred languages" desc="Only track books in these languages"><LangSelect selected={s.languages||[]} options={s.language_options||[]} onChange={v=>upd("languages",v)}/></SF>

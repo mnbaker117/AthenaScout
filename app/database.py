@@ -377,6 +377,9 @@ MIGRATIONS = [
     # Pen-name linking: maps author aliases to a canonical author.
     # When two authors are linked, source scans for either one check
     # owned books under BOTH for dedup and series matching.
+    # IBDB + Google Books sources
+    "ALTER TABLE books ADD COLUMN ibdb_id TEXT",
+    "ALTER TABLE books ADD COLUMN google_books_id TEXT",
     """CREATE TABLE IF NOT EXISTS pen_name_links (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         canonical_author_id INTEGER NOT NULL,

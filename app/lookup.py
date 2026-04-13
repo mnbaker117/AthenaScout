@@ -36,6 +36,8 @@ from app.sources.hardcover import HardcoverSource
 from app.sources.goodreads import GoodreadsSource
 from app.sources.kobo import KoboSource
 from app.sources.amazon import AmazonSource
+from app.sources.ibdb import IbdbSource
+from app.sources.google_books import GoogleBooksSource
 from app.sources.base import AuthorResult
 from app import state
 
@@ -155,15 +157,19 @@ hardcover = HardcoverSource()
 goodreads = GoodreadsSource()
 kobo = KoboSource()
 amazon = AmazonSource()
+ibdb = IbdbSource()
+google_books = GoogleBooksSource()
 
 
 def reload_sources():
-    global hardcover, goodreads, kobo, amazon
+    global hardcover, goodreads, kobo, amazon, ibdb, google_books
     s = load_settings()
     hardcover = HardcoverSource(api_key=s.get("hardcover_api_key", ""))
     goodreads = GoodreadsSource(rate_limit=s.get("rate_goodreads", 2))
     kobo = KoboSource(rate_limit=s.get("rate_kobo", 3))
     amazon = AmazonSource(rate_limit=s.get("rate_amazon", 2))
+    ibdb = IbdbSource(rate_limit=s.get("rate_ibdb", 1))
+    google_books = GoogleBooksSource(rate_limit=s.get("rate_google_books", 0.5))
 
 
 def _smart_strip_subtitle(t: str) -> str:
@@ -527,7 +533,7 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         }
 
         # Source priority: Goodreads can overwrite series from any other source
-        SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "amazon": 4, "manual": 5, "import": 5, "calibre": 0}
+        SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "amazon": 4, "ibdb": 5, "google_books": 5, "manual": 6, "import": 6, "calibre": 0}
         
         def _update_existing(matched_row, bk, series_id=None):
             """Build UPDATE for an existing book — URL merge always, series with priority, metadata in full_scan.
@@ -1152,7 +1158,7 @@ async def _compute_series_suggestions(author_id, series_collector):
 
         # Source priority for tiebreaking the consensus vote. Mirrors
         # SOURCE_PRIORITY in _merge_result; lower number = higher trust.
-        SOURCE_RANK = {"goodreads": 1, "hardcover": 2, "kobo": 3, "amazon": 4}
+        SOURCE_RANK = {"goodreads": 1, "hardcover": 2, "kobo": 3, "amazon": 4, "ibdb": 5, "google_books": 5}
 
         suggestions_created = 0
         suggestions_updated = 0
@@ -1598,6 +1604,8 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     hardcover._on_book = _on_book
     kobo._on_book = _on_book
     amazon._on_book = _on_book
+    ibdb._on_book = _on_book
+    google_books._on_book = _on_book
 
     # Per-book new-candidate counter. Fired by each source from inside
     # its slow DETAIL-fetch loop — same call sites as `_on_book` but
@@ -1623,6 +1631,8 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     hardcover._on_new_candidate = _on_new_candidate
     kobo._on_new_candidate = _on_new_candidate
     amazon._on_new_candidate = _on_new_candidate
+    ibdb._on_new_candidate = _on_new_candidate
+    google_books._on_new_candidate = _on_new_candidate
 
     # 1. Goodreads (PRIMARY)
     if settings.get("goodreads_enabled", True):
@@ -1658,6 +1668,22 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     # 4. Amazon (series confirmation — strongest signal for standalone vs series)
     if settings.get("amazon_enabled", False):
         n = await _try_source(amazon, author_name, author_id, our_titles, languages, "amazon", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
+        total += n
+        visible[0] = total
+        if on_progress:
+            on_progress(total)
+
+    # 5. IBDB (supplementary — ISBN and publisher backfill)
+    if settings.get("ibdb_enabled", False):
+        n = await _try_source(ibdb, author_name, author_id, our_titles, languages, "ibdb", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
+        total += n
+        visible[0] = total
+        if on_progress:
+            on_progress(total)
+
+    # 6. Google Books (supplementary — ISBN, publisher, description backfill)
+    if settings.get("google_books_enabled", False):
+        n = await _try_source(google_books, author_name, author_id, our_titles, languages, "google_books", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
         total += n
         visible[0] = total
         if on_progress:
