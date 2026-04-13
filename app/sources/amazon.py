@@ -70,7 +70,9 @@ _MAX_DETAIL_FETCHES = 25
 _RX_JUNK_TITLE = re.compile(
     r'^\[?\(|'                    # starts with [( or (
     r'^By\s+[A-Z].*\s+-\s+|'     # "By AUTHOR - Title" seller format
-    r'\[\s*(?:Paperback|Hardcover|Mass Market|Library Binding)\s*\]',  # format in brackets
+    r'\[\s*(?:Paperback|Hardcover|Mass Market|Library Binding)\s*\]|'  # format in brackets
+    r'\)\s*(?:Paperback|Hardcover|Mass Market|Library Binding)\s*$|'   # "...) Paperback" suffix
+    r'by\s+\w+,\s+\w+\s+\(\d{4}\)\s+(?:Paperback|Hardcover)',        # "by Last, First (2006) Paperback"
     re.IGNORECASE,
 )
 
