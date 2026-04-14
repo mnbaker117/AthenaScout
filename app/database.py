@@ -395,6 +395,12 @@ MIGRATIONS = [
     # caused it to be skipped on v40 DBs). Idempotent — "duplicate
     # column" is caught by the migration error handler.
     "ALTER TABLE books ADD COLUMN ibdb_id TEXT",
+    # Sprint 7 — link_type discriminates pen-name links from
+    # co-author links. Backend treats both identically (dedup books
+    # across linked authors, scan as one identity). The label is
+    # purely UX so the user can tell J.N. Chaney's co-author chain
+    # ("with Christopher Hopper") apart from Arand ↔ Darren.
+    "ALTER TABLE pen_name_links ADD COLUMN link_type TEXT NOT NULL DEFAULT 'pen_name'",
 ]
 
 
@@ -616,6 +622,7 @@ async def init_db(slug=None):
             ("books", "google_books_id", "TEXT"),
             ("books", "amazon_id", "TEXT"),
             ("books", "is_omnibus", "INTEGER NOT NULL DEFAULT 0"),
+            ("pen_name_links", "link_type", "TEXT NOT NULL DEFAULT 'pen_name'"),
         ]
         for table, col, coltype in _ensure_columns:
             try:

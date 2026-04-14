@@ -52,7 +52,21 @@ async def get_authors(search: str = Query(None), sort: str = Query("name"), sort
     """
     db = await get_db()
     try:
-        q = f"SELECT a.*, COUNT(DISTINCT CASE WHEN {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as total_books, SUM(CASE WHEN b.owned=1 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as owned_count, SUM(CASE WHEN b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as missing_count, SUM(CASE WHEN b.is_new=1 AND b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as new_count, COUNT(DISTINCT b.series_id) as series_count FROM authors a LEFT JOIN books b ON a.id=b.author_id"
+        # link_count is a scalar subquery (not a JOIN) so it doesn't
+        # multiply rows against the books JOIN. Used by the Authors
+        # page to render a small "linked" chip next to authors that
+        # have any pen-name / co-author link.
+        q = (
+            f"SELECT a.*, "
+            f"COUNT(DISTINCT CASE WHEN {HF} AND COALESCE(b.is_omnibus,0)=0 THEN b.id END) as total_books, "
+            f"SUM(CASE WHEN b.owned=1 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as owned_count, "
+            f"SUM(CASE WHEN b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as missing_count, "
+            f"SUM(CASE WHEN b.is_new=1 AND b.owned=0 AND {HF} AND COALESCE(b.is_omnibus,0)=0 THEN 1 ELSE 0 END) as new_count, "
+            f"COUNT(DISTINCT b.series_id) as series_count, "
+            f"(SELECT COUNT(*) FROM pen_name_links pl "
+            f" WHERE pl.canonical_author_id=a.id OR pl.alias_author_id=a.id) as link_count "
+            f"FROM authors a LEFT JOIN books b ON a.id=b.author_id"
+        )
         p = []; c = []
         if search: c.append("a.name LIKE ?"); p.append(f"%{search}%")
         if book_type == "series": c.append("b.series_id IS NOT NULL")
@@ -477,13 +491,21 @@ async def reset_all_source_scan_data():
 
 # ─── Pen-Name Linking ───────────────────────────────────────
 
+VALID_LINK_TYPES = {"pen_name", "co_author"}
+
+
 @router.get("/authors/{aid}/pen-names")
 async def get_pen_name_links(aid: int):
-    """Get all pen-name links for an author (both directions)."""
+    """Get all author-link rows for an author (both directions).
+
+    Endpoint is named pen-names for backward compat; the rows now carry
+    a `link_type` discriminator (`pen_name` | `co_author`). The backend
+    treats both identically — they only differ in the UI label.
+    """
     db = await get_db()
     try:
         rows = await (await db.execute(
-            "SELECT p.id, p.canonical_author_id, p.alias_author_id, "
+            "SELECT p.id, p.canonical_author_id, p.alias_author_id, p.link_type, "
             "a1.name as canonical_name, a2.name as alias_name "
             "FROM pen_name_links p "
             "JOIN authors a1 ON p.canonical_author_id = a1.id "
@@ -498,14 +520,19 @@ async def get_pen_name_links(aid: int):
 
 @router.post("/authors/link-pen-names")
 async def link_pen_names(data: dict = Body(...)):
-    """Link two authors as pen names of the same person.
+    """Link two authors so source scans treat them as one identity.
 
     The canonical_author_id is the 'primary' identity; alias_author_id
-    is the pen name. This is purely organizational — the canonical author
-    is preferred for display but both authors retain their own books.
+    is the linked author. Source scans for either one check owned books
+    under BOTH for dedup and series matching. The `link_type` field
+    (default `pen_name`) only controls the UI label — backend dedup
+    behavior is identical for both link types.
     """
     canonical_id = data.get("canonical_author_id")
     alias_id = data.get("alias_author_id")
+    link_type = (data.get("link_type") or "pen_name").lower()
+    if link_type not in VALID_LINK_TYPES:
+        raise HTTPException(400, f"link_type must be one of {sorted(VALID_LINK_TYPES)}")
     if not canonical_id or not alias_id:
         raise HTTPException(400, "Both canonical_author_id and alias_author_id required")
     if canonical_id == alias_id:
@@ -517,22 +544,38 @@ async def link_pen_names(data: dict = Body(...)):
             row = await (await db.execute("SELECT id FROM authors WHERE id=?", (aid,))).fetchone()
             if not row:
                 raise HTTPException(404, f"Author {aid} not found")
-        # Check for existing link (either direction)
+        # Check for existing link (either direction). If found, update
+        # the link_type to the new value rather than creating a duplicate
+        # — lets the user reclassify a pen-name link as co-author.
         existing = await (await db.execute(
-            "SELECT id FROM pen_name_links WHERE "
+            "SELECT id, link_type FROM pen_name_links WHERE "
             "(canonical_author_id=? AND alias_author_id=?) OR "
             "(canonical_author_id=? AND alias_author_id=?)",
             (canonical_id, alias_id, alias_id, canonical_id),
         )).fetchone()
         if existing:
-            return {"status": "already_linked", "link_id": existing["id"]}
+            if existing["link_type"] != link_type:
+                await db.execute(
+                    "UPDATE pen_name_links SET link_type=? WHERE id=?",
+                    (link_type, existing["id"]),
+                )
+                await db.commit()
+                logger.info(
+                    f"Reclassified author link {existing['id']}: "
+                    f"{existing['link_type']} → {link_type}"
+                )
+                return {"status": "updated", "link_id": existing["id"], "link_type": link_type}
+            return {"status": "already_linked", "link_id": existing["id"], "link_type": link_type}
         cur = await db.execute(
-            "INSERT INTO pen_name_links (canonical_author_id, alias_author_id) VALUES (?, ?)",
-            (canonical_id, alias_id),
+            "INSERT INTO pen_name_links (canonical_author_id, alias_author_id, link_type) "
+            "VALUES (?, ?, ?)",
+            (canonical_id, alias_id, link_type),
         )
         await db.commit()
-        logger.info(f"Linked pen names: author {canonical_id} ↔ {alias_id}")
-        return {"status": "ok", "link_id": cur.lastrowid}
+        logger.info(
+            f"Linked authors as {link_type}: {canonical_id} ↔ {alias_id}"
+        )
+        return {"status": "ok", "link_id": cur.lastrowid, "link_type": link_type}
     finally:
         await db.close()
 
