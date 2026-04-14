@@ -12,6 +12,7 @@ import { Section } from "../components/Section";
 import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
 import { toast } from "../lib/toast";
+import type { NavFn, PenNameLink, Author, AuthorsResponse, PenNamesResponse, MamStatusResponse } from "../types";
 
 // ─── Inline Series (for Author Detail) ─────────────────────
 // NOTE: defined at module level (NOT inside AuthorDetailPage) to preserve
@@ -37,13 +38,18 @@ return<Section title={header} count={countStr} ownedCount={ownCount} totalCount=
 function SA({books,vm,onAction,onBookClick,collapsed}:any){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
 
 // ─── Author Detail ──────────────────────────────────────────
-export default function AuthorDetailPage({authorId,onNav}:any){const t=useTheme();const[a,setA]=useState<any>(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[mamRef,setMamRef]=useState(false);const[vm,setVm]=usePersist<ViewMode>("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);const[mamOn,setMamOn]=useState(false);
-const[penLinks,setPenLinks]=useState<any[]>([]);const[penQ,setPenQ]=useState("");const[penResults,setPenResults]=useState<any[]>([]);const[penBusy,setPenBusy]=useState(false);const[penType,setPenType]=usePersist<string>("adp_pen_type","pen_name");
-useEffect(()=>{if(!authorId)return;api.get(`/authors/${authorId}/pen-names`).then(r=>setPenLinks(r.links||[])).catch(()=>{})},[authorId]);
-useEffect(()=>{if(penQ.length<2){setPenResults([]);return}const tm=setTimeout(()=>{api.get(`/authors?search=${encodeURIComponent(penQ)}`).then(r=>setPenResults((r.authors||[]).filter(x=>x.id!==parseInt(authorId)))).catch(()=>{})},300);return()=>clearTimeout(tm)},[penQ,authorId]);
-const linkPen=async(aliasId)=>{setPenBusy(true);try{await api.post("/authors/link-pen-names",{canonical_author_id:parseInt(authorId),alias_author_id:aliasId,link_type:penType});const r=await api.get(`/authors/${authorId}/pen-names`);setPenLinks(r.links||[]);setPenQ("");setPenResults([]);toast.success(penType==="co_author"?"Co-author linked":"Pen name linked")}catch(e){toast.error(e.message||"Link failed")}setPenBusy(false)};
-const unlinkPen=async(linkId)=>{try{await api.del(`/authors/pen-name-link/${linkId}`);setPenLinks(penLinks.filter(l=>l.id!==linkId));toast.success("Author unlinked")}catch{}};
-useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
+interface AuthorDetailPageProps {
+  authorId: number | string;
+  onNav: NavFn;
+}
+
+export default function AuthorDetailPage({authorId,onNav}:AuthorDetailPageProps){const t=useTheme();const[a,setA]=useState<any>(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[mamRef,setMamRef]=useState(false);const[vm,setVm]=usePersist<ViewMode>("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);const[mamOn,setMamOn]=useState(false);
+const[penLinks,setPenLinks]=useState<PenNameLink[]>([]);const[penQ,setPenQ]=useState("");const[penResults,setPenResults]=useState<Author[]>([]);const[penBusy,setPenBusy]=useState(false);const[penType,setPenType]=usePersist<string>("adp_pen_type","pen_name");
+useEffect(()=>{if(!authorId)return;api.get<PenNamesResponse>(`/authors/${authorId}/pen-names`).then(r=>setPenLinks(r.links||[])).catch(()=>{})},[authorId]);
+useEffect(()=>{if(penQ.length<2){setPenResults([]);return}const tm=setTimeout(()=>{api.get<AuthorsResponse>(`/authors?search=${encodeURIComponent(penQ)}`).then(r=>setPenResults((r.authors||[]).filter(x=>x.id!==parseInt(String(authorId))))).catch(()=>{})},300);return()=>clearTimeout(tm)},[penQ,authorId]);
+const linkPen=async(aliasId:number)=>{setPenBusy(true);try{await api.post("/authors/link-pen-names",{canonical_author_id:parseInt(String(authorId)),alias_author_id:aliasId,link_type:penType});const r=await api.get<PenNamesResponse>(`/authors/${authorId}/pen-names`);setPenLinks(r.links||[]);setPenQ("");setPenResults([]);toast.success(penType==="co_author"?"Co-author linked":"Pen name linked")}catch(e:any){toast.error(e.message||"Link failed")}setPenBusy(false)};
+const unlinkPen=async(linkId:number)=>{try{await api.del(`/authors/pen-name-link/${linkId}`);setPenLinks(penLinks.filter(l=>l.id!==linkId));toast.success("Author unlinked")}catch{}};
+useEffect(()=>{api.get<MamStatusResponse>("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const loadA=useCallback((signal?:AbortSignal)=>{setLd(true);return api.get(`/authors/${authorId}`,signal).then(d=>{setA(d);setLd(false)}).catch(e=>{if(!api.isAbort(e))console.error(e)})},[authorId]);useEffect(()=>{const c=new AbortController();loadA(c.signal);return()=>c.abort()},[loadA]);

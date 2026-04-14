@@ -1,6 +1,10 @@
 import { useState, useEffect } from "react";
 import { THEMES, TC } from "./theme";
-import type { ThemeName, Library, ScanProgress } from "./types";
+import type {
+  ThemeName, Library, ScanProgress,
+  AuthCheckResponse, MamStatusResponse,
+  LibrariesResponse, ScanStatusResponse, SeriesSuggestionCountResponse,
+} from "./types";
 import { EVT } from "./types";
 import { api } from "./api";
 import { Ic } from "./icons";
@@ -56,7 +60,7 @@ export default function App(){
 // fetch returns 401) drops us back to the unauthenticated state so the
 // user gets the login screen instead of stale UI fed by failed fetches.
 const[authState,setAuthState]=useState({loading:true,authenticated:false,firstRun:false});
-const checkAuth=async()=>{try{const r=await api.get("/auth/check");setAuthState({loading:false,authenticated:!!r.authenticated,firstRun:!!r.first_run})}catch{setAuthState({loading:false,authenticated:false,firstRun:false})}};
+const checkAuth=async()=>{try{const r=await api.get<AuthCheckResponse>("/auth/check");setAuthState({loading:false,authenticated:!!r.authenticated,firstRun:!!r.first_run})}catch{setAuthState({loading:false,authenticated:false,firstRun:false})}};
 useEffect(()=>{checkAuth();const onAuthRequired=()=>setAuthState(s=>s.authenticated?{loading:false,authenticated:false,firstRun:false}:s);window.addEventListener(EVT.AuthRequired,onAuthRequired);return()=>window.removeEventListener(EVT.AuthRequired,onAuthRequired)},[]);
 const onLoginSuccess=()=>{setAuthState({loading:false,authenticated:true,firstRun:false})};
 const[firstRun,setFirstRun]=useState<boolean|null>(null);
@@ -64,21 +68,21 @@ const[mamWarn,setMamWarn]=useState<boolean>(false);
 const[mamOn,setMamOn]=useState<boolean>(false);
 const[libs,setLibs]=useState<Library[]>([]);
 const[activeLib,setActiveLib]=useState<string>(()=>{try{return localStorage.getItem("cl_active_lib")||""}catch{return""}});
-useEffect(()=>{if(!authState.authenticated)return;api.get("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{})},[authState.authenticated]);
+useEffect(()=>{if(!authState.authenticated)return;api.get<LibrariesResponse>("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{})},[authState.authenticated]);
 // Check if this is a first-run scenario (setup wizard needed). Skipped until authenticated.
 useEffect(()=>{if(!authState.authenticated)return;api.get("/platform").then(r=>setFirstRun(r.first_run===true)).catch(()=>setFirstRun(false))},[authState.authenticated]);
 // MAM status is refetched on login and on explicit "athenascout:mam-state-changed"
 // events dispatched by SettingsPage when the user toggles MAM. It used to
 // refetch on every `pg` change (page nav) as a lazy refresh trigger, which
 // cost 1 API call per nav click. Event-driven is surgical and free.
-useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/mam/status").then((r:any)=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{});refresh();window.addEventListener(EVT.MamStateChanged,refresh);return()=>window.removeEventListener(EVT.MamStateChanged,refresh)},[authState.authenticated]);
+useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get<MamStatusResponse>("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{});refresh();window.addEventListener(EVT.MamStateChanged,refresh);return()=>window.removeEventListener(EVT.MamStateChanged,refresh)},[authState.authenticated]);
 // Pending series-suggestion count drives the badge number on the
 // Suggestions nav item. Refetched via the explicit
 // "athenascout:suggestions-changed" event that SuggestionsPage
 // dispatches after Apply/Ignore/Delete actions, plus a one-shot fetch
 // on initial auth — no polling.
 const[sugCount,setSugCount]=useState<number>(0);
-useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/series-suggestions/count").then((r:any)=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener(EVT.SuggestionsChanged,refresh);return()=>window.removeEventListener(EVT.SuggestionsChanged,refresh)},[authState.authenticated]);
+useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get<SeriesSuggestionCountResponse>("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener(EVT.SuggestionsChanged,refresh);return()=>window.removeEventListener(EVT.SuggestionsChanged,refresh)},[authState.authenticated]);
 
 // App-level scan-progress poller. Runs ONCE per app-mount (not per
 // page) so the unified Dashboard widget and every other page that
@@ -94,7 +98,7 @@ useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/se
 // on backgrounded tabs via the Page Visibility API. Trigger sites can
 // dispatch `athenascout:scan-started` to demand an immediate poll
 // (no waiting for the next interval tick).
-useEffect(()=>{if(!authState.authenticated)return;let prev:ScanProgress[]=[];let cancelled=false;let iv:ReturnType<typeof setInterval>|null=null;const tick=async()=>{if(document.hidden||cancelled)return;try{const r:any=await api.get("/scan-status");const next:ScanProgress[]=r.scans||[];for(const ns of next){const ps=prev.find(p=>p.kind===ns.kind);if(ps&&ps.running&&!ns.running){try{window.dispatchEvent(new CustomEvent(EVT.ScanCompleted,{detail:{kind:ns.kind,scan:ns}}))}catch{}}}prev=next;try{window.dispatchEvent(new CustomEvent(EVT.ScansUpdated,{detail:{scans:next}}))}catch{}const anyRunning=next.some(s=>s.running);const want=anyRunning?3000:30000;if(iv){clearInterval(iv);iv=setInterval(tick,want)}}catch{}};tick();iv=setInterval(tick,30000);const onStarted=()=>tick();const onVis=()=>{if(!document.hidden)tick()};window.addEventListener(EVT.ScanStarted,onStarted);document.addEventListener("visibilitychange",onVis);return()=>{cancelled=true;if(iv)clearInterval(iv);window.removeEventListener(EVT.ScanStarted,onStarted);document.removeEventListener("visibilitychange",onVis)}},[authState.authenticated]);
+useEffect(()=>{if(!authState.authenticated)return;let prev:ScanProgress[]=[];let cancelled=false;let iv:ReturnType<typeof setInterval>|null=null;const tick=async()=>{if(document.hidden||cancelled)return;try{const r=await api.get<ScanStatusResponse>("/scan-status");const next:ScanProgress[]=r.scans||[];for(const ns of next){const ps=prev.find(p=>p.kind===ns.kind);if(ps&&ps.running&&!ns.running){try{window.dispatchEvent(new CustomEvent(EVT.ScanCompleted,{detail:{kind:ns.kind,scan:ns}}))}catch{}}}prev=next;try{window.dispatchEvent(new CustomEvent(EVT.ScansUpdated,{detail:{scans:next}}))}catch{}const anyRunning=next.some(s=>s.running);const want=anyRunning?3000:30000;if(iv){clearInterval(iv);iv=setInterval(tick,want)}}catch{}};tick();iv=setInterval(tick,30000);const onStarted=()=>tick();const onVis=()=>{if(!document.hidden)tick()};window.addEventListener(EVT.ScanStarted,onStarted);document.addEventListener("visibilitychange",onVis);return()=>{cancelled=true;if(iv)clearInterval(iv);window.removeEventListener(EVT.ScanStarted,onStarted);document.removeEventListener("visibilitychange",onVis)}},[authState.authenticated]);
   const theme=THEMES[tn]||THEMES.dark;
   const nav=(p:string,a:number|string|null=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
   useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);

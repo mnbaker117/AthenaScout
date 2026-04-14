@@ -37,6 +37,69 @@ export interface StyleProps {
   className?: string;
 }
 
+// ─── App-level callback shapes ──────────────────────────────
+// `NavFn` is the page-router callback that App.tsx hands down to
+// every page. The arg is page-specific — author detail uses an
+// author id (number), other pages either don't pass anything or
+// pass a string discriminator.
+export type NavFn = (page: string, arg?: number | string | null) => void;
+
+// `BookAction` enumerates the per-row actions BookSidebar /
+// BookViews emit upward. Centralized so a renamed/added action is
+// caught at every consumer instead of silently ignored.
+export type BookAction = "hide" | "unhide" | "dismiss" | "delete";
+export type BookActionHandler = (action: BookAction, bookId: number) => void | Promise<void>;
+
+// `SendToHermeece` is the bulk-send callback used by the MAM page
+// + book sidebar. Returns void; errors surface as toasts.
+export type SendToHermeeceFn = (bookIds: number[]) => void | Promise<void>;
+
+// ─── API response shapes ────────────────────────────────────
+// One per high-traffic endpoint. Use as the generic on api.get<T>()
+// at the call site. Add new ones here as endpoints are typed —
+// don't sprinkle inline anonymous types at call sites.
+
+export interface AuthorsResponse {
+  authors: Author[];
+}
+
+export interface BooksResponse {
+  books: Book[];
+  total: number;
+}
+
+export interface PenNamesResponse {
+  links: PenNameLink[];
+}
+
+export interface MamStatusResponse {
+  enabled: boolean;
+  validation_ok?: boolean;
+  stats?: {
+    upload_candidates?: number;
+    available_to_download?: number;
+    missing_everywhere?: number;
+    total_unscanned?: number;
+  };
+}
+
+export interface ScanStatusResponse {
+  scans: ScanProgress[];
+}
+
+export interface LibrariesResponse {
+  libraries: Library[];
+}
+
+export interface AuthCheckResponse {
+  authenticated: boolean;
+  first_run?: boolean;
+}
+
+export interface SeriesSuggestionCountResponse {
+  pending: number;
+}
+
 // ─── API entity shapes ──────────────────────────────────────
 // Tracks the JSON shape the FastAPI routers actually return. Fields
 // not consumed by the UI are intentionally omitted to keep the

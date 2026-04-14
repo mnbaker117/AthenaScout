@@ -5,6 +5,7 @@ import { Ic } from "../icons";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
+import type { NavFn } from "../types";
 
 // Source-consensus series suggestion review page.
 //
@@ -30,7 +31,7 @@ function fmtSeriesValue(name: string | null | undefined, idx: number | null | un
   return idx != null ? `${name} #${idx}` : name;
 }
 
-export default function SuggestionsPage({ onNav }: { onNav: (p: string, a?: any) => void }) {
+export default function SuggestionsPage({ onNav }: { onNav: NavFn }) {
   const t = useTheme();
   const [status, setStatus] = useState("pending");
   const [data, setData] = useState<any>(null);

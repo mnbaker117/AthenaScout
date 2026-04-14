@@ -6,10 +6,11 @@ import { fmtDate } from "../lib/format";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 import { SBRow } from "./SBRow";
+import type { MamStatusResponse } from "../types";
 
 export function BookSidebar({book,closing:parentClosing,onClose,onAction,onEdit}:any){const t=useTheme();const[editing,setEditing]=useState(false);const[ef,setEf]=useState<any>({});const[saving,setSaving]=useState(false);const[cwUrl,setCwUrl]=useState("");const[hermeeceUrl,setHermeeceUrl]=useState("");const[mamScanning,setMamScanning]=useState(false);const[mamOn,setMamOn]=useState(false);const[suggestion,setSuggestion]=useState<any>(null);const[sugBusy,setSugBusy]=useState<any>(null);const[hermSending,setHermSending]=useState(false);
 useEffect(()=>{api.get("/settings").then(s=>{setCwUrl(s.calibre_web_url||"");setHermeeceUrl(s.hermeece_url||"")}).catch(()=>{})},[]);
-useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
+useEffect(()=>{api.get<MamStatusResponse>("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 // Fetch the active series-suggestion (if any) for this book when the
 // sidebar opens. The endpoint returns `{suggestion: null}` rather than
 // 404 when nothing exists, so we always reach a deterministic terminal

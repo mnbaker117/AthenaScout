@@ -7,12 +7,20 @@ import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
 import { toast } from "../lib/toast";
+import type { NavFn, Library, ScanProgress, SeriesSuggestionCountResponse } from "../types";
 
-export default function Dashboard({onNav,libs=[],activeLib="",switchLib}:any){const t=useTheme();const[d,setD]=useState<any>(null);const[sy,setSy]=useState(false);const[scans,setScans]=useState<any[]>([]);const[sugCount,setSugCount]=useState(0);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
+interface DashboardProps {
+  onNav: NavFn;
+  libs?: Library[];
+  activeLib?: string;
+  switchLib?: (slug: string) => void | Promise<void>;
+}
+
+export default function Dashboard({onNav,libs=[],activeLib="",switchLib}:DashboardProps){const t=useTheme();const[d,setD]=useState<any>(null);const[sy,setSy]=useState(false);const[scans,setScans]=useState<ScanProgress[]>([]);const[sugCount,setSugCount]=useState(0);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
 // Pending-suggestions count for the Dashboard card. Refetched on the
 // same `athenascout:suggestions-changed` event the navbar uses, so
 // Apply/Ignore actions on the SuggestionsPage immediately reflect here.
-useEffect(()=>{const refresh=()=>api.get("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[]);
+useEffect(()=>{const refresh=()=>api.get<SeriesSuggestionCountResponse>("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[]);
 // The unified scan poller lives in App.jsx and dispatches
 // `athenascout:scans-updated` whenever it ticks, so the Dashboard
 // just listens for that event instead of running its own polling

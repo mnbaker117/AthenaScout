@@ -20,9 +20,19 @@ import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
 import { toast } from "../lib/toast";
 import { ExportModal } from "../components/ExportModal";
+import type { Book, BooksResponse, MamStatusResponse } from "../types";
 
 // ─── Books Page (Library/Missing/Upcoming) ──────────────────
-export default function BooksPage({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}:any){const t=useTheme();const[bks,setBks]=useState<any[]>([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist<string>(`bp_${title}_q`,"");const[vm,setVm]=usePersist<ViewMode>(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist<string>(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist<string>(`bp_${title}_sort`,"title");const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
+interface BooksPageProps {
+  title: string;
+  subtitle?: string;
+  apiPath?: string;
+  extraParams?: Record<string, string | number | boolean>;
+  showAuthor?: boolean;
+  exportFilter?: string;
+}
+
+export default function BooksPage({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}:BooksPageProps){const t=useTheme();const[bks,setBks]=useState<Book[]>([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist<string>(`bp_${title}_q`,"");const[vm,setVm]=usePersist<ViewMode>(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist<string>(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist<string>(`bp_${title}_sort`,"title");const[sb,setSb]=useState<Book|null>(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
 const[mamFilter,setMamFilter]=usePersist<string>(`bp_${title}_mam`,"");const[mamOn,setMamOn]=useState(false);
 const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState<Set<number>>(new Set());const[busy,setBusy]=useState(false);
 const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
@@ -32,9 +42,9 @@ const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(
 const isGrouped=grp!=="all";
 const perPage=isGrouped?5000:60;
 const sortParam=grp==="author"?"author":grp==="series"?"series":sort;
-const load=useCallback((page:number=1,signal?:AbortSignal)=>{setLd(true);const p=new URLSearchParams({search:q,sort:sortParam,per_page:String(perPage),page:String(page),...extraParams});if(mamFilter)p.set("mam_status",mamFilter);return api.get(`${apiPath}?${p}`,signal).then(d=>{setBks(d.books);setTotal(d.total);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[q,sortParam,apiPath,grp,mamFilter]);
+const load=useCallback((page:number=1,signal?:AbortSignal)=>{setLd(true);const init:Record<string,string>={search:q,sort:sortParam,per_page:String(perPage),page:String(page)};for(const[k,v]of Object.entries(extraParams))init[k]=String(v);const p=new URLSearchParams(init);if(mamFilter)p.set("mam_status",mamFilter);return api.get<BooksResponse>(`${apiPath}?${p}`,signal).then(d=>{setBks(d.books);setTotal(d.total);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[q,sortParam,apiPath,grp,mamFilter]);
 useEffect(()=>{const c=new AbortController();load(1,c.signal);return()=>c.abort()},[load]);
-useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
+useEffect(()=>{api.get<MamStatusResponse>("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 const totalPages=Math.max(1,Math.ceil(total/perPage));
 const onAction=async(act,id)=>{const scrollY=window.scrollY;if(act==="hide")await api.post(`/books/${id}/hide`);if(act==="dismiss")await api.post(`/books/${id}/dismiss`);if(act==="delete")await api.del(`/books/${id}`);await load(pg);setTimeout(()=>window.scrollTo(0,scrollY),100)};
 const dismissable=bks.filter(b=>!!b.is_new).length;

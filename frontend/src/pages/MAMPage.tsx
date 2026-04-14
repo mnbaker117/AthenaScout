@@ -8,6 +8,7 @@ import { VT, type ViewMode } from "../components/VT";
 import { SearchBar } from "../components/SearchBar";
 import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
+import type { NavFn, Book, SendToHermeeceFn } from "../types";
 
 // ─── MAM Page ───────────────────────────────────────────────
 // Three-tab view of MAM scan results:
@@ -18,10 +19,10 @@ import { BookSidebar } from "../components/BookSidebar";
 // /api/mam/books — the heavy lifting happens server-side. The unified
 // scan widget on the Dashboard is what shows live scan progress; this
 // page just displays the latest results.
-export default function MAMPage({onNav}:any){const t=useTheme();
+export default function MAMPage({onNav}:{onNav:NavFn}){const t=useTheme();void onNav;
 // Tab + section data
 const[tab,setTab]=usePersist<string>("mam_tab","upload");
-const[books,setBooks]=useState<any[]>([]);const[total,setTotal]=useState(0);
+const[books,setBooks]=useState<Book[]>([]);const[total,setTotal]=useState(0);
 const[pg,setPg]=useState(1);const[q,setQ]=useState("");
 const[sort,setSort]=usePersist("mam_sort","title");
 const[vm,setVm]=usePersist<ViewMode>("mam_vm","list");const[ld,setLd]=useState(true);
@@ -33,7 +34,7 @@ const[scanLimit,setScanLimit]=useState<number|"">(100);
 const[scanStarting,setScanStarting]=useState(false);
 const[mamScan,setMamScan]=useState<any>(null);
 // Sidebar
-const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);
+const[sb,setSb]=useState<Book|null>(null);const[sbClosing,setSbClosing]=useState(false);
 // Multi-select
 const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState(new Set());const[busy,setBusy]=useState(false);
 const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
@@ -41,7 +42,7 @@ const selectAllVisible=()=>setSel(new Set(books.map(b=>b.id)));
 
 // Load counts + check running scan on mount
 useEffect(()=>{
-api.get("/mam/status").then(r=>{if(r.stats)setCounts({upload:r.stats.upload_candidates||0,download:r.stats.available_to_download||0,missing:r.stats.missing_everywhere||0,unscanned:r.stats.total_unscanned||0})}).catch(()=>{});
+api.get<MamStatusResponse>("/mam/status").then(r=>{if(r.stats)setCounts({upload:r.stats.upload_candidates||0,download:r.stats.available_to_download||0,missing:r.stats.missing_everywhere||0,unscanned:r.stats.total_unscanned||0})}).catch(()=>{});
 api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{});
 },[]);
 
@@ -50,7 +51,7 @@ const load=useCallback((page:number=1,signal?:AbortSignal)=>{setLd(true);const p
 useEffect(()=>{const c=new AbortController();load(1,c.signal);return()=>c.abort()},[load]);
 
 // Scan polling
-useEffect(()=>{if(!mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running){clearInterval(iv);api.get("/mam/status").then(r2=>{if(r2.stats)setCounts({upload:r2.stats.upload_candidates||0,download:r2.stats.available_to_download||0,missing:r2.stats.missing_everywhere||0,unscanned:r2.stats.total_unscanned||0})}).catch(()=>{});load(1)}}).catch(()=>{})},5000);return()=>clearInterval(iv)},[mamScan?.running]);
+useEffect(()=>{if(!mamScan?.running)return;const iv=setInterval(()=>{api.get("/mam/scan/status").then(r=>{setMamScan(r);if(!r.running){clearInterval(iv);api.get<MamStatusResponse>("/mam/status").then(r2=>{if(r2.stats)setCounts({upload:r2.stats.upload_candidates||0,download:r2.stats.available_to_download||0,missing:r2.stats.missing_everywhere||0,unscanned:r2.stats.total_unscanned||0})}).catch(()=>{});load(1)}}).catch(()=>{})},5000);return()=>clearInterval(iv)},[mamScan?.running]);
 
 const totalPages=Math.max(1,Math.ceil(total/perPage));
 const switchTab=tb=>{setTab(tb);setQ("");setSort("title");setPg(1)};
@@ -59,11 +60,11 @@ const cancelScan=async()=>{try{await api.post("/mam/scan/cancel")}catch{}};
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
 const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(b)}};
 const onAction=async(act,id)=>{const scrollY=window.scrollY;if(act==="hide")await api.post(`/books/${id}/hide`);if(act==="dismiss")await api.post(`/books/${id}/dismiss`);await load(pg);setTimeout(()=>window.scrollTo(0,scrollY),100)};
-const clearData=async(type)=>{const labels={source:"source scan",mam:"MAM scan",both:"all scan"};if(!confirm(`Clear ${labels[type]} data for ${sel.size} book(s)? ${type==="source"||type==="both"?"Discovered (non-Calibre) selected books will be DELETED.":"MAM status will be reset and books will need re-scanning."}`))return;setBusy(true);try{const r=await api.post("/books/clear-scan-data",{book_ids:[...sel],clear_source:type==="source"||type==="both",clear_mam:type==="mam"||type==="both"});if(r.error){alert(`Error: ${r.error}`)}else{setSel(new Set());setSelMode(false);load(pg);api.get("/mam/status").then(r2=>{if(r2.stats)setCounts({upload:r2.stats.upload_candidates||0,download:r2.stats.available_to_download||0,missing:r2.stats.missing_everywhere||0,unscanned:r2.stats.total_unscanned||0})}).catch(()=>{})}}catch(e){alert(`Error: ${e.message||e}`)}setBusy(false)};
-const scanSelected=async()=>{if(!confirm(`Run a MAM scan against ${sel.size} selected book(s)? This will re-scan even already-scanned books.`))return;setBusy(true);try{const r=await api.post("/books/scan-mam",{book_ids:[...sel]});if(r.error){alert(`MAM scan failed: ${r.error}`)}else{alert(`MAM scan complete: ${r.scanned||0} scanned, ${r.found||0} found, ${r.possible||0} possible, ${r.not_found||0} not on MAM`+(r.errors?`, ${r.errors} errors`:""));setSel(new Set());setSelMode(false);load(pg);api.get("/mam/status").then(r2=>{if(r2.stats)setCounts({upload:r2.stats.upload_candidates||0,download:r2.stats.available_to_download||0,missing:r2.stats.missing_everywhere||0,unscanned:r2.stats.total_unscanned||0})}).catch(()=>{})}}catch(e){alert(`MAM scan failed: ${e.message||e}`)}setBusy(false)};
+const clearData=async(type)=>{const labels={source:"source scan",mam:"MAM scan",both:"all scan"};if(!confirm(`Clear ${labels[type]} data for ${sel.size} book(s)? ${type==="source"||type==="both"?"Discovered (non-Calibre) selected books will be DELETED.":"MAM status will be reset and books will need re-scanning."}`))return;setBusy(true);try{const r=await api.post("/books/clear-scan-data",{book_ids:[...sel],clear_source:type==="source"||type==="both",clear_mam:type==="mam"||type==="both"});if(r.error){alert(`Error: ${r.error}`)}else{setSel(new Set());setSelMode(false);load(pg);api.get<MamStatusResponse>("/mam/status").then(r2=>{if(r2.stats)setCounts({upload:r2.stats.upload_candidates||0,download:r2.stats.available_to_download||0,missing:r2.stats.missing_everywhere||0,unscanned:r2.stats.total_unscanned||0})}).catch(()=>{})}}catch(e){alert(`Error: ${e.message||e}`)}setBusy(false)};
+const scanSelected=async()=>{if(!confirm(`Run a MAM scan against ${sel.size} selected book(s)? This will re-scan even already-scanned books.`))return;setBusy(true);try{const r=await api.post("/books/scan-mam",{book_ids:[...sel]});if(r.error){alert(`MAM scan failed: ${r.error}`)}else{alert(`MAM scan complete: ${r.scanned||0} scanned, ${r.found||0} found, ${r.possible||0} possible, ${r.not_found||0} not on MAM`+(r.errors?`, ${r.errors} errors`:""));setSel(new Set());setSelMode(false);load(pg);api.get<MamStatusResponse>("/mam/status").then(r2=>{if(r2.stats)setCounts({upload:r2.stats.upload_candidates||0,download:r2.stats.available_to_download||0,missing:r2.stats.missing_everywhere||0,unscanned:r2.stats.total_unscanned||0})}).catch(()=>{})}}catch(e){alert(`MAM scan failed: ${e.message||e}`)}setBusy(false)};
 const[hermConf,setHermConf]=useState(false);
 useEffect(()=>{api.get("/hermeece/status").then(r=>setHermConf(!!r.configured&&!!r.reachable)).catch(()=>{})},[]);
-const sendToHermeece=async(bookIds)=>{if(!bookIds||!bookIds.length)return;setBusy(true);try{const r=await api.post("/hermeece/send",{book_ids:bookIds});if(r.sent>0){alert(`Sent ${r.sent} book(s) to Hermeece!${r.skipped?` (${r.skipped} skipped — not Found)`:""}`)}else{alert(r.message||"No books sent")}setSel(new Set());setSelMode(false)}catch(e){alert(`Send failed: ${e.message||e}`)}setBusy(false)};
+const sendToHermeece:SendToHermeeceFn=async(bookIds)=>{if(!bookIds||!bookIds.length)return;setBusy(true);try{const r=await api.post("/hermeece/send",{book_ids:bookIds});if(r.sent>0){alert(`Sent ${r.sent} book(s) to Hermeece!${r.skipped?` (${r.skipped} skipped — not Found)`:""}`)}else{alert(r.message||"No books sent")}setSel(new Set());setSelMode(false)}catch(e:any){alert(`Send failed: ${e.message||e}`)}setBusy(false)};
 const scanSelectedSources=async()=>{if(!confirm(`Run a source-plugin scan for the unique authors of ${sel.size} selected book(s)?\n\nNote: source plugins look up by author, so this will scan the WHOLE author for each unique author in your selection — not just the selected books.`))return;setBusy(true);try{const r=await api.post("/books/scan-sources",{book_ids:[...sel]});if(r.error){alert(`Source scan failed: ${r.error}`)}else{alert(`Source scan complete: ${r.authors_scanned||0} author(s) scanned, ${r.new_books||0} new books found`+(r.errors?`, ${r.errors} errors`:""));setSel(new Set());setSelMode(false);load(pg)}}catch(e){alert(`Source scan failed: ${e.message||e}`)}setBusy(false)};
 
 const tabDefs=[{id:"upload",label:"Upload Candidates",color:t.grnt,icon:"↑",desc:"Books you own that aren't on MAM — potential uploads"},{id:"download",label:"Available on MAM",color:t.cyant||t.cyan,icon:"↓",desc:"Missing books found on MAM — ready to grab"},{id:"missing_everywhere",label:"Missing Everywhere",color:t.tg,icon:"∅",desc:"Neither you nor MAM have these books"}];

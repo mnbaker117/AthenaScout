@@ -12,8 +12,9 @@ import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
 import { BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
+import type { NavFn, Book } from "../types";
 
-export default function HiddenPage({onNav}:any){const t=useTheme();const[bks,setBks]=useState<any[]>([]);const[ld,setLd]=useState(true);const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);
+export default function HiddenPage({onNav}:{onNav:NavFn}){const t=useTheme();const[bks,setBks]=useState<Book[]>([]);const[ld,setLd]=useState(true);const[sb,setSb]=useState<Book|null>(null);const[sbClosing,setSbClosing]=useState(false);
 const load=()=>{setLd(true);return api.get("/books/hidden").then(d=>{setBks(d.books);setLd(false)}).catch(console.error)};
 useEffect(()=>{load()},[]);
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};
