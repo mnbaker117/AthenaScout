@@ -543,9 +543,13 @@ async def _handle_response_cookie(response: httpx.Response) -> None:
     new_token = _extract_mam_id(response)
     if not new_token or new_token == _current_token:
         return
-    old = (_current_token or "")[:8]
     _current_token = new_token
-    logger.debug(f"MAM cookie rotated: {old}...→ {new_token[:8]}...")
+    # Don't log token bytes (even a prefix) — an 8-char prefix is enough
+    # entropy to correlate sessions across log files / log aggregators,
+    # and anyone with `docker logs` access is a wider audience than the
+    # people authorized to see the MAM session token. The fact-of-rotation
+    # is the only diagnostic that matters here.
+    logger.debug("MAM cookie rotated")
     # Debounced persistence: only save if 60+ seconds since last save
     now = time.time()
     if _rotation_callback and (now - _last_rotation_save) >= 60:
