@@ -7,6 +7,27 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.7] — 2026-04-14
+
+### Fixed
+
+- **`mam_category` column never got added on upgraded databases.**
+  v1.1.5 put the `ALTER TABLE books ADD COLUMN mam_category` entry
+  inline with the other `mam_*` migrations in the middle of the
+  list. The migration runner keys on `PRAGMA user_version`, which
+  stores the count of entries already applied — so inserting an
+  entry at index ~28 meant it fell below every existing DB's
+  user_version (44+) and was silently skipped. First MAM scan
+  after a v1.1.5 upgrade crashed with `no such column:
+  mam_category`.
+
+  Fix: moved the migration to the end of the list where the docs
+  (and the existing "Sprint 4 initially placed ibdb_id before
+  pen_name_links" apology comment on v40 migrations) say it
+  belongs. Added a comment on the new entry calling out the
+  append-only contract so the next migration doesn't repeat the
+  bug.
+
 ## [1.1.6] — 2026-04-14
 
 ### Fixed

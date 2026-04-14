@@ -325,10 +325,6 @@ MIGRATIONS = [
     "ALTER TABLE books ADD COLUMN mam_has_multiple INTEGER NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status)",
     "ALTER TABLE books ADD COLUMN mam_my_snatched INTEGER NOT NULL DEFAULT 0",
-    # v1.1.5: MAM category (e.g. "Ebooks - Fantasy") captured during
-    # scan and forwarded to Hermeece via GrabItem.category so the grab
-    # row's category field reflects what MAM actually classified it as.
-    "ALTER TABLE books ADD COLUMN mam_category TEXT",
     "CREATE INDEX IF NOT EXISTS idx_books_author_owned ON books(author_id, owned)",
     # ── FantasticFiction removal ─────────────────────────────────
     # FF was dropped as a source entirely (it duplicated coverage of
@@ -405,6 +401,15 @@ MIGRATIONS = [
     # purely UX so the user can tell J.N. Chaney's co-author chain
     # ("with Christopher Hopper") apart from Arand ↔ Darren.
     "ALTER TABLE pen_name_links ADD COLUMN link_type TEXT NOT NULL DEFAULT 'pen_name'",
+    # v1.1.5: MAM category captured during scan + forwarded to Hermeece.
+    # Reminder for future migrations: this list is APPEND-ONLY — the
+    # runner keys on PRAGMA user_version, which is the count of entries
+    # applied. Inserting anywhere except the end means the new entry's
+    # index falls below existing users' user_version and the migration
+    # never runs. v1.1.5 initially put this inline with the other mam_*
+    # entries, got silently skipped on every DB past v44, surfaced as
+    # "no such column: mam_category" on the first MAM scan post-update.
+    "ALTER TABLE books ADD COLUMN mam_category TEXT",
 ]
 
 
