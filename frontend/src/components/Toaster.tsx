@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 import { useTheme } from "../theme";
+import { EVT } from "../types";
+import type { ToastDetail, ToastKind } from "../lib/toast";
 
 // Top-banner toast notification system. Listens for the
-// `athenascout:toast` window event (dispatched via `lib/toast.js`)
+// `athenascout:toast` window event (dispatched via `lib/toast.ts`)
 // and renders a vertical stack of fading banners at the top of the
 // viewport. Mounted once at the App level so every page shares the
 // same stack and no two pages can render competing toasters.
@@ -21,7 +23,15 @@ import { useTheme } from "../theme";
 
 let nextId = 1;
 
-const KIND_STYLES = {
+interface ToastState {
+  id: number;
+  kind: ToastKind;
+  msg: string;
+  entering: boolean;
+  exiting: boolean;
+}
+
+const KIND_STYLES: Record<ToastKind, { bg: string; border: string }> = {
   // bg uses RGBA with alpha so the banner is semi-transparent
   // over whatever's behind it (a la macOS notification center).
   info:    { bg: "rgba(64, 116, 196, 0.92)",  border: "rgba(110, 158, 230, 0.5)" },
@@ -30,17 +40,20 @@ const KIND_STYLES = {
   error:   { bg: "rgba(180, 60, 70, 0.92)",   border: "rgba(220, 110, 120, 0.5)" },
 };
 
-const ICONS = { info: "ℹ", success: "✓", warn: "⚠", error: "✕" };
+const ICONS: Record<ToastKind, string> = { info: "ℹ", success: "✓", warn: "⚠", error: "✕" };
 
 export default function Toaster() {
   const t = useTheme();
-  const [toasts, setToasts] = useState([]);
+  void t; // theme not currently used; reserved for future per-theme styling
+  const [toasts, setToasts] = useState<ToastState[]>([]);
   // Refs to per-toast timeout handles so we can cancel them on click-dismiss.
-  const timers = useRef(new Map());
+  const timers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
 
   useEffect(() => {
-    const onToast = (e) => {
-      const { kind = "info", msg = "" } = e.detail || {};
+    const onToast = (e: Event) => {
+      const detail = (e as CustomEvent<ToastDetail>).detail || { kind: "info" as ToastKind, msg: "" };
+      const kind: ToastKind = detail.kind || "info";
+      const msg = detail.msg || "";
       const id = nextId++;
       // Insert with `entering: true`. A second setState on next frame
       // flips it false to trigger the slide-down animation. Without the
@@ -54,9 +67,9 @@ export default function Toaster() {
       const dismissTimer = setTimeout(() => dismiss(id), 5000);
       timers.current.set(id, dismissTimer);
     };
-    window.addEventListener("athenascout:toast", onToast);
+    window.addEventListener(EVT.Toast, onToast);
     return () => {
-      window.removeEventListener("athenascout:toast", onToast);
+      window.removeEventListener(EVT.Toast, onToast);
       // Clear any pending dismiss timers on unmount
       for (const [, h] of timers.current) clearTimeout(h);
       timers.current.clear();
@@ -64,7 +77,7 @@ export default function Toaster() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const dismiss = (id) => {
+  const dismiss = (id: number): void => {
     // Cancel any pending auto-dismiss timer (click-to-dismiss path).
     const h = timers.current.get(id);
     if (h) { clearTimeout(h); timers.current.delete(id); }

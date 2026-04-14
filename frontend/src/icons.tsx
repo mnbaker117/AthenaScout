@@ -6,9 +6,12 @@
 // Adding a new icon: add it as a new key in the Ic object below.
 //   Ic.myicon = _i(<path d="..."/>);
 
-const _i=(d,s=16)=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">{d}</svg>;
+import type { ReactNode } from "react";
 
-export const Ic={
+const _i = (d: ReactNode, s: number = 16): ReactNode =>
+  <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">{d}</svg>;
+
+export const Ic: Record<string, ReactNode> = {
   refresh:_i(<><path d="M3 12a9 9 0 019-9 9.75 9.75 0 016.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 01-9 9 9.75 9.75 0 01-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></>),
   sync:_i(<><path d="M21 12a9 9 0 11-6.22-8.56"/><path d="M21 3v5h-5"/></>),
   x:_i(<><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>),
