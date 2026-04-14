@@ -176,6 +176,7 @@ export interface Library {
   name: string;
   display_name?: string;
   app_type?: string;
+  content_type?: string;  // "ebook" | "audiobook" | etc. — used for the nav-bar emoji prefix
   source_db_path?: string;
   library_path?: string;
   active?: boolean;

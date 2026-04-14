@@ -8,7 +8,7 @@ import { VT, type ViewMode } from "../components/VT";
 import { SearchBar } from "../components/SearchBar";
 import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
-import type { NavFn, Book, SendToHermeeceFn } from "../types";
+import type { NavFn, Book, SendToHermeeceFn, MamStatusResponse } from "../types";
 
 // ─── MAM Page ───────────────────────────────────────────────
 // Three-tab view of MAM scan results:
@@ -36,7 +36,7 @@ const[mamScan,setMamScan]=useState<any>(null);
 // Sidebar
 const[sb,setSb]=useState<Book|null>(null);const[sbClosing,setSbClosing]=useState(false);
 // Multi-select
-const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState(new Set());const[busy,setBusy]=useState(false);
+const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState<Set<number>>(new Set());const[busy,setBusy]=useState(false);
 const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
 const selectAllVisible=()=>setSel(new Set(books.map(b=>b.id)));
 
