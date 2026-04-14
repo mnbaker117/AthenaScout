@@ -137,6 +137,11 @@ async def lifespan(app: FastAPI):
         async def _persist_mam_token(new_token: str):
             await set_secret("mam_session_id", new_token)
             logger.info(f"MAM cookie persisted to encrypted store ({new_token[:8]}...)")
+            try:
+                from app.notify import notify_mam_cookie_rotated
+                await notify_mam_cookie_rotated()
+            except Exception:
+                logger.debug("MAM cookie rotation notify failed", exc_info=True)
         mam_set_rotation_callback(_persist_mam_token)
 
     # ─── Auth database ────────────────────────────────────
@@ -240,13 +245,22 @@ async def lifespan(app: FastAPI):
                     lib_app = get_app(lib.get("app_type", "calibre"))
                     logger.info(f"Scheduled sync: '{lib['name']}' {lib_app.db_filename if lib_app else 'database'} changed, syncing...")
                     if lib_app:
-                        await lib_app.sync(lib["source_db_path"], lib["library_path"])
+                        sync_result = await lib_app.sync(lib["source_db_path"], lib["library_path"])
                     else:
-                        await sync_calibre(lib["source_db_path"], lib["library_path"])
+                        sync_result = await sync_calibre(lib["source_db_path"], lib["library_path"])
                     mtimes[lib["slug"]] = current_mtime
                     st["library_mtimes"] = mtimes
                     save_settings(st)
                     any_synced = True
+                    try:
+                        from app.notify import notify_library_sync
+                        await notify_library_sync(
+                            lib.get("display_name") or lib.get("name") or "Library",
+                            int((sync_result or {}).get("books_new", 0)),
+                            int((sync_result or {}).get("books_updated", 0)),
+                        )
+                    except Exception:
+                        logger.debug("library-sync notify failed", exc_info=True)
                 except Exception as e:
                     logger.warning(f"Scheduled sync failed for '{lib['name']}': {e}")
             set_active_library(current_active)
@@ -278,6 +292,15 @@ async def lifespan(app: FastAPI):
         try:
             await run_full_lookup(on_progress=_progress)
             state._lookup_progress.update({"running": False, "status": "complete"})
+            try:
+                from app.notify import notify_scan_complete
+                await notify_scan_complete(
+                    label="Scheduled Source Scan",
+                    new_books=int(state._lookup_progress.get("new_books", 0)),
+                    authors_total=int(state._lookup_progress.get("total", 0) or 1),
+                )
+            except Exception:
+                logger.debug("scheduled-lookup notify failed", exc_info=True)
         except Exception as e:
             logger.error(f"Scheduled lookup error: {e}")
             state._lookup_progress.update({"running": False, "status": f"error: {e}"})
@@ -378,6 +401,17 @@ async def lifespan(app: FastAPI):
                 )
                 await db.commit()
                 logger.info(f"MAM scheduled scan done: {result.get('scanned', 0)} scanned, {result.get('found', 0)} found")
+                if not result.get("error"):
+                    try:
+                        from app.notify import notify_mam_scan_complete
+                        await notify_mam_scan_complete(
+                            scanned=int(state._mam_scan_progress.get("scanned", 0)),
+                            found=int(state._mam_scan_progress.get("found", 0)),
+                            possible=int(state._mam_scan_progress.get("possible", 0)),
+                            not_found=int(state._mam_scan_progress.get("not_found", 0)),
+                        )
+                    except Exception:
+                        logger.debug("MAM scheduled scan notify failed", exc_info=True)
             except Exception as e:
                 logger.error(f"MAM scheduled scan error: {e}")
                 state._mam_scan_progress.update({"running": False, "status": f"error: {e}"})
@@ -390,6 +424,14 @@ async def lifespan(app: FastAPI):
     # instead of silently killing the scheduler for the rest of the process
     # lifetime (the default `create_task` behavior).
     state.supervised_task(_mam_scheduler, name="mam_scheduler")
+
+    # Digest scheduler — drains the in-memory notification queue on
+    # the configured cadence (daily/weekly @ 09:00 local). Re-reads
+    # settings each iteration so toggling digest mode takes effect
+    # without a restart.
+    from app.digest import run_digest_scheduler
+    state.supervised_task(run_digest_scheduler, name="digest_scheduler")
+
     scheduler.start()
     yield
     scheduler.shutdown()
@@ -397,6 +439,19 @@ async def lifespan(app: FastAPI):
     # the underlying transport actually closes before uvicorn finishes
     # shutting down the event loop.
     await mam_aclose_session()
+    # Best-effort flush of any queued digest events on shutdown so the
+    # user doesn't lose pending notifications across container restarts.
+    try:
+        from app.digest import flush_digest
+        await flush_digest(force=True)
+    except Exception:
+        logger.debug("Final digest flush failed", exc_info=True)
+    # Close the notify HTTP client.
+    try:
+        from app.notify import aclose as notify_aclose
+        await notify_aclose()
+    except Exception:
+        pass
 
 
 # ─── App + Router Registration ───────────────────────────────

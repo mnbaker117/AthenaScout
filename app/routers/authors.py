@@ -135,6 +135,29 @@ def _spawn_lookup_task(scan_type: str, total: int, runner) -> None:
         try:
             await runner()
             state._lookup_progress.update({"running": False, "status": "complete"})
+            try:
+                from app.notify import notify_scan_complete
+                # Pick a friendly label per scan_type. For single-author
+                # scans, the runner already wrote `current_author` into
+                # state — use it so the notification reads
+                # "Scan complete: William D. Arand" rather than
+                # "Author Scan complete".
+                if scan_type in ("single_author", "single_author_full"):
+                    label = state._lookup_progress.get("current_author") or "Author"
+                    authors_total = 1
+                else:
+                    label = {
+                        "bulk_authors": "Bulk Author Scan",
+                        "bulk_books":   "Bulk Book Scan",
+                    }.get(scan_type, "Author Scan")
+                    authors_total = int(state._lookup_progress.get("total", 0) or 1)
+                await notify_scan_complete(
+                    label=label,
+                    new_books=int(state._lookup_progress.get("new_books", 0)),
+                    authors_total=authors_total,
+                )
+            except Exception:
+                logger.debug("author-scan notify failed", exc_info=True)
         except asyncio.CancelledError:
             # User clicked Stop on the Dashboard widget. Mark cancelled
             # and let the exception propagate so any further `await` in
@@ -300,6 +323,15 @@ async def scan_authors_sources(data: dict = Body(...)):
                 new_books = await lookup_author(aid, name, on_progress=_on_source)
                 nonlocal_state["new"] += int(new_books or 0)
                 nonlocal_state["scanned"] += 1
+                # Per-author granular ping. Gated by ntfy_on_new_books
+                # so users who only want the bulk-summary can suppress
+                # these without losing the final aggregate notification.
+                if new_books:
+                    try:
+                        from app.notify import notify_new_books
+                        await notify_new_books(name, int(new_books))
+                    except Exception:
+                        logger.debug("per-author notify failed", exc_info=True)
             except asyncio.CancelledError:
                 raise
             except Exception as e:

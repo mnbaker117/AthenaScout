@@ -69,6 +69,15 @@ async def trigger_sync():
             mtimes[active_slug] = os.path.getmtime(lib["source_db_path"])
             s["library_mtimes"] = mtimes
             save_settings(s)
+            try:
+                from app.notify import notify_library_sync
+                await notify_library_sync(
+                    lib.get("display_name") or lib.get("name") or "Library",
+                    int((result or {}).get("books_new", 0)),
+                    int((result or {}).get("books_updated", 0)),
+                )
+            except Exception:
+                logger.debug("library-sync notify failed", exc_info=True)
         else:
             result = await sync_calibre()
         state._last_library_sync_check["at"] = time.time()
@@ -141,6 +150,15 @@ async def trigger_lookup():
         try:
             await run_full_lookup(on_progress=_progress)
             state._lookup_progress.update({"running": False, "status": "complete"})
+            try:
+                from app.notify import notify_scan_complete
+                await notify_scan_complete(
+                    label="Source Scan",
+                    new_books=int(state._lookup_progress.get("new_books", 0)),
+                    authors_total=int(state._lookup_progress.get("total", 0) or 1),
+                )
+            except Exception:
+                logger.debug("source-scan notify failed", exc_info=True)
         except Exception as e:
             logger.error(f"Author scan error: {e}")
             state._lookup_progress.update({"running": False, "status": f"error: {e}"})
@@ -361,6 +379,15 @@ async def trigger_full_rescan():
         try:
             await run_full_rescan(on_progress=_progress)
             state._lookup_progress.update({"running": False, "status": "complete"})
+            try:
+                from app.notify import notify_scan_complete
+                await notify_scan_complete(
+                    label="Full Re-Scan",
+                    new_books=int(state._lookup_progress.get("new_books", 0)),
+                    authors_total=int(state._lookup_progress.get("total", 0) or 1),
+                )
+            except Exception:
+                logger.debug("full-rescan notify failed", exc_info=True)
         except Exception as e:
             logger.error(f"Full re-scan error: {e}")
             state._lookup_progress.update({"running": False, "status": f"error: {e}"})
