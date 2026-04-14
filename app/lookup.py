@@ -28,7 +28,9 @@ Three things to know before reading:
      is created. This prevents orphaned series rows from leaking into
      the DB during library-only scans.
 """
-import time, re, logging, json
+import asyncio, time, re, logging, json
+from dataclasses import dataclass
+from typing import Any
 from difflib import SequenceMatcher
 from app.config import load_settings
 from app.database import get_db
@@ -170,6 +172,64 @@ def reload_sources():
     amazon = AmazonSource(rate_limit=s.get("rate_amazon", 2))
     ibdb = IbdbSource(rate_limit=s.get("rate_ibdb", 1))
     google_books = GoogleBooksSource(rate_limit=s.get("rate_google_books", 0.5))
+
+
+# ─── Source orchestration registry ──────────────────────────
+# Centralizes per-source metadata so `lookup_author` walks a single
+# typed list instead of a hand-rolled if-chain. Each spec carries:
+#   - role: "primary" | "secondary" | "supplementary"
+#       Informational; not yet used to short-circuit. Hermeece's
+#       per-book enricher short-circuits at score >= 0.8, but
+#       AthenaScout legitimately *wants* every source's per-book
+#       signals (Amazon for series confirmation, IBDB for ISBN, GB
+#       for descriptions) so cross-source short-circuit would lose
+#       backfills. Kept here for future use (e.g., owned-only mode
+#       could skip supplementary).
+#   - timeout_sec: hard wall-clock cap on a single-author scan of
+#       this source. Generous enough that a normal scan completes,
+#       tight enough that a stuck source can't hang the whole pipeline.
+#       A timeout returns the partial work the source has already
+#       merged (writes happen incrementally during the scan), then
+#       the loop moves to the next source.
+#   - getter: returns the live module-level instance so reload_sources()
+#       takes effect without re-registering the table.
+#
+# A global per-author wall-clock budget on top of these caps the
+# total time even if every source individually stays under its
+# timeout — see PER_AUTHOR_BUDGET_SEC.
+@dataclass
+class SourceSpec:
+    name: str
+    setting_key: str
+    role: str
+    timeout_sec: float
+    getter: Any  # callable returning the live source instance
+    default_enabled: bool = True
+
+
+def _src_goodreads():    return goodreads
+def _src_hardcover():    return hardcover
+def _src_kobo():         return kobo
+def _src_amazon():       return amazon
+def _src_ibdb():         return ibdb
+def _src_google_books(): return google_books
+
+
+SOURCES: list[SourceSpec] = [
+    SourceSpec("goodreads",    "goodreads_enabled",    "primary",       300.0, _src_goodreads,    True),
+    SourceSpec("hardcover",    "hardcover_enabled",    "primary",       180.0, _src_hardcover,    True),
+    SourceSpec("kobo",         "kobo_enabled",         "secondary",     120.0, _src_kobo,         True),
+    SourceSpec("amazon",       "amazon_enabled",       "secondary",     180.0, _src_amazon,       False),
+    SourceSpec("ibdb",         "ibdb_enabled",         "supplementary",  90.0, _src_ibdb,         False),
+    SourceSpec("google_books", "google_books_enabled", "supplementary",  60.0, _src_google_books, False),
+]
+
+# Total wall-clock budget across all sources for a single author.
+# At 15 minutes, even worst-case (Goodreads timing out at 300s + a
+# couple of slow secondaries) leaves room. If hit, remaining sources
+# are skipped and a warning is logged — the partial result is still
+# committed because each source's writes are independent.
+PER_AUTHOR_BUDGET_SEC = 15 * 60
 
 
 def _smart_strip_subtitle(t: str) -> str:
@@ -1640,63 +1700,97 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     ibdb._on_new_candidate = _on_new_candidate
     google_books._on_new_candidate = _on_new_candidate
 
-    # 1. Goodreads (PRIMARY)
-    if settings.get("goodreads_enabled", True):
-        n = await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
-        total += n
-        # Sync the visible count to the accurate post-merge total.
-        # If candidates over-counted (filters/dedupe at merge time
-        # discarded some), this corrects downward. If under-counted
-        # (a source path fires no candidates), it catches up.
-        visible[0] = total
-        if on_progress:
-            on_progress(total)
-
-    # 2. Hardcover
-    # Read API key from encrypted store (preferred) or settings (legacy)
+    # ── Walk the source registry ──────────────────────────────
+    # Iterates SOURCES in declared priority order. Each source is
+    # gated behind asyncio.wait_for() so a single hung HTTP call
+    # can't stall the whole scan. A timeout is logged but otherwise
+    # treated like a successful zero-result scan — partial writes
+    # made before the timeout are kept.
+    #
+    # A global per-author wall-clock budget (PER_AUTHOR_BUDGET_SEC)
+    # guards against the worst case where every source bumps up
+    # against its own cap and the scan still takes too long. Once
+    # the budget is exceeded, remaining sources are skipped.
+    scan_started_at = time.monotonic()
+    # Read Hardcover API key once; the source needs it injected before its
+    # _try_source runs. Same encrypted-store-then-legacy fallback as before.
     try:
         from app.secrets import get_secret as _get_secret
         _hc_key = await _get_secret("hardcover_api_key") or settings.get("hardcover_api_key")
     except Exception:
         _hc_key = settings.get("hardcover_api_key")
-    if _hc_key and settings.get("hardcover_enabled", True):
-        hardcover.update_api_key(_hc_key)
-        hardcover._owned_titles = our_titles
-        hardcover._owned_series_names = our_series_names
-        n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
-        total += n
-        visible[0] = total
-        if on_progress:
-            on_progress(total)
 
-    # 3. Kobo
-    if settings.get("kobo_enabled", True):
-        n = await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
-        total += n
-        visible[0] = total
-        if on_progress:
-            on_progress(total)
+    for spec in SOURCES:
+        # Gate by user setting. default_enabled mirrors the historical
+        # behavior of the per-source if-block (Amazon/IBDB/GB default off).
+        if not settings.get(spec.setting_key, spec.default_enabled):
+            continue
+        # Hardcover requires a configured API key — silently skip otherwise
+        # so the user doesn't see a failed scan they never asked for.
+        if spec.name == "hardcover" and not _hc_key:
+            continue
+        # Global budget gate — if we've already burned our wall-clock
+        # budget, abandon the rest of the sources for this author.
+        elapsed = time.monotonic() - scan_started_at
+        if elapsed >= PER_AUTHOR_BUDGET_SEC:
+            logger.warning(
+                f"  Per-author scan budget ({PER_AUTHOR_BUDGET_SEC}s) exceeded for "
+                f"'{author_name}' — skipping remaining sources: "
+                f"{[s.name for s in SOURCES[SOURCES.index(spec):]]}"
+            )
+            break
 
-    # 4. Amazon (series confirmation — strongest signal for standalone vs series)
-    if settings.get("amazon_enabled", False):
-        n = await _try_source(amazon, author_name, author_id, our_titles, languages, "amazon", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
-        total += n
-        visible[0] = total
-        if on_progress:
-            on_progress(total)
+        source = spec.getter()
+        # Per-source pre-flight (Hardcover is the only one that needs it).
+        if spec.name == "hardcover":
+            source.update_api_key(_hc_key)
+            source._owned_titles = our_titles
+            source._owned_series_names = our_series_names
 
-    # 5. IBDB (supplementary — ISBN and publisher backfill)
-    if settings.get("ibdb_enabled", False):
-        n = await _try_source(ibdb, author_name, author_id, our_titles, languages, "ibdb", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
-        total += n
-        visible[0] = total
-        if on_progress:
-            on_progress(total)
+        # Cap the source at its per-source timeout *or* the remaining
+        # budget, whichever is smaller. Prevents a slow source near the
+        # end of the scan from individually blowing the global budget.
+        timeout = min(spec.timeout_sec, max(1.0, PER_AUTHOR_BUDGET_SEC - elapsed))
 
-    # 6. Google Books (supplementary — ISBN, publisher, description backfill)
-    if settings.get("google_books_enabled", False):
-        n = await _try_source(google_books, author_name, author_id, our_titles, languages, "google_books", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked)
+        try:
+            n = await asyncio.wait_for(
+                _try_source(
+                    source, author_name, author_id, our_titles, languages, spec.name,
+                    existing_titles=existing_titles, full_scan=full_scan,
+                    owned_only=owned_only, series_collector=series_collector,
+                    exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            # The source's HTTP requests get cancelled by wait_for.
+            # Anything it merged before the timeout is durable —
+            # _try_source commits incrementally. We just don't know
+            # the exact `n` for this source; conservatively count 0
+            # and let the visible counter re-sync from `total` below.
+            logger.warning(
+                f"  Source '{spec.name}' timed out after {timeout:.0f}s "
+                f"for '{author_name}' — keeping any partial writes, moving on"
+            )
+            n = 0
+        except asyncio.CancelledError:
+            # Cancellation propagates — the user clicked Stop.
+            raise
+        except Exception as e:
+            # An unhandled source exception shouldn't kill the whole
+            # author scan; log + continue with the next source so other
+            # signals still land.
+            logger.error(
+                f"  Source '{spec.name}' raised for '{author_name}': {e}",
+                exc_info=True,
+            )
+            n = 0
+
         total += n
+        # Sync the visible count to the accurate post-merge total.
+        # If candidates over-counted (filters/dedupe at merge time
+        # discarded some), this corrects downward. If under-counted
+        # (a source path fires no candidates), it catches up.
         visible[0] = total
         if on_progress:
             on_progress(total)
