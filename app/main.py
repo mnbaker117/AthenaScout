@@ -316,7 +316,12 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(60)
             s = load_settings()
             interval = s.get("mam_scan_interval_minutes", 360)
-            if interval <= 0 or not s.get("mam_enabled") or not s.get("mam_session_id") or not s.get("mam_scanning_enabled", True):
+            # Token resolution goes through the encrypted-store-aware
+            # helper. Reading s["mam_session_id"] directly returns "" on
+            # any deployment that's been through the Sprint 6 migration.
+            from app.routers.mam import _get_mam_token
+            mam_token = await _get_mam_token()
+            if interval <= 0 or not s.get("mam_enabled") or not mam_token or not s.get("mam_scanning_enabled", True):
                 continue
             elapsed_min = (time.time() - last_scan_at) / 60
             if elapsed_min < interval:
@@ -334,7 +339,7 @@ async def lifespan(app: FastAPI):
             last_val = s.get("last_mam_validated_at") or 0
             if time.time() - last_val > 86400:
                 logger.info("MAM daily validation check...")
-                vr = await mam_validate(s["mam_session_id"], True)
+                vr = await mam_validate(mam_token, True)
                 if vr["success"]:
                     s["last_mam_validated_at"] = time.time()
                     s["mam_validation_ok"] = True
@@ -383,7 +388,7 @@ async def lifespan(app: FastAPI):
             db = await get_db()
             try:
                 result = await mam_scan_batch(
-                    db, session_id=s["mam_session_id"], limit=150,
+                    db, session_id=mam_token, limit=150,
                     delay=s.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=s.get("mam_format_priority"),
                     on_progress=_sched_progress,

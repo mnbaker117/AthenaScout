@@ -70,6 +70,12 @@ async def _get_mam_token() -> str:
     """Get the active MAM token from the best source.
 
     Priority: in-memory (cookie rotation) → encrypted store → settings.json.
+    Settings.json is the legacy fallback only — Sprint 6 migrated
+    plaintext tokens out of settings.json into the encrypted store
+    AND blanked the original. New tokens saved through Settings now
+    land in the encrypted store directly via `set_secret()` in the
+    /api/settings handler, so reads MUST go through this helper or
+    they'll get empty strings.
     """
     token = mam_get_current_token()
     if token:
@@ -84,11 +90,22 @@ async def _get_mam_token() -> str:
     return load_settings().get("mam_session_id", "")
 
 
+async def _mam_ready(s: dict) -> bool:
+    """Is MAM enabled AND has a usable token in any of the three sources?
+
+    Use this for endpoint gating instead of `s.get("mam_session_id")`,
+    which is always empty after the Sprint 6 encrypted-store migration.
+    """
+    if not s.get("mam_enabled"):
+        return False
+    return bool(await _get_mam_token())
+
+
 @router.post("/validate")
 async def mam_validate_endpoint():
     """Test MAM session ID — runs IP registration + search auth."""
     s = load_settings()
-    session_id = s.get("mam_session_id", "")
+    session_id = await _get_mam_token()
     if not session_id:
         return {"success": False, "message": "No MAM session ID configured"}
     skip_ip = s.get("mam_skip_ip_update", False)
@@ -107,7 +124,7 @@ async def mam_validate_endpoint():
 async def mam_status_endpoint():
     """Get MAM integration status and stats."""
     s = load_settings()
-    enabled = s.get("mam_enabled", False) and bool(s.get("mam_session_id", ""))
+    enabled = await _mam_ready(s)
     if not enabled:
         return {"enabled": False, "stats": None, "full_scan": None}
     db = await get_db()
@@ -126,7 +143,7 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
     """Scan books missing MAM data. Batches of 100 with 5-min pauses.
     If limit is provided, scan at most that many books total."""
     s = load_settings()
-    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+    if not await _mam_ready(s):
         return {"error": "MAM not configured or not enabled"}
     if not s.get("mam_scanning_enabled", True):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
@@ -188,7 +205,8 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
             # Wait for Calibre sync (only) before starting next batch
             await _wait_for_other_writers()
             cs = load_settings()
-            if not cs.get("mam_enabled") or not cs.get("mam_session_id"):
+            cs_token = await _get_mam_token()
+            if not cs.get("mam_enabled") or not cs_token:
                 state._mam_scan_progress.update({"status": "stopped (MAM disabled)", "running": False})
                 return
             db = await get_db()
@@ -230,7 +248,7 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                     await _notify_mam_done()
                     return
                 result = await mam_scan_batch(
-                    db, session_id=cs["mam_session_id"], limit=len(batch_ids),
+                    db, session_id=cs_token, limit=len(batch_ids),
                     delay=cs.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=cs.get("mam_format_priority"),
                     on_progress=_progress,
@@ -311,7 +329,8 @@ async def mam_scan_status_endpoint():
 async def mam_test_scan():
     """Run a quick test scan of 10 books and return results inline."""
     s = load_settings()
-    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+    token = await _get_mam_token()
+    if not s.get("mam_enabled") or not token:
         return {"error": "MAM not configured or not enabled"}
     if not s.get("mam_scanning_enabled", True):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
@@ -320,7 +339,7 @@ async def mam_test_scan():
     db = await get_db()
     try:
         result = await mam_scan_batch(
-            db, session_id=s["mam_session_id"], limit=10,
+            db, session_id=token, limit=10,
             delay=s.get("rate_mam", 2),
             skip_ip_update=True,
             format_priority=s.get("mam_format_priority"),
@@ -360,6 +379,7 @@ async def mam_full_scan_start():
             db = await get_db()
             try:
                 cs = load_settings()
+                cs_token = await _get_mam_token()
                 # Forward in-flight book titles to the unified scan
                 # widget. The full-scan loop polls the DB for
                 # scanned/total via mam_get_full_scan_status, but
@@ -368,7 +388,7 @@ async def mam_full_scan_start():
                 def _on_book(title: str) -> None:
                     state._mam_scan_progress["current_book"] = title or ""
                 result = await mam_run_full_scan_batch(
-                    db, session_id=cs["mam_session_id"],
+                    db, session_id=cs_token,
                     skip_ip_update=True,
                     delay=cs.get("rate_mam", 2),
                     format_priority=cs.get("mam_format_priority"),
@@ -431,7 +451,7 @@ async def mam_full_scan_cancel():
 async def mam_toggle():
     """Toggle MAM features on/off (only works if session ID exists)."""
     s = load_settings()
-    if not s.get("mam_session_id"):
+    if not await _get_mam_token():
         return {"error": "No MAM session ID configured"}
     s["mam_enabled"] = not s.get("mam_enabled", False)
     save_settings(s)
@@ -497,7 +517,8 @@ async def mam_scan_single_book(book_id: int):
     refresh a stale or wrong match without waiting for a full or scheduled scan.
     """
     s = load_settings()
-    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+    token = await _get_mam_token()
+    if not s.get("mam_enabled") or not token:
         return {"error": "MAM not configured or not enabled"}
     if not s.get("mam_scanning_enabled", True):
         return {"error": "MAM scanning is disabled — enable it in Settings"}
@@ -513,7 +534,7 @@ async def mam_scan_single_book(book_id: int):
         _, title, author = rows[0]
 
         check = await mam_check_book(
-            s["mam_session_id"], title, author,
+            token, title, author,
             format_priority=s.get("mam_format_priority"),
             delay=s.get("rate_mam", 2),
             lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
@@ -557,7 +578,8 @@ async def mam_scan_single_author(author_id: int):
     batch scan.
     """
     s = load_settings()
-    if not s.get("mam_enabled") or not s.get("mam_session_id"):
+    token = await _get_mam_token()
+    if not s.get("mam_enabled") or not token:
         raise HTTPException(400, "MAM not configured or not enabled")
     if not s.get("mam_scanning_enabled", True):
         raise HTTPException(400, "MAM scanning is disabled — enable it in Settings")
@@ -604,7 +626,7 @@ async def mam_scan_single_author(author_id: int):
 
     delay = s.get("rate_mam", 2)
     format_priority = s.get("mam_format_priority")
-    token = s["mam_session_id"]
+    # `token` already resolved above via _get_mam_token() and gated on
     lang_ids = _resolve_mam_languages(s.get("languages", ["English"]))
 
     async def _do_scan():
