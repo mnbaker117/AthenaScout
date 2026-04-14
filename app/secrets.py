@@ -28,6 +28,7 @@ logger = logging.getLogger("athenascout.secrets")
 SECRET_KEYS: dict[str, str] = {
     "mam_session_id": "MAM session cookie",
     "hardcover_api_key": "Hardcover API Bearer token",
+    "hermeece_api_key": "Hermeece shared API key",
 }
 
 _SECRETS_TABLE = """

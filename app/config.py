@@ -119,6 +119,7 @@ DEFAULT_SETTINGS = {
     # an ebook-focused library.
     "exclude_audiobooks": True,
     "hermeece_url": "",
+    "hermeece_api_key": "",
     "ntfy_url": "",
     "ntfy_topic": "",
     "ntfy_on_scan_complete": True,

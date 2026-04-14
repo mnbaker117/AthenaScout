@@ -18,6 +18,7 @@ from fastapi import APIRouter, Body, HTTPException
 
 from app.config import load_settings
 from app.database import get_db
+from app.secrets import get_secret
 
 logger = logging.getLogger("athenascout")
 
@@ -40,6 +41,14 @@ async def send_to_hermeece(data: dict = Body(...)):
     hermeece_url = (s.get("hermeece_url") or "").strip().rstrip("/")
     if not hermeece_url:
         raise HTTPException(400, "Hermeece URL not configured. Set it in Settings → Library → Hermeece URL.")
+    # The API key lives in the encrypted store (settings.json is
+    # blanked after the Sprint 6 migration). Fall back to the raw
+    # settings read for pre-migration installs.
+    hermeece_key = (await get_secret("hermeece_api_key") or "").strip()
+    if not hermeece_key:
+        hermeece_key = (s.get("hermeece_api_key") or "").strip()
+    if not hermeece_key:
+        raise HTTPException(400, "Hermeece API key not configured. Generate one in Hermeece → Credentials → AthenaScout shared API key and paste it into AthenaScout Settings.")
 
     db = await get_db()
     try:
@@ -86,6 +95,7 @@ async def send_to_hermeece(data: dict = Body(...)):
             resp = await client.post(
                 f"{hermeece_url}/api/v1/grabs/from-athenascout",
                 json={"items": items},
+                headers={"X-API-Key": hermeece_key},
             )
             resp.raise_for_status()
             result = resp.json()

@@ -7,6 +7,29 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.3] — 2026-04-14
+
+### Added
+
+- **Hermeece shared API key.** New "Hermeece API Key" field in
+  Settings → Library → Hermeece Integration, stored Fernet-encrypted
+  in the auth DB alongside the MAM session ID and Hardcover token.
+  "Send to Hermeece" now sends the token as `X-API-Key` on every
+  batch POST. Matches the new `athenascout_api_key` credential in
+  Hermeece v1.1.1 (auth middleware accepts the header as an
+  alternative to the session cookie). Sends with a missing or
+  unconfigured key fail fast with an actionable 400 pointing the
+  user at Hermeece's Credentials page.
+
+### Fixed
+
+- **"Send to Hermeece" silently broken against v1.1.0 Hermeece.**
+  Hermeece's v1.1 added a session-cookie auth middleware that
+  rejected AthenaScout's cookieless POSTs with `HTTP 401:
+  Authentication required`. AthenaScout's hermeece router comment
+  still assumed the pre-auth "same LAN, same auth boundary"
+  invariant. The new shared API key restores the handoff.
+
 ## [1.1.2] — 2026-04-13
 
 ### Fixed
