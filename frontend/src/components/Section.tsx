@@ -3,8 +3,8 @@ import { useTheme } from "../theme";
 import { PB } from "./PB";
 
 export interface SectionProps {
-  title: string;
-  count?: number;
+  title: ReactNode;
+  count?: number | string;
   children?: ReactNode;
   defaultOpen?: boolean;
   ownedCount?: number;

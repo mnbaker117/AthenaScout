@@ -48,13 +48,13 @@ const scanSources=async()=>{if(!confirm(`Run a source-plugin scan for the unique
 // would otherwise re-run on every keystroke during search, theme change,
 // etc. Scoping deps to [bks, grp] means grouping only recomputes when
 // the book list or grouping mode actually change.
-const groupedEntries=useMemo(()=>{
+const groupedEntries=useMemo<[string,any[]][]|null>(()=>{
   if(grp==="author"&&bks.length>0){
-    const g={};bks.forEach(b=>{const k=b.author_name||"Unknown";if(!g[k])g[k]=[];g[k].push(b)});
+    const g:Record<string,any[]>={};bks.forEach(b=>{const k=b.author_name||"Unknown";if(!g[k])g[k]=[];g[k].push(b)});
     return Object.entries(g).sort(([a],[b])=>a.localeCompare(b));
   }
   if(grp==="series"&&bks.length>0){
-    const g={};bks.forEach(b=>{const k=b.series_name||"Standalone";if(!g[k])g[k]=[];g[k].push(b)});
+    const g:Record<string,any[]>={};bks.forEach(b=>{const k=b.series_name||"Standalone";if(!g[k])g[k]=[];g[k].push(b)});
     return Object.entries(g).sort(([a],[b])=>a==="Standalone"?1:b==="Standalone"?-1:a.localeCompare(b));
   }
   return null;

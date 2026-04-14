@@ -7,7 +7,7 @@
 //
 // On success, calls `onLoginSuccess()` which is wired up in App.jsx
 // to flip the auth state and re-render the main app.
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { useTheme } from "../theme";
 import { api } from "../api";
 import { Btn } from "../components/Btn";
@@ -26,8 +26,8 @@ if(isSetup){if(username.length<3){setErr("Username must be at least 3 characters
 else{if(!username||!password){setErr("Username and password required");return}}
 setBusy(true);try{await api.post(isSetup?"/auth/setup":"/auth/login",{username,password});onLoginSuccess&&onLoginSuccess()}catch(e){setErr(e.message||"Login failed");setBusy(false)}};
 const onKey=e=>{if(e.key==="Enter")submit()};
-const ist={width:"100%",padding:"10px 12px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:14,boxSizing:"border-box",fontFamily:"inherit"};
-const lbl={display:"block",marginBottom:4,marginTop:12,fontSize:12,fontWeight:600,color:t.tg,textTransform:"uppercase",letterSpacing:"0.05em"};
+const ist:CSSProperties={width:"100%",padding:"10px 12px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:14,boxSizing:"border-box",fontFamily:"inherit"};
+const lbl:CSSProperties={display:"block",marginBottom:4,marginTop:12,fontSize:12,fontWeight:600,color:t.tg,textTransform:"uppercase",letterSpacing:"0.05em"};
 return<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:t.bg,color:t.text2,padding:20}}>
 <div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:32,maxWidth:420,width:"100%",boxShadow:"0 4px 24px rgba(0,0,0,0.2)"}}>
 <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>

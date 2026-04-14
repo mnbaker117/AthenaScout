@@ -43,7 +43,7 @@ const removeSource=i=>setSources(s=>s.filter((_,idx)=>idx!==i));
 const finish=async()=>{setSaving(true);setError(null);try{
 // Step 1: Save settings
 setSaveStep("Saving configuration...");
-const settings={setup_complete:true};
+const settings:any={setup_complete:true};
 if(sources.length>0)settings.library_sources=sources;
 if(hcKey.trim())settings.hardcover_api_key=hcKey.trim();
 if(mamToken.trim()){settings.mam_session_id=mamToken.trim();settings.mam_enabled=true}
