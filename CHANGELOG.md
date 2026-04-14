@@ -7,6 +7,29 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.1] — 2026-04-13
+
+### Fixed
+
+- **MAM endpoints couldn't read the session token after Settings save.**
+  The Sprint 6 encrypted-store migration routed credential writes
+  through the encrypted DB and blanked the original
+  `settings.json` value. The MAM endpoint readers in
+  `app/routers/mam.py` and the scheduled-scan loop in
+  `app/main.py` still pulled directly from
+  `s.get("mam_session_id")`, which is now always `""`. Visible
+  symptoms: pasting a fresh token through Settings → Validate
+  always returned "No MAM session ID configured", and every
+  scheduled MAM scan silently no-op'd. Fix: every read goes
+  through `_get_mam_token()` (in-memory → encrypted store →
+  settings.json legacy fallback) and every gating check goes
+  through the new `_mam_ready(s)` helper. The startup seed at
+  `app/main.py:133` is unchanged — that's the one site where
+  settings.json fallback IS correct.
+
+  No data migration needed; existing tokens already in the
+  encrypted store from v1.1.0 keep working.
+
 ## [1.1.0] — 2026-04-13
 
 A meaty release. Three new metadata sources, smarter MAM matching,
@@ -230,6 +253,7 @@ toggle. Diagnose a stuck scan or misbehaving source without
 (Pre-1.0 history lives in the git log; this changelog only covers
 public releases.)
 
+[1.1.1]: https://github.com/mnbaker117/AthenaScout/releases/tag/v1.1.1
 [1.1.0]: https://github.com/mnbaker117/AthenaScout/releases/tag/v1.1.0
 [1.0.2]: https://github.com/mnbaker117/AthenaScout/releases/tag/v1.0.2
 [1.0.1]: https://github.com/mnbaker117/AthenaScout/releases/tag/v1.0.1
