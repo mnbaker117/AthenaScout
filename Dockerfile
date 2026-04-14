@@ -3,15 +3,12 @@ FROM node:20-slim AS frontend-build
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-# `npm install` (not `npm ci`) so the build tolerates lockfile drift
-# during dependency churn — Sprint 7 added typescript + @types/react
-# to package.json without a local node to regenerate the lockfile,
-# and `npm ci` would have hard-errored on the mismatch.
-#
-# When the lockfile is back in sync with package.json (after a local
-# `npm install` + commit), this can swap back to `npm ci` for
-# byte-identical reproducible builds and faster Docker layer caching.
-RUN npm install --no-audit --no-fund
+# Use `npm ci` not `npm install`: refuses to mutate the lockfile, errors
+# on lockfile drift, and produces byte-identical installs across runs.
+# This is the standard pattern for reproducible Docker builds and plays
+# nicely with the layer cache above (only re-runs when the lockfile or
+# package.json actually changes).
+RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
