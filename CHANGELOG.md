@@ -7,6 +7,30 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.8] — 2026-04-14
+
+### Fixed
+
+- **`mam_category` migration still didn't run after v1.1.7.** The
+  v1.1.7 fix removed the misplaced middle entry AND appended a new
+  one — net zero length change. Upgraded DBs from v1.1.5 already
+  had `user_version=45`, and `target_version = len(MIGRATIONS)`
+  was also 45, so the runner's `if current_version < target_version`
+  short-circuit skipped everything. The column never got added;
+  MAM scans kept crashing with `no such column: mam_category`.
+
+  Proper fix: restore the middle entry as a deliberate no-op AND
+  keep the appended entry. The duplicate-ALTER error handler
+  already tolerates "duplicate column" / "already exists" (line
+  621 of database.py), so running the same statement twice on a
+  fresh DB is silent. On upgraded DBs the middle slot is already
+  past their user_version (skipped) and only the appended entry
+  runs, which adds the column.
+
+  Added a stern comment on the middle slot warning future me that
+  removing it re-breaks upgrades by shifting every downstream
+  index by one.
+
 ## [1.1.7] — 2026-04-14
 
 ### Fixed

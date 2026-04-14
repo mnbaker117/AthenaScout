@@ -325,6 +325,15 @@ MIGRATIONS = [
     "ALTER TABLE books ADD COLUMN mam_has_multiple INTEGER NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status)",
     "ALTER TABLE books ADD COLUMN mam_my_snatched INTEGER NOT NULL DEFAULT 0",
+    # v1.1.5 accidentally placed `mam_category` here as a middle
+    # insertion — silently skipped on every upgraded DB because the
+    # runner keys on `PRAGMA user_version` = count of applied entries.
+    # This slot now stays as a deliberate no-op to preserve index
+    # alignment. The real migration is appended at the end of the list.
+    # Running it twice on a fresh DB is safe: the error handler catches
+    # "duplicate column". Never remove this entry — doing so shifts
+    # every downstream index by one and re-breaks upgrades.
+    "ALTER TABLE books ADD COLUMN mam_category TEXT",
     "CREATE INDEX IF NOT EXISTS idx_books_author_owned ON books(author_id, owned)",
     # ── FantasticFiction removal ─────────────────────────────────
     # FF was dropped as a source entirely (it duplicated coverage of
