@@ -55,6 +55,7 @@ async def send_to_hermeece(data: dict = Body(...)):
         placeholders = ",".join("?" * len(book_ids))
         rows = await (await db.execute(
             f"SELECT b.id, b.title, b.mam_url, b.mam_status, b.mam_torrent_id, "
+            f"b.mam_category, "
             f"b.source_url, b.isbn, b.series_id, b.series_index, b.cover_url, "
             f"b.description, b.page_count, "
             f"a.name as author_name, s.name as series_name "
@@ -92,6 +93,10 @@ async def send_to_hermeece(data: dict = Body(...)):
             "url_or_id": str(r["mam_torrent_id"]),
             "author": r["author_name"] or "",
             "title": r["title"] or "",
+            # MAM category captured during scan (e.g. "Ebooks - Fantasy").
+            # Empty string for pre-v1.1.5 rows scanned before the column
+            # existed — Hermeece tolerates the empty-string fallback.
+            "category": r["mam_category"] or "",
         })
 
     # Send to Hermeece

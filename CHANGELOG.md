@@ -7,6 +7,19 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.5] — 2026-04-14
+
+### Added
+
+- **Capture MAM category during scan + forward to Hermeece.**
+  New `books.mam_category` column populated by `check_book`
+  from the item dict MAM's search API already returns (values
+  like "Ebooks - Fantasy"). Send-to-Hermeece includes it in
+  `GrabItem.category` so the Hermeece grab row + dashboard no
+  longer inherit an empty category for AthenaScout-originated
+  grabs. Pre-migration rows (scanned before v1.1.5) send an
+  empty string — Hermeece v1.2.2 tolerates that fallback.
+
 ## [1.1.4] — 2026-04-14
 
 ### Fixed

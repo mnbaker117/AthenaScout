@@ -325,6 +325,10 @@ MIGRATIONS = [
     "ALTER TABLE books ADD COLUMN mam_has_multiple INTEGER NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS idx_books_mam_status ON books(mam_status)",
     "ALTER TABLE books ADD COLUMN mam_my_snatched INTEGER NOT NULL DEFAULT 0",
+    # v1.1.5: MAM category (e.g. "Ebooks - Fantasy") captured during
+    # scan and forwarded to Hermeece via GrabItem.category so the grab
+    # row's category field reflects what MAM actually classified it as.
+    "ALTER TABLE books ADD COLUMN mam_category TEXT",
     "CREATE INDEX IF NOT EXISTS idx_books_author_owned ON books(author_id, owned)",
     # ── FantasticFiction removal ─────────────────────────────────
     # FF was dropped as a source entirely (it duplicated coverage of

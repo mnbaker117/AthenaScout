@@ -937,6 +937,10 @@ def _evaluate_results(
             "author_matched": author_ok,
             "seeders": int(item.get("seeders", 0) or 0),
             "my_snatched": my_snatched,
+            # Passed through to the books row so Send-to-Hermeece can
+            # forward it as `GrabItem.category` (v1.1.5). MAM returns
+            # values like "Ebooks - Fantasy" here — passed along as-is.
+            "category": category,
         })
 
     return matches
@@ -1044,6 +1048,7 @@ async def check_book(
             "best_format": best.get("best_format", ""),
             "author_matched": best["author_matched"],
             "my_snatched": best.get("my_snatched", False),
+            "category": best.get("category", "") or "",
         }
 
         # Promote to FOUND using the combined confidence score
@@ -1058,6 +1063,7 @@ async def check_book(
             result["mam_torrent_id"] = best["torrent_id"]
             result["mam_title"] = best["mam_title"]
             result["mam_formats"] = best["format_str"]
+            result["mam_category"] = best.get("category", "") or ""
             result["mam_has_multiple"] = has_multiple
             result["mam_my_snatched"] = best.get("my_snatched", False)
             result["match_pct"] = pct
@@ -1121,6 +1127,7 @@ async def check_book(
         result["mam_torrent_id"] = best_possible["torrent_id"]
         result["mam_title"] = best_possible["mam_title"]
         result["mam_formats"] = best_possible["formats"]
+        result["mam_category"] = best_possible.get("category", "") or ""
         result["mam_has_multiple"] = best_possible["has_multiple"]
         result["mam_my_snatched"] = best_possible.get("my_snatched", False)
         result["match_pct"] = best_possible["match_pct"]
@@ -1224,13 +1231,14 @@ async def scan_books_batch(
         # Write result to DB
         await db.execute("""
             UPDATE books SET mam_url=?, mam_status=?, mam_formats=?,
-                   mam_torrent_id=?, mam_has_multiple=?, mam_my_snatched=?
+                   mam_torrent_id=?, mam_category=?, mam_has_multiple=?, mam_my_snatched=?
             WHERE id=?
         """, (
             check["mam_url"],
             check["status"],
             check["mam_formats"],
             check["mam_torrent_id"],
+            check.get("mam_category", "") or "",
             1 if check["mam_has_multiple"] else 0,
             1 if check.get("mam_my_snatched") else 0,
             book_id,
