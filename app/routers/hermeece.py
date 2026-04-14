@@ -81,12 +81,17 @@ async def send_to_hermeece(data: dict = Body(...)):
             "message": "No books with 'Found' MAM status to send",
         }
 
-    # Build Hermeece payload
+    # Build Hermeece payload. Including the book title lets Hermeece
+    # store a real torrent name on the grab row instead of the
+    # `manual_inject_<id>` placeholder — the placeholder leaks into
+    # dashboards, the review queue label, and the metadata enricher's
+    # fuzzy search (see Hermeece v1.1.4 bug report).
     items = []
     for r in found_rows:
         items.append({
             "url_or_id": str(r["mam_torrent_id"]),
             "author": r["author_name"] or "",
+            "title": r["title"] or "",
         })
 
     # Send to Hermeece

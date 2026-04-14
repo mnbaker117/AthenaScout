@@ -7,6 +7,19 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.4] — 2026-04-14
+
+### Fixed
+
+- **Send-to-Hermeece omitted the book title.** The payload built
+  in `app/routers/hermeece.py` was only sending `url_or_id` and
+  `author`, so Hermeece fell back to a `manual_inject_<id>`
+  placeholder for the torrent name. That placeholder landed on the
+  grab row's `torrent_name` and downstream everything (dashboard
+  widgets, review queue label, metadata enricher's fuzzy search)
+  used the garbage string. Now includes `title` from the book row.
+  Pairs with Hermeece v1.1.4 which accepts the field.
+
 ## [1.1.3] — 2026-04-14
 
 ### Added
