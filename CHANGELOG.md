@@ -7,6 +7,59 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.6] — 2026-04-14
+
+### Fixed
+
+- **Calibre sync created a duplicate row instead of merging with
+  the existing Missing entry.** When a Missing book got fulfilled
+  (Send-to-Hermeece → CWA → Calibre → AS sync), the sync inserted
+  a fresh Calibre-sourced row alongside the original discovery
+  row. The follow-up "ownership flip" pass then set `owned=1` on
+  the Missing row, leaving two `owned=1` rows for the same book —
+  one with the source-scrape provenance + MAM linkage but no
+  series / tags / Calibre identity, and one with the Calibre data
+  but missing the MAM history. Symptom the user reported: AS
+  showed two entries for "Turncoat's Truth" (id 12852 + 12911)
+  after a Hermeece-fulfilled Missing book synced back.
+
+  Root cause was at [calibre_sync.py:326](app/calibre_sync.py#L326):
+  the existence check looked up by `calibre_id = ? AND source =
+  'calibre'`, so any row from a non-Calibre source (`goodreads`,
+  `hardcover`, etc.) without a `calibre_id` was invisible to the
+  lookup → INSERT path always taken. Fix: when the calibre_id
+  lookup misses, fall back to a same-author + title-match
+  candidate search (with article-stripping for "The X" / "X" —
+  same shape as the ownership-flip pass below). On exactly one
+  match, MERGE: attach `calibre_id` + `source='calibre'` + apply
+  the latest Calibre fields to the existing discovery row,
+  preserving its `mam_*` columns and source-scrape provenance.
+  Ambiguous matches (multiple candidates) still fall through to
+  INSERT — better to leave a known dup than risk merging into the
+  wrong row.
+
+  Pre-existing duplicates from this bug aren't auto-merged. To
+  reconcile a known pair manually:
+  ```sql
+  -- pick keep_id = the discovery row (has mam_status / mam_torrent_id)
+  -- pick drop_id = the calibre-sourced row (has calibre_id / series_id)
+  UPDATE books SET
+    calibre_id = (SELECT calibre_id FROM books WHERE id=:drop_id),
+    source = 'calibre',
+    series_id = (SELECT series_id FROM books WHERE id=:drop_id),
+    series_index = (SELECT series_index FROM books WHERE id=:drop_id),
+    isbn = COALESCE((SELECT isbn FROM books WHERE id=:drop_id), isbn),
+    cover_path = (SELECT cover_path FROM books WHERE id=:drop_id),
+    description = COALESCE((SELECT description FROM books WHERE id=:drop_id), description),
+    tags = (SELECT tags FROM books WHERE id=:drop_id),
+    rating = (SELECT rating FROM books WHERE id=:drop_id),
+    language = (SELECT language FROM books WHERE id=:drop_id),
+    publisher = (SELECT publisher FROM books WHERE id=:drop_id),
+    formats = (SELECT formats FROM books WHERE id=:drop_id)
+  WHERE id = :keep_id;
+  DELETE FROM books WHERE id = :drop_id;
+  ```
+
 ## [1.1.5] — 2026-04-14
 
 ### Added

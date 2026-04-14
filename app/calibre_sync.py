@@ -343,19 +343,63 @@ async def sync_calibre(calibre_db_path=None, calibre_library_path=None):
                 state._library_sync_progress["books_updated"] += 1
                 logger.debug(f"  Calibre: updated '{book['title']}' (calibre_id={book['book_id']}, tags={book['tags']}, rating={book['rating']})")
             else:
-                await db.execute("""
-                    INSERT INTO books (title, author_id, series_id, series_index,
-                    isbn, calibre_id, source, owned, pub_date, cover_path,
-                    description, tags, rating, language, publisher, formats)
-                    VALUES (?, ?, ?, ?, ?, ?, 'calibre', 1, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (book["title"], our_author_id, our_series_id,
-                      series_index, book["isbn"], book["book_id"],
-                      book["pubdate"], book["cover_path"],
-                      book["description"], book["tags"], book["rating"],
-                      book["language"], book["publisher"], book["formats"]))
-                books_new += 1
-                state._library_sync_progress["books_new"] += 1
-                logger.debug(f"  Calibre: NEW '{book['title']}' by {book['authors'][0]['name']} (tags={book['tags']}, lang={book['language']})")
+                # Before INSERTing a new Calibre row, look for a matching
+                # discovery row (typically a Missing entry created by an
+                # earlier source scan + later fulfilled in Calibre via the
+                # Hermeece handoff). Without this fallback, every fulfilled
+                # Missing book ends up duplicated: the original row gets
+                # `owned=1` flipped by the safety net below, but stays
+                # without a calibre_id, and the new Calibre row sits next
+                # to it carrying the series + tags + rating + formats.
+                #
+                # Match shape mirrors the ownership-flip pass: same author,
+                # no calibre_id, title match (with article-stripping for
+                # "The X" vs "X"). Only merge if EXACTLY one candidate —
+                # ambiguity falls back to INSERT so we never merge a book
+                # into the wrong row.
+                merge_candidates = await (await db.execute("""
+                    SELECT id FROM books
+                    WHERE author_id = ? AND calibre_id IS NULL AND source != 'calibre'
+                    AND (
+                        LOWER(TRIM(title)) = LOWER(TRIM(?))
+                        OR REPLACE(LOWER(TRIM(title)), 'the ', '') =
+                           REPLACE(LOWER(TRIM(?)), 'the ', '')
+                    )
+                """, (our_author_id, book["title"], book["title"]))).fetchall()
+
+                if len(merge_candidates) == 1:
+                    target_id = merge_candidates[0]["id"]
+                    await db.execute("""
+                        UPDATE books SET title=?, series_id=?, series_index=?,
+                        isbn=?, owned=1, calibre_id=?, source='calibre',
+                        cover_path=?,
+                        description=COALESCE(?,description), tags=?, rating=?,
+                        language=?, publisher=?, formats=?
+                        WHERE id=?
+                    """, (book["title"], our_series_id, series_index,
+                          book["isbn"], book["book_id"], book["cover_path"],
+                          book["description"], book["tags"], book["rating"],
+                          book["language"], book["publisher"], book["formats"],
+                          target_id))
+                    state._library_sync_progress["books_updated"] += 1
+                    logger.info(
+                        f"  Calibre: merged Missing row id={target_id} with "
+                        f"new Calibre book_id={book['book_id']} ('{book['title']}')"
+                    )
+                else:
+                    await db.execute("""
+                        INSERT INTO books (title, author_id, series_id, series_index,
+                        isbn, calibre_id, source, owned, pub_date, cover_path,
+                        description, tags, rating, language, publisher, formats)
+                        VALUES (?, ?, ?, ?, ?, ?, 'calibre', 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (book["title"], our_author_id, our_series_id,
+                          series_index, book["isbn"], book["book_id"],
+                          book["pubdate"], book["cover_path"],
+                          book["description"], book["tags"], book["rating"],
+                          book["language"], book["publisher"], book["formats"]))
+                    books_new += 1
+                    state._library_sync_progress["books_new"] += 1
+                    logger.debug(f"  Calibre: NEW '{book['title']}' by {book['authors'][0]['name']} (tags={book['tags']}, lang={book['language']})")
 
             # Flip ownership on any pre-existing discovery row that
             # matches this book's title for the same author. The
