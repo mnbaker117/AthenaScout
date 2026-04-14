@@ -375,49 +375,88 @@ async def mam_full_scan_start():
                               "found": 0, "possible": 0, "not_found": 0,
                               "errors": 0, "current_book": "",
                               "status": "scanning", "type": "full_scan"}
-        while True:
-            db = await get_db()
-            try:
-                cs = load_settings()
-                cs_token = await _get_mam_token()
-                # Forward in-flight book titles to the unified scan
-                # widget. The full-scan loop polls the DB for
-                # scanned/total via mam_get_full_scan_status, but
-                # per-book progress has to come straight from the batch
-                # worker via this callback.
-                def _on_book(title: str) -> None:
-                    state._mam_scan_progress["current_book"] = title or ""
-                result = await mam_run_full_scan_batch(
-                    db, session_id=cs_token,
-                    skip_ip_update=True,
-                    delay=cs.get("rate_mam", 2),
-                    format_priority=cs.get("mam_format_priority"),
-                    lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
-                    on_book=_on_book,
-                )
-                fs = await mam_get_full_scan_status(db)
-                state._mam_scan_progress.update({
-                    "scanned": fs.get("scanned", 0),
-                    "total": fs.get("total_books", state._mam_scan_progress["total"]),
-                    "status": "scanning" if result["status"] == "batch_complete" else result["status"],
-                })
-            finally:
-                await db.close()
-            if result["status"] in ("scan_complete", "error", "no_scan"):
-                state._mam_scan_progress.update({"running": False, "status": result["status"]})
-                if result["status"] == "scan_complete":
-                    await _notify_mam_done()
-                break
-            elif result["status"] == "batch_complete":
-                # Fixed 5-minute pause between batches. The cadence
-                # (400 books per batch every 5 minutes) is intentionally
-                # not user-configurable — too aggressive and you risk
-                # MAM rate-limiting; too slow and a full library scan
-                # takes literal weeks.
-                state._mam_scan_progress["status"] = "paused"
-                logger.info("Full MAM scan: batch done, waiting 5 min")
-                await asyncio.sleep(300)
-                state._mam_scan_progress["status"] = "scanning"
+        try:
+            while True:
+                db = await get_db()
+                try:
+                    cs = load_settings()
+                    cs_token = await _get_mam_token()
+                    # Per-batch baselines so the incremental on_progress
+                    # stats (which are batch-local in run_full_scan_batch)
+                    # get added onto the running totals carried over
+                    # from earlier batches. Without this, every batch
+                    # would reset found/possible/not_found to zero.
+                    base_scanned = state._mam_scan_progress["scanned"]
+                    base_found = state._mam_scan_progress["found"]
+                    base_possible = state._mam_scan_progress["possible"]
+                    base_not_found = state._mam_scan_progress["not_found"]
+                    base_errors = state._mam_scan_progress["errors"]
+
+                    def _on_book(title: str) -> None:
+                        # Fired BEFORE each network call so the widget
+                        # shows what the scanner is waiting on.
+                        state._mam_scan_progress["current_book"] = title or ""
+
+                    def _on_progress(stats: dict) -> None:
+                        # Fired AFTER each book's DB write with the
+                        # batch-local tallies. Add onto per-batch
+                        # baselines for running totals.
+                        state._mam_scan_progress.update({
+                            "scanned":   base_scanned + stats["scanned"],
+                            "found":     base_found + stats["found"],
+                            "possible":  base_possible + stats["possible"],
+                            "not_found": base_not_found + stats["not_found"],
+                            "errors":    base_errors + stats["errors"],
+                            "current_book": stats.get("current_book", ""),
+                        })
+
+                    result = await mam_run_full_scan_batch(
+                        db, session_id=cs_token,
+                        skip_ip_update=True,
+                        delay=cs.get("rate_mam", 2),
+                        format_priority=cs.get("mam_format_priority"),
+                        lang_ids=_resolve_mam_languages(cs.get("languages", ["English"])),
+                        on_book=_on_book,
+                        on_progress=_on_progress,
+                    )
+                    fs = await mam_get_full_scan_status(db)
+                    # Snap scanned/total to the DB-authoritative values
+                    # at batch-end. The incremental updates above kept
+                    # the widget fresh during the batch; this reconciles
+                    # any drift (e.g., book rows concurrently hidden).
+                    state._mam_scan_progress.update({
+                        "scanned": fs.get("scanned", base_scanned + result.get("scanned", 0)),
+                        "total": fs.get("total_books", state._mam_scan_progress["total"]),
+                        "status": "scanning" if result["status"] == "batch_complete" else result["status"],
+                    })
+                finally:
+                    await db.close()
+                if result["status"] in ("scan_complete", "error", "no_scan"):
+                    state._mam_scan_progress.update({"running": False, "status": result["status"]})
+                    if result["status"] == "scan_complete":
+                        await _notify_mam_done()
+                    break
+                elif result["status"] == "batch_complete":
+                    # Fixed 5-minute pause between batches. The cadence
+                    # (400 books per batch every 5 minutes) is intentionally
+                    # not user-configurable — too aggressive and you risk
+                    # MAM rate-limiting; too slow and a full library scan
+                    # takes literal weeks.
+                    state._mam_scan_progress["status"] = "paused"
+                    logger.info("Full MAM scan: batch done, waiting 5 min")
+                    await asyncio.sleep(300)
+                    state._mam_scan_progress["status"] = "scanning"
+        except asyncio.CancelledError:
+            # User clicked Stop. Task cancellation raises CancelledError
+            # from whichever `await` we're currently sitting on —
+            # typically the inter-batch sleep, but could also be inside
+            # run_full_scan_batch's per-request pacing. Either way the
+            # running flag must flip to False or the unified widget
+            # stays stuck on "scanning" forever and the next scan
+            # attempt errors with "A MAM scan is already running".
+            state._mam_scan_progress.update({"running": False, "status": "cancelled"})
+            logger.info("Full MAM scan cancelled by user")
+            raise
 
     state._mam_full_scan_task = asyncio.create_task(_full_scan_loop())
     return {"status": "started", "scan_id": start_result["id"],

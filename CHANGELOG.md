@@ -7,6 +7,37 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.2] — 2026-04-13
+
+### Fixed
+
+- **MAM Full Library Scan progress counters stuck at 0.** The full-
+  scan loop was only updating `state._mam_scan_progress`'s
+  scanned/found/possible/not_found counters AFTER each 400-book
+  batch completed — a 5+ minute wait during which the Dashboard
+  widget showed "0 of 2714 books · Found: 0 · Possible: 0 · Not
+  found: 0" even though books were actually being scanned and
+  committed to the DB. Fix: added an `on_progress` callback to
+  `run_full_scan_batch()` that fires after every book with the
+  running batch-local stats, and wired a closure in the router's
+  `_full_scan_loop` that adds those onto per-batch baselines so
+  the counters tick up in real time. The `current_book` field was
+  already updating correctly via the existing `on_book` callback;
+  unaffected. Manual (150-book batch) scan was never broken —
+  this only affected the full-library path.
+- **Stop button didn't unstick the running flag.** Cancelling a
+  full scan during the 5-minute inter-batch sleep (the most
+  common moment to hit Stop) raised `asyncio.CancelledError`
+  inside the loop, which exited without resetting
+  `state._mam_scan_progress["running"] = False`. The unified
+  Dashboard widget then stayed stuck on "Paused, resuming soon"
+  and every subsequent MAM scan attempt errored with "A MAM
+  scan is already running" until container restart. Fix:
+  wrapped the loop in `try/except asyncio.CancelledError` that
+  flips `running: False` + `status: "cancelled"` before re-raising.
+  Applies to cancellation at any `await` point in the loop, not
+  just the inter-batch sleep.
+
 ## [1.1.1] — 2026-04-13
 
 ### Fixed
@@ -253,6 +284,7 @@ toggle. Diagnose a stuck scan or misbehaving source without
 (Pre-1.0 history lives in the git log; this changelog only covers
 public releases.)
 
+[1.1.2]: https://github.com/mnbaker117/AthenaScout/releases/tag/v1.1.2
 [1.1.1]: https://github.com/mnbaker117/AthenaScout/releases/tag/v1.1.1
 [1.1.0]: https://github.com/mnbaker117/AthenaScout/releases/tag/v1.1.0
 [1.0.2]: https://github.com/mnbaker117/AthenaScout/releases/tag/v1.0.2

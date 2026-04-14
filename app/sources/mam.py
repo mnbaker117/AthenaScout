@@ -1321,6 +1321,7 @@ async def run_full_scan_batch(
     format_priority: list[str] = None,
     lang_ids: Optional[list[int]] = None,
     on_book: Optional[Callable[[str], None]] = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """
     Run one batch of a full scan (400 books per batch).
@@ -1400,6 +1401,15 @@ async def run_full_scan_batch(
 
     logger.info(f"Full scan batch: {len(book_rows)} books (scan_id={scan_id})")
     scanned = 0
+    # Running batch-local tallies so on_progress can fire after every
+    # book. The caller (router's _full_scan_loop closure) adds these
+    # onto baselines carried over from previous batches so the unified
+    # Dashboard widget ticks up in real time instead of jumping after
+    # each 5-minute batch boundary.
+    found = 0
+    possible = 0
+    not_found = 0
+    errors = 0
 
     for i, row in enumerate(book_rows):
         book_id, book_title, author_name = row
@@ -1423,7 +1433,30 @@ async def run_full_scan_batch(
             book_id,
         ))
 
-        if check["status"] == STATUS_AUTH_ERROR:
+        # Tally + fire on_progress. Done AFTER the DB write so a
+        # mid-batch crash doesn't leave the widget showing counts
+        # that don't match what's persisted.
+        status = check["status"]
+        if status == "found":
+            found += 1
+        elif status == "possible":
+            possible += 1
+        elif status == "not_found":
+            not_found += 1
+        elif status == STATUS_AUTH_ERROR:
+            errors += 1
+
+        if on_progress:
+            on_progress({
+                "scanned": scanned,
+                "found": found,
+                "possible": possible,
+                "not_found": not_found,
+                "errors": errors,
+                "current_book": book_title,
+            })
+
+        if status == STATUS_AUTH_ERROR:
             logger.error(f"Full scan auth error — pausing")
             await db.execute(
                 "UPDATE mam_scan_log SET last_offset=last_offset+?, status='auth_error' WHERE id=?",
@@ -1431,6 +1464,8 @@ async def run_full_scan_batch(
             )
             await db.commit()
             return {"status": "error", "scanned": scanned,
+                    "found": found, "possible": possible,
+                    "not_found": not_found, "errors": errors,
                     "remaining": total_books - last_offset - scanned,
                     "next_batch_in_seconds": None, "error": check.get("error")}
 
@@ -1464,10 +1499,16 @@ async def run_full_scan_batch(
         )
         await db.commit()
         logger.info(f"Full MAM scan complete (scan_id={scan_id})")
-        return {"status": "scan_complete", "scanned": scanned, "remaining": 0, "next_batch_in_seconds": None}
+        return {"status": "scan_complete", "scanned": scanned,
+                "found": found, "possible": possible,
+                "not_found": not_found, "errors": errors,
+                "remaining": 0, "next_batch_in_seconds": None}
 
-    logger.info(f"Full scan batch done: {scanned} scanned, {remaining} remaining")
+    logger.info(f"Full scan batch done: {scanned} scanned, {remaining} remaining "
+                f"(found={found}, possible={possible}, not_found={not_found})")
     return {"status": "batch_complete", "scanned": scanned,
+            "found": found, "possible": possible,
+            "not_found": not_found, "errors": errors,
             "remaining": remaining, "next_batch_in_seconds": 300}
 
 
