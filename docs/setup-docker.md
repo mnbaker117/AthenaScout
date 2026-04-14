@@ -40,7 +40,7 @@ container, open `http://your-server:8787` and follow the
 | Mount | Purpose | Required |
 |---|---|---|
 | `/calibre` | Your Calibre library directory (a folder containing one or more `metadata.db` files, one level deep) | Yes — unless you set `CALIBRE_PATH` to point elsewhere |
-| `/app/data` | AthenaScout's persistent data: per-library SQLite databases, `settings.json`, `auth_secret`, the auth users database, scan logs | Yes — without it, your admin account, library data, and scan history are lost on container restart |
+| `/app/data` | AthenaScout's persistent data: per-library SQLite databases (`athenascout_*.db`), `settings.json`, the encrypted credentials database (`athenascout_auth.db`), the host-side encryption key (`auth_secret`, 0600), and scan logs | Yes — without it, your admin account, library data, encrypted MAM/Hardcover credentials, and scan history are lost on container restart |
 
 The `:ro` (read-only) flag on the Calibre mount is recommended.
 AthenaScout has no code path that writes to your Calibre database, but
@@ -58,14 +58,34 @@ there's no reason not to enforce that at the mount level too.
 | `SYNC_INTERVAL_MINUTES` | `60` | How often the scheduler re-syncs the active library backend. Set to `0` to disable scheduled sync (manual still works). |
 | `LOOKUP_INTERVAL_MINUTES` | `4320` | How often the scheduler runs source scans across all authors. `4320` is 3 days. Set to `0` to disable. |
 | `MAM_SCAN_INTERVAL_MINUTES` | `360` | How often the scheduler runs MAM availability scans. Only used when MAM is enabled. |
-| `HARDCOVER_API_KEY` | *(empty)* | Optional. Seeds the Hardcover API key on first run. You can also paste it in Settings later. |
+| `HARDCOVER_API_KEY` | *(empty)* | Optional. Seeds the Hardcover API key on first run; gets migrated into the encrypted credential store and the env var blanked from `settings.json`. You can also paste it in Settings later. |
+| `MAM_SESSION_ID` | *(empty)* | Optional. Seeds the MAM session token on first run; same encrypted-store migration as `HARDCOVER_API_KEY`. Most users paste this through Settings instead. |
+| `ATHENASCOUT_AUTH_SECRET` | *(empty)* | Optional. Override for the credential-encryption key. If unset, AthenaScout generates `/app/data/auth_secret` (mode 0600) on first start. See [`SECURITY.md`](../SECURITY.md) for the precedence rules. |
 | `CALIBRE_WEB_URL` | *(empty)* | Optional. If you run [Calibre-Web](https://github.com/janeczku/calibre-web), set this to its base URL and AthenaScout will turn each owned book into a clickable deep link. |
-| `VERBOSE_LOGGING` | `false` | Set to `true` for per-book scan decisions in the container logs. |
-| `TZ` | `UTC` | Timezone for scheduled scan timestamps. |
+| `VERBOSE_LOGGING` | `false` | Set to `true` for per-book scan decisions in the container logs. The in-app log viewer (Logs page) shows the last 2000 lines regardless of this setting. |
+| `TZ` | `UTC` | Timezone for scheduled scan timestamps and the ntfy digest fire window (09:00 local). |
 
-`HARDCOVER_API_KEY` and `MAM_SESSION_ID` are deliberately NOT pre-set
-in the Dockerfile. Pass them via Compose `environment:`, an env file,
-or Docker secrets — whatever fits your deployment style.
+`HARDCOVER_API_KEY`, `MAM_SESSION_ID`, and `ATHENASCOUT_AUTH_SECRET`
+are deliberately NOT pre-set in the Dockerfile. Pass them via Compose
+`environment:`, an env file, or Docker secrets — whatever fits your
+deployment style. After first start, the seed values are migrated
+into the encrypted credentials database and the env values become
+informational only — see [`SECURITY.md`](../SECURITY.md).
+
+### Optional integrations (configured in Settings, not env)
+
+These are managed through the Settings UI and stored in
+`settings.json` (or the encrypted DB for credentials):
+
+- **MAM session token** — paste from your MAM Security session
+  cookie. Auto-rotates whenever MAM issues a new token (no more
+  manual re-pastes every two weeks).
+- **Hermeece URL** — base URL of your [Hermeece](https://github.com/mnbaker117/Hermeece)
+  instance. Enables the "Send to Hermeece" buttons on found MAM
+  matches.
+- **ntfy URL + topic** — base URL of an [ntfy.sh](https://ntfy.sh)
+  server (or self-hosted) plus a topic name. Per-event toggles
+  + a daily/weekly digest schedule live on the same Settings panel.
 
 > 💡 **Why are the env vars named `CALIBRE_*`?** Calibre is currently
 > the only library backend AthenaScout supports, so the env vars are

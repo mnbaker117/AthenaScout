@@ -53,6 +53,31 @@ the session cookie from your MAM Security settings and try again.
 
 ---
 
+## Cookie auto-rotation (set it once)
+
+MAM rotates session tokens automatically when it issues new ones —
+historically you'd see your AthenaScout MAM session expire every
+1–2 weeks and need to re-paste a new token. Since v1.1.0 that's no
+longer necessary.
+
+AthenaScout intercepts the `Set-Cookie` header on every MAM response
+and, if a new token is present, updates its in-memory copy
+immediately and persists the rotated value to the encrypted
+credentials database (debounced to once per minute to avoid disk
+churn).
+
+You'll see a single `MAM cookie persisted to encrypted store`
+INFO line in the logs each time a rotation lands. If you've enabled
+the **MAM cookie rotated** ntfy event in Settings → Notifications,
+you'll also get a push notification.
+
+The upshot: paste your token once during setup, and AthenaScout
+keeps it fresh forever. If you ever go a long time without using
+MAM and the token expires the hard way, you'll see the same
+`session expired` banner as before.
+
+---
+
 ## Format priority
 
 In **Settings → Sources → MyAnonamouse → Format Priority**, you can
@@ -182,11 +207,43 @@ found. The best "possible" across all passes is kept as a fallback
 when nothing hits the high-confidence threshold.
 
 When multiple results match, AthenaScout filters to high-confidence
-title matches first (≥80% match score), then ranks them by your
-format priority, then by match quality, then by format count, then
-by seeders. Match quality always beats format count — that's the
-rule that stops a wrong-but-multi-format result from beating a
+title matches first (≥70% match score, raised from a looser
+historical threshold in v1.1.0), then ranks them by your format
+priority, then by match quality, then by format count, then by
+seeders. Match quality always beats format count — that's the rule
+that stops a wrong-but-multi-format result from beating a
 right-but-single-format match.
+
+### Confidence scoring (v1.1.0)
+
+Match scoring lives in [`app/scoring.py`](../app/scoring.py) and is
+shared with Hermeece. Each candidate gets a 0.0–1.0 score:
+
+- **70% title similarity** — Jaccard / containment / substring blend
+  with subtitle handling and series-name suffix awareness
+- **30% author similarity** — handles "Last, First" vs "First Last"
+  and pen-name aliases via the linked-authors table
+- **+ series boost** — small bonus when the candidate's series
+  matches a series the user already has tagged for the author
+
+Books at score ≥ 0.70 are marked **found**. Books in the 0.50–0.70
+band are **possible** (shown but not auto-grabbed). Anything below
+is **not_found**.
+
+### Audiobook + bundle filtering
+
+Two filters reject results that would otherwise be false positives:
+
+- **Audiobook category check** — MAM results in the audiobook
+  category are rejected for ebook libraries, even when the title
+  matches (and vice versa). Prevents an Audible edition from
+  beating the actual ebook you're looking for.
+- **Series bundle awareness** — a torrent that bundles every book
+  in a series can't reasonably match any single book at the
+  required confidence threshold, so series bundles consistently
+  land as **possible** rather than **found**. This is correct
+  behavior — you wouldn't want a 12-book bundle auto-claimed as a
+  match for book #3.
 
 ---
 

@@ -122,18 +122,25 @@ Go to **Settings → Sources**.
 
 ![Settings → Sources page](images/settings-sources-2.png)
 
-You'll see four metadata sources, each with its own enable toggle and
+You'll see six metadata sources, each with its own enable toggle and
 rate-limit setting:
 
-| Source | What it provides | Setup |
-|---|---|---|
-| **Goodreads** | Author bibliographies, series detection, publication dates, language filtering. Primary source — its data wins conflicts with the others. | None (public scraper) |
-| **Hardcover** | Author bibliographies via real GraphQL API. Best at series taxonomy. | Free API key from [hardcover.app](https://hardcover.app) |
-| **Kobo** | Modern ebook catalog with reliable publication dates and ISBNs. | None (public scraper, behind Cloudflare) |
-| **MyAnonamouse** | Cross-references missing books against MAM's catalog so you know what's actually downloadable. Optional. | Session token — see [MAM integration](mam-integration.md) |
+| Source | Default | What it provides | Setup |
+|---|---|---|---|
+| **Goodreads** | On | Author bibliographies, series detection, publication dates, language filtering. Primary source — its data wins most conflicts. | None (public scraper) |
+| **Hardcover** | On | Author bibliographies via real GraphQL API. Best at series taxonomy. | Free API key from [hardcover.app](https://hardcover.app) |
+| **Kobo** | On | Modern ebook catalog with reliable publication dates and ISBNs. | None (public scraper, behind Cloudflare) |
+| **Amazon** | Off | Author-centric scraper with audiobook + junk-listing filters. Best at confirming whether a title is standalone vs part of a series. | None (public scraper) |
+| **IBDB** | Off | Supplementary REST source — fills in ISBN and publisher gaps the others miss. | None (public REST API) |
+| **Google Books** | Off | Supplementary REST source — fills in ISBN, publisher, and description gaps. | None (public REST API; daily quota applies) |
+| **MyAnonamouse** | Off | Cross-references missing books against MAM's catalog so you know what's actually downloadable. | Session token — see [MAM integration](mam-integration.md) |
 
-For your first scan, leave Goodreads + Hardcover + Kobo on and skip
-MAM if you don't use it. You can always toggle sources later.
+For your first scan, leave the on-by-default sources (Goodreads,
+Hardcover, Kobo) enabled and skip the others until you've seen what
+your library looks like with just those. Each opt-in source
+contributes a different signal — Amazon for series confirmation,
+IBDB for ISBNs, Google Books for descriptions — so turn them on
+selectively when you find a gap.
 
 > 💡 **Library-only mode** is the option labeled "Only enrich owned
 > books". When enabled, source scans fill in missing metadata on the
@@ -261,6 +268,74 @@ Sensible starting cadences for most users:
 - Library sync: hourly
 - Author rescans: every few days
 - MAM: every 4–6 hours if you use it heavily, daily otherwise
+
+---
+
+## 12. (Optional) Link pen names + co-authors
+
+If you collect an author who writes under multiple names (William D.
+Arand ↔ Randi Darren is the canonical example) or one who
+co-authors most of their catalog with the same partner (J.N. Chaney
++ Christopher Hopper, etc.), AthenaScout's author-linking feature
+collapses both identities into one for scan and dedup purposes.
+
+Two ways to set it up:
+
+- **From the Authors page**: select 2+ authors with the multi-select
+  bar, then click **Link as Pen Names** (shared identity) or
+  **Link as Co-Authors** (frequent collaboration). The first selected
+  author becomes the canonical identity; the rest become aliases.
+- **From the Author detail page**: click **+ link author** under the
+  author's name, search for the other author, pick the link type,
+  and confirm.
+
+Either way the backend treats both link types identically — books
+across linked authors get deduped, and a scan of either side covers
+both. The label is purely UX so you can tell pen names apart from
+co-authors at a glance.
+
+A small `↔ N` chip appears next to any author with active links so
+you can see the linked state from the browse view.
+
+---
+
+## 13. (Optional) Wire up Hermeece for one-click downloads
+
+If you run [Hermeece](https://github.com/mnbaker117/Hermeece) (the
+companion download manager), point AthenaScout at it from
+**Settings → Library → Hermeece URL**. Once configured:
+
+- Each found MAM match gets a **Send to Hermeece** button in the
+  book sidebar
+- The MAM page list/grid views grow a per-row send button
+- Multi-select on the MAM page enables bulk send (skips any
+  non-Found rows automatically)
+
+Hermeece picks up the metadata AthenaScout already gathered and
+runs the actual download + Calibre import.
+
+---
+
+## 14. (Optional) Push notifications via ntfy
+
+Enable push notifications for scan completions, MAM hits, library
+sync events, and more by setting an [ntfy.sh](https://ntfy.sh) URL
++ topic in **Settings → Notifications**.
+
+Each event type has its own toggle, and a digest mode batches all
+events into a single daily or weekly notification (fires at 09:00
+local time) instead of pinging you per-event. Useful if you run
+heavy scheduled scans and don't want a phone full of pings.
+
+---
+
+## 15. (Optional) The in-app log viewer
+
+Open the **Logs** icon in the top nav (📋). It shows the last 2000
+log lines from the running container with a search filter,
+color-coded levels, and an auto-scroll toggle. Useful for diagnosing
+a stuck scan or seeing why a source returned nothing — without
+having to `docker logs` from the host.
 
 ---
 

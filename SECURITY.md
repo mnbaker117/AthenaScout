@@ -127,6 +127,62 @@ the same network.
 - **Rate limiting:** 5 failed login attempts within any window triggers
   a 5-minute lockout. A successful login resets the counter.
 
+## Encrypted Credential Store (v1.1.0+)
+
+Third-party API tokens and session cookies (Hardcover API key, MAM
+session token) are stored Fernet-encrypted in
+`<data_dir>/athenascout_auth.db` rather than plaintext in
+`settings.json`. This was added in v1.1.0; first-run on a v1.0.x
+data directory automatically migrates any plaintext credentials
+into the encrypted store and blanks them from `settings.json`.
+
+### How it works
+
+- **Encryption library:** [cryptography.fernet](https://cryptography.io/en/latest/fernet/)
+  (AES-128-CBC + HMAC-SHA256, time-stamped, URL-safe base64).
+- **Key derivation:** the Fernet key is derived deterministically from
+  the same `auth_secret` used for session signing — SHA-256 hash of
+  the secret, then base64-encoded to Fernet's required length. The
+  `auth_secret` precedence rules above (env var → file → in-memory)
+  apply unchanged.
+- **Storage:** each credential lives as a single row in the
+  `auth_secrets` table inside `athenascout_auth.db` keyed by a stable
+  name (`mam_session_id`, `hardcover_api_key`). The encrypted blob
+  is the only column besides the key name and a timestamp.
+- **Migration:** on app start, any plaintext value still present in
+  `settings.json` for a known credential key is encrypted into the
+  store and the plaintext setting is overwritten with an empty string.
+  Idempotent — re-running on already-migrated data is a no-op.
+- **Retrieval:** code that needs a credential calls
+  `get_secret(name)` from `app/secrets.py`. The function reads,
+  decrypts, and returns the plaintext string. Failure to decrypt
+  (e.g., the `auth_secret` was rotated without re-encrypting) is
+  logged and returns `None` so the caller can fall back gracefully.
+- **MAM cookie auto-rotation:** when MAM issues a new session token
+  via `Set-Cookie`, the rotation callback in `app/main.py` writes the
+  new value through `set_secret()` (debounced to once per minute) so
+  the encrypted store always holds the freshest token without manual
+  intervention.
+
+### What this protects against
+
+- A casual filesystem snapshot or backup that exposes `settings.json`
+  no longer leaks API tokens in plaintext.
+- A user who pushes their `settings.json` to a public Git repo by
+  accident no longer publishes their MAM cookie or Hardcover key.
+
+### What this does NOT protect against
+
+- An attacker with read access to **both** `settings.json` AND
+  `auth_secret` (or the `ATHENASCOUT_AUTH_SECRET` env var) can
+  decrypt every stored credential. The `0600` permissions on
+  `auth_secret` are the primary defense; encryption is defense in
+  depth, not a substitute for filesystem hygiene.
+- Memory dumps of the running process. Decrypted credentials are
+  held in plaintext in memory by callers that need them (the MAM
+  HTTP client, the Hardcover GraphQL client). This is unavoidable
+  for any system that needs to USE the credentials.
+
 ## Known Limitations
 
 These are documented design choices, not bugs. They are listed here for
@@ -162,7 +218,8 @@ transparency and may be addressed in future versions.
 
 | Version | Supported |
 |---------|-----------|
-| v1.0.x  | ✓         |
+| v1.1.x  | ✓         |
+| v1.0.x  | ✗ (upgrade to 1.1.x — drop-in compatible) |
 | < 1.0   | ✗         |
 
 Only the latest patch release of the current minor receives security
