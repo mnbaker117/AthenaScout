@@ -24,6 +24,21 @@ import SettingsPage from "./pages/SettingsPage";
 import SuggestionsPage from "./pages/SuggestionsPage";
 import Toaster from "./components/Toaster";
 
+// ─── Per-page content widths ────────────────────────────────
+// Data-heavy pages (book grids, large tables, MAM list) get a
+// wider container so book covers, columns, and metadata don't
+// crowd each other on modern displays. The navbar stays narrow
+// (1120px) regardless because nav items don't benefit from
+// stretching, and Settings/Dashboard/Logs/etc. stay narrow
+// because they're config/forms — line length matters.
+const NARROW_WIDTH = 1120;
+const WIDE_WIDTH   = 1400;
+const WIDE_PAGES = new Set([
+  "library", "authors", "author", "missing", "upcoming",
+  "mam", "suggestions", "hidden", "database",
+]);
+const widthFor = (pg) => (WIDE_PAGES.has(pg) ? WIDE_WIDTH : NARROW_WIDTH);
+
 // ─── App Shell ──────────────────────────────────────────────
 
 export default function App(){
@@ -168,10 +183,10 @@ input,select{font-family:inherit}
 </div></div></nav>
 
 {/* MAM Validation Warning Banner */}
-{mamWarn?<div style={{maxWidth:1120,margin:"12px auto 0",padding:"10px 16px",background:theme.ylw+"18",border:`1px solid ${theme.ylw}44`,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,fontSize:13}}><span style={{color:theme.ylwt}}>⚠ MAM session may have expired — scans are paused. <button onClick={()=>nav("settings")} style={{background:"none",border:"none",color:theme.accent,cursor:"pointer",fontWeight:600,fontSize:13,padding:0,textDecoration:"underline"}}>Go to Settings</button> to update your token and re-validate.</span><button onClick={()=>setMamWarn(false)} style={{background:"none",border:"none",color:theme.tg,cursor:"pointer",fontSize:16,padding:"0 4px",flexShrink:0}}>✕</button></div>:null}
+{mamWarn?<div style={{maxWidth:widthFor(pg),margin:"12px auto 0",padding:"10px 16px",background:theme.ylw+"18",border:`1px solid ${theme.ylw}44`,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,fontSize:13}}><span style={{color:theme.ylwt}}>⚠ MAM session may have expired — scans are paused. <button onClick={()=>nav("settings")} style={{background:"none",border:"none",color:theme.accent,cursor:"pointer",fontWeight:600,fontSize:13,padding:0,textDecoration:"underline"}}>Go to Settings</button> to update your token and re-validate.</span><button onClick={()=>setMamWarn(false)} style={{background:"none",border:"none",color:theme.tg,cursor:"pointer",fontSize:16,padding:"0 4px",flexShrink:0}}>✕</button></div>:null}
 
 {/* ── Main Content ── */}
-<main className="main-content" style={{maxWidth:1120,margin:"0 auto",padding:"28px 20px"}}>
+<main className="main-content" style={{maxWidth:widthFor(pg),margin:"0 auto",padding:"28px 20px"}}>
 <ErrorBoundary onReset={()=>nav("dashboard")} key={pg+(pa||"")+activeLib}>
 <div className="page-content">
 {pg==="dashboard"&&<Dashboard onNav={nav} libs={libs} activeLib={activeLib} switchLib={switchLib}/>}
