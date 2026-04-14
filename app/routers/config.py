@@ -34,16 +34,22 @@ router = APIRouter(prefix="/api", tags=["config"])
 # ─── Settings ────────────────────────────────────────────────
 @router.get("/settings")
 async def get_settings():
+    from app.secrets import get_secret, SECRET_KEYS
     s = load_settings()
     d = dict(s)
-    if d.get("hardcover_api_key"):
-        d["hardcover_api_key_set"] = True
-        d["hardcover_api_key"] = d["hardcover_api_key"][:8] + "..."
-    else:
-        d["hardcover_api_key_set"] = False
-    if d.get("mam_session_id"):
-        sid = d["mam_session_id"]
-        d["mam_session_id"] = sid[:8] + "..." + sid[-4:] if len(sid) > 12 else "***"
+    # Check the encrypted store for secret keys — if present there,
+    # the settings.json value is stale/blank (migration already ran).
+    for key in SECRET_KEYS:
+        encrypted_val = await get_secret(key)
+        if encrypted_val:
+            d[f"{key}_set"] = True
+            d[key] = encrypted_val[:8] + "..." if len(encrypted_val) > 8 else "***"
+        elif d.get(key):
+            # Fallback: still in settings.json (pre-migration)
+            d[f"{key}_set"] = True
+            d[key] = d[key][:8] + "..."
+        else:
+            d[f"{key}_set"] = False
     d["language_options"] = LANGUAGE_OPTIONS
     d["_extra_mount_paths"] = get_extra_mount_paths()
     d["_discovered_libraries"] = [
@@ -59,14 +65,17 @@ async def get_settings():
 
 @router.post("/settings")
 async def update_settings(body: dict = Body(...)):
+    from app.secrets import set_secret, SECRET_KEYS
     cur = load_settings()
     for k, v in body.items():
         if k not in cur:
             continue
-        # Don't overwrite real API key with masked/truncated value
-        if k == "hardcover_api_key" and isinstance(v, str) and (v.endswith("...") or v == ""):
-            continue
-        if k == "mam_session_id" and isinstance(v, str) and ("..." in v or v == "***"):
+        # Route secret keys through the encrypted store
+        if k in SECRET_KEYS:
+            if isinstance(v, str) and ("..." in v or v == "***" or v == ""):
+                continue  # masked/truncated value — don't overwrite
+            await set_secret(k, v)
+            cur[k] = ""  # blank in settings.json
             continue
         cur[k] = v
     save_settings(cur)
@@ -91,6 +100,15 @@ async def reset_settings():
 @router.get("/health")
 async def health():
     return {"status": "ok", "time": time.time()}
+
+
+@router.get("/version")
+async def version_info():
+    """Return the build version (git SHA) baked into the Docker image."""
+    from pathlib import Path
+    version_file = Path("/app/VERSION")
+    sha = version_file.read_text().strip() if version_file.exists() else "dev"
+    return {"sha": sha, "short_sha": sha[:7] if len(sha) > 7 else sha}
 
 
 @router.get("/platform")

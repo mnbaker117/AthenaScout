@@ -94,6 +94,9 @@ DEFAULT_SETTINGS = {
     "goodreads_enabled": True,
     "hardcover_enabled": True,
     "kobo_enabled": True,
+    "amazon_enabled": False,
+    "ibdb_enabled": False,
+    "google_books_enabled": False,
     "theme": "dark",
     "languages": ["English"],
     "lookup_interval_days": 3,
@@ -101,6 +104,9 @@ DEFAULT_SETTINGS = {
     "rate_goodreads": 2,
     "rate_hardcover": 1,
     "rate_kobo": 3,
+    "rate_amazon": 2,
+    "rate_ibdb": 1,
+    "rate_google_books": 1.5,
     "verbose_logging": False,
     "author_scanning_enabled": True,
     # When True, source scans only enrich metadata on books the user already
@@ -108,6 +114,21 @@ DEFAULT_SETTINGS = {
     # Lets the user fully populate metadata on their existing library before
     # turning the discovery firehose on. Default off preserves existing behavior.
     "author_scan_owned_only": False,
+    # Filter out audiobook-only editions, narrator credits, and non-ebook
+    # formats during source scans. Prevents audiobook entries from cluttering
+    # an ebook-focused library.
+    "exclude_audiobooks": True,
+    "hermeece_url": "",
+    "ntfy_url": "",
+    "ntfy_topic": "",
+    "ntfy_on_scan_complete": True,
+    "ntfy_on_new_books": True,
+    "ntfy_on_mam_complete": True,
+    "ntfy_on_hermeece_sent": True,
+    "ntfy_on_library_sync": False,
+    "ntfy_on_mam_cookie_rotated": False,
+    "ntfy_digest_enabled": False,
+    "ntfy_digest_schedule": "daily",
     "calibre_web_url": "",
     "calibre_url": "",
     "mam_session_id": "",

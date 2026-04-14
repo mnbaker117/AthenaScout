@@ -367,6 +367,40 @@ MIGRATIONS = [
     # snapshot. Tolerated by the migration loop's "duplicate column"
     # handler if it's already present.
     "ALTER TABLE mam_scan_log ADD COLUMN book_ids_snapshot TEXT",
+    # Amazon source — add amazon_id columns for author/series/book tracking
+    "ALTER TABLE authors ADD COLUMN amazon_id TEXT",
+    "ALTER TABLE series ADD COLUMN amazon_id TEXT",
+    "ALTER TABLE books ADD COLUMN amazon_id TEXT",
+    # Omnibus flag — marks compilations/box-sets that should display
+    # separately from numbered series entries (don't shift numbering).
+    "ALTER TABLE books ADD COLUMN is_omnibus INTEGER NOT NULL DEFAULT 0",
+    # Pen-name linking: maps author aliases to a canonical author.
+    # When two authors are linked, source scans for either one check
+    # owned books under BOTH for dedup and series matching.
+    """CREATE TABLE IF NOT EXISTS pen_name_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        canonical_author_id INTEGER NOT NULL,
+        alias_author_id INTEGER NOT NULL,
+        created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+        FOREIGN KEY (canonical_author_id) REFERENCES authors(id) ON DELETE CASCADE,
+        FOREIGN KEY (alias_author_id) REFERENCES authors(id) ON DELETE CASCADE,
+        UNIQUE(canonical_author_id, alias_author_id)
+    )""",
+    # IBDB + Google Books sources — MUST be after pen_name_links (v40)
+    # since existing DBs already have user_version=40 from Sprint 3.
+    "ALTER TABLE books ADD COLUMN ibdb_id TEXT",
+    "ALTER TABLE books ADD COLUMN google_books_id TEXT",
+    # Repair: ensure ibdb_id exists on DBs that hit the reordering bug
+    # (Sprint 4 initially placed ibdb_id before pen_name_links, which
+    # caused it to be skipped on v40 DBs). Idempotent — "duplicate
+    # column" is caught by the migration error handler.
+    "ALTER TABLE books ADD COLUMN ibdb_id TEXT",
+    # Sprint 7 — link_type discriminates pen-name links from
+    # co-author links. Backend treats both identically (dedup books
+    # across linked authors, scan as one identity). The label is
+    # purely UX so the user can tell J.N. Chaney's co-author chain
+    # ("with Christopher Hopper") apart from Arand ↔ Darren.
+    "ALTER TABLE pen_name_links ADD COLUMN link_type TEXT NOT NULL DEFAULT 'pen_name'",
 ]
 
 
@@ -391,6 +425,29 @@ async def get_db(slug=None) -> aiosqlite.Connection:
     # only matters for writer↔writer contention.
     await db.execute("PRAGMA busy_timeout=30000")
     return db
+
+
+async def cleanup_empty_series(db=None):
+    """Delete series rows with no associated books.
+
+    Called after reset/clear operations that may leave orphaned series.
+    If no db connection is passed, opens and closes one automatically.
+    Returns the number of series rows deleted.
+    """
+    close_after = db is None
+    if db is None:
+        db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM series WHERE id NOT IN "
+            "(SELECT DISTINCT series_id FROM books WHERE series_id IS NOT NULL)"
+        )
+        if cur.rowcount > 0:
+            await db.commit()
+        return cur.rowcount
+    finally:
+        if close_after:
+            await db.close()
 
 
 # ─── Series-name normalization (mirrors lookup.py) ───────────
@@ -555,6 +612,24 @@ async def init_db(slug=None):
             # Stamp the new version so we skip this loop next startup
             await db.execute(f"PRAGMA user_version = {target_version}")
             await db.commit()
+
+        # ── Step 3.5: Ensure columns exist (migration-order safety net) ──
+        # Some columns may have been skipped due to migration reordering
+        # bugs (Sprint 4 ibdb_id issue). This runs every startup and is
+        # idempotent — "duplicate column" is silently caught.
+        _ensure_columns = [
+            ("books", "ibdb_id", "TEXT"),
+            ("books", "google_books_id", "TEXT"),
+            ("books", "amazon_id", "TEXT"),
+            ("books", "is_omnibus", "INTEGER NOT NULL DEFAULT 0"),
+            ("pen_name_links", "link_type", "TEXT NOT NULL DEFAULT 'pen_name'"),
+        ]
+        for table, col, coltype in _ensure_columns:
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+                _db_logger.info(f"Added missing column {table}.{col}")
+            except aiosqlite.OperationalError:
+                pass  # already exists — expected
 
         # ── Step 4: Ensure indexes exist (cheap, idempotent) ───────
         # Indexes are always checked because adding a new index to SCHEMA

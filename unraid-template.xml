@@ -12,9 +12,11 @@
   <Support/>
   <Project>https://github.com/mnbaker117/AthenaScout</Project>
   <Overview>
-    AthenaScout is a self-hosted book library completionist tracker. Point it at one or more Calibre libraries and it will cross-reference your collection against metadata sources like Goodreads, Hardcover, and Kobo to find books you're missing from authors and series you already collect.
+    AthenaScout is a self-hosted book library completionist tracker. Point it at one or more Calibre libraries and it will cross-reference your collection against six metadata sources (Goodreads, Hardcover, Kobo, Amazon, IBDB, Google Books) to find books you're missing from authors and series you already collect.
 
-    Features include multi-library discovery, multi-source scanning, MyAnonamouse cross-referencing, import/export, series intelligence, Calibre-Web deep linking, single-admin authentication, and a responsive web UI with dark/dim/light themes. Built on a library-app framework so additional source applications (audiobookshelf, etc.) can be added in future releases.
+    v1.1 features: pen-name + co-author linking, "Send to Hermeece" one-click downloads, ntfy push notifications with daily/weekly digests, in-app log viewer, encrypted credential storage, MAM session-cookie auto-rotation, omnibus detection, and a confidence-scored MAM matching pipeline.
+
+    Plus: multi-library discovery, multi-source scanning, MyAnonamouse cross-referencing, import/export, series intelligence, Calibre-Web deep linking, single-admin authentication, brute-force lockout, and a responsive web UI with dark/dim/light themes. Built on a library-app framework so additional source applications (audiobookshelf, etc.) can be added in future releases.
   </Overview>
   <Category>MediaApp:Books</Category>
   <WebUI>http://[IP]:[PORT:8787]</WebUI>
@@ -26,7 +28,7 @@
   <DonateLink/>
   <DonateImg/>
   <Description>
-    Self-hosted book library completionist tracker. Discovers Calibre libraries automatically, finds missing books via Goodreads/Hardcover/Kobo, and cross-references against MyAnonamouse availability. Single-admin auth, multi-library, multi-theme, responsive UI.
+    Self-hosted book library completionist tracker. Discovers Calibre libraries automatically, finds missing books via six metadata sources (Goodreads/Hardcover/Kobo/Amazon/IBDB/Google Books), cross-references against MyAnonamouse availability with auto-rotating session cookies, and hands off matched books to Hermeece for one-click downloads. Pen-name + co-author linking, ntfy notifications, in-app log viewer, encrypted credentials. Single-admin auth, multi-library, multi-theme, responsive UI.
   </Description>
 
   <!-- ─── Web UI ────────────────────────────────────────────── -->
@@ -60,7 +62,7 @@
     Target="/app/data"
     Default="/mnt/user/appdata/athena-scout"
     Mode="rw"
-    Description="Persistent storage for AthenaScout's databases (one SQLite file per discovered library), settings, auth credentials, and the auth signing secret. Survives container restarts and image updates."
+    Description="Persistent storage for AthenaScout's databases (one SQLite file per discovered library), settings, auth credentials database (athenascout_auth.db with Fernet-encrypted MAM/Hardcover tokens), and the auth signing secret (auth_secret, mode 0600 — also drives credential encryption). Survives container restarts and image updates."
     Type="Path"
     Display="always"
     Required="true"
@@ -113,7 +115,7 @@
     Name="Hardcover API Key"
     Target="HARDCOVER_API_KEY"
     Default=""
-    Description="API key from hardcover.app (Account → API). Must include the 'Bearer ' prefix. Leave empty to configure via the Settings UI after first run."
+    Description="API key from hardcover.app (Account → API). Must include the 'Bearer ' prefix. Leave empty to configure via the Settings UI after first run. On first start the value is migrated into the encrypted credential store (see SECURITY.md) and the env var becomes informational only."
     Type="Variable"
     Display="always"
     Required="false"
@@ -124,7 +126,7 @@
     Name="MAM Session ID"
     Target="MAM_SESSION_ID"
     Default=""
-    Description="MyAnonamouse mam_id session cookie for cross-referencing book availability. Optional — recommended to configure via the Settings UI instead so you can complete the IP-locking flow correctly."
+    Description="MyAnonamouse session cookie (mam_id or mbsc — generate via Profile → Preferences → Security) for cross-referencing book availability. Optional — recommended to configure via the Settings UI instead so you can complete the IP/ASN-locking flow correctly. Once set, AthenaScout intercepts MAM's automatic Set-Cookie rotations so you don't have to re-paste tokens. Migrated to the encrypted credential store on first start."
     Type="Variable"
     Display="advanced"
     Required="false"

@@ -39,6 +39,8 @@ from urllib.parse import urlencode
 
 import httpx
 
+from app.scoring import score_match
+
 logger = logging.getLogger("athenascout.mam")
 
 # ---------------------------------------------------------------------------
@@ -64,9 +66,20 @@ _NEEDS_SCAN_BASIC_ALIASED = "b.mam_status IS NULL AND b.is_unreleased = 0 AND b.
 _NEEDS_SCAN_STRICT_BARE = "mam_url IS NULL AND mam_status IS NULL AND is_unreleased = 0 AND hidden = 0"
 _NEEDS_SCAN_STRICT_ALIASED = "b.mam_url IS NULL AND b.mam_status IS NULL AND b.is_unreleased = 0 AND b.hidden = 0"
 
-# Match quality thresholds
-MATCH_MIN_PCT = 25.0       # below this → junk, skip
-MATCH_PROMOTE_PCT = 50.0   # at or above + author match → promote to "found"
+# Match quality thresholds (0-1 scale, uses scoring.score_match)
+# The combined score blends 70% title similarity + 30% author overlap,
+# so a threshold of 0.65 means moderate title + good author, or
+# excellent title + no author info.
+MATCH_MIN_SCORE = 0.20     # below this → junk, skip
+MATCH_PROMOTE_SCORE = 0.70 # at or above → promote to "found"
+# Note: MAM is #1 priority for merge conflicts (SOURCE_PRIORITY in
+# lookup.py), but the found threshold stays moderate because MAM
+# commonly has series bundles where individual title matching naturally
+# scores lower (e.g., "Kingdom's Dawn" vs "The Kingdom Series Bundle").
+
+# Legacy thresholds kept for the _word_match_pct fallback paths
+MATCH_MIN_PCT = 25.0
+MATCH_PROMOTE_PCT = 50.0
 
 # Status constants
 STATUS_FOUND = "found"
@@ -473,6 +486,79 @@ def _build_headers(token: str) -> dict:
 
 _client: Optional[httpx.AsyncClient] = None
 
+# ── Cookie auto-rotation state ──────────────────────────────
+# MAM rotates the mam_id session cookie on every response via Set-Cookie.
+# Clients that capture and reuse the new cookie get indefinite session
+# lifetime; clients that ignore it eventually expire (~30 days).
+#
+# The pattern: intercept Set-Cookie after every _do_get/_do_post, compare
+# to the in-memory token, and if different, update + fire a callback that
+# debounce-persists to settings.json.
+_current_token: Optional[str] = None
+_rotation_callback: Optional[Callable] = None
+_last_rotation_save: float = 0.0
+_MAM_ID_RX = re.compile(r"mam_id=([^;\s]+)")
+
+
+def set_current_token(token: str) -> None:
+    """Seed the in-memory token from settings at startup."""
+    global _current_token
+    _current_token = token
+
+
+def get_current_token() -> Optional[str]:
+    """Return the most recently rotated token."""
+    return _current_token
+
+
+def set_rotation_callback(callback: Callable) -> None:
+    """Register a callback for when the token rotates.
+
+    The callback receives the new token string and should persist it
+    to settings.json. Called inline after each response, so it should
+    be fast (the caller handles debouncing).
+    """
+    global _rotation_callback
+    _rotation_callback = callback
+
+
+def _extract_mam_id(response: httpx.Response) -> Optional[str]:
+    """Extract mam_id from a MAM response's Set-Cookie header."""
+    # Primary: httpx cookie jar (handles standard Set-Cookie parsing)
+    jar_val = response.cookies.get("mam_id")
+    if jar_val:
+        return jar_val
+    # Fallback: regex against raw Set-Cookie headers (handles edge cases
+    # where httpx doesn't parse the cookie due to missing attributes)
+    for val in response.headers.get_list("set-cookie"):
+        m = _MAM_ID_RX.search(val)
+        if m:
+            return m.group(1)
+    return None
+
+
+async def _handle_response_cookie(response: httpx.Response) -> None:
+    """Check response for a rotated mam_id and update state if changed."""
+    global _current_token, _last_rotation_save
+    new_token = _extract_mam_id(response)
+    if not new_token or new_token == _current_token:
+        return
+    _current_token = new_token
+    # Don't log token bytes (even a prefix) — an 8-char prefix is enough
+    # entropy to correlate sessions across log files / log aggregators,
+    # and anyone with `docker logs` access is a wider audience than the
+    # people authorized to see the MAM session token. The fact-of-rotation
+    # is the only diagnostic that matters here.
+    logger.debug("MAM cookie rotated")
+    # Debounced persistence: only save if 60+ seconds since last save
+    now = time.time()
+    if _rotation_callback and (now - _last_rotation_save) >= 60:
+        _last_rotation_save = now
+        try:
+            await _rotation_callback(new_token)
+        except Exception as e:
+            logger.warning(f"Cookie rotation callback failed: {e}")
+
 
 def _get_client() -> httpx.AsyncClient:
     """Lazy-initialized module-level httpx.AsyncClient for connection reuse.
@@ -512,23 +598,30 @@ async def aclose_session() -> None:
 
 
 async def _do_get(url: str, token: str, timeout: int = 15) -> httpx.Response:
-    """Async GET to a MAM endpoint with standard headers."""
-    return await _get_client().get(
-        url, headers=_build_headers(token), timeout=timeout
+    """Async GET to a MAM endpoint with standard headers + cookie rotation."""
+    # Use the rotated token if available, fall back to explicit token
+    effective = _current_token or token
+    resp = await _get_client().get(
+        url, headers=_build_headers(effective), timeout=timeout
     )
+    await _handle_response_cookie(resp)
+    return resp
 
 
 async def _do_post(url: str, token: str, payload: str, timeout: int = 20) -> httpx.Response:
-    """Async POST to a MAM endpoint with standard headers.
+    """Async POST to a MAM endpoint with standard headers + cookie rotation.
 
     `payload` MUST be a pre-serialized JSON string. Sent via httpx
     `content=` so the body bytes go on the wire untouched. See the module
     header for why `data=<dict>` and `json=<dict>` both break the search
     API in subtle ways.
     """
-    return await _get_client().post(
-        url, headers=_build_headers(token), content=payload, timeout=timeout
+    effective = _current_token or token
+    resp = await _get_client().post(
+        url, headers=_build_headers(effective), content=payload, timeout=timeout
     )
+    await _handle_response_cookie(resp)
+    return resp
 
 
 async def register_ip(session_id: str, skip_ip_update: bool = True) -> dict:
@@ -736,6 +829,7 @@ def _evaluate_results(
     search_title: str,
     authors: str,
     lang_ids: Optional[list[int]] = None,
+    known_series: str = "",
 ) -> list[dict]:
     """
     Evaluate all MAM search results for a book. Returns a list of viable
@@ -743,7 +837,7 @@ def _evaluate_results(
 
     Each returned match dict:
       torrent_id, mam_title, formats, format_str, match_pct,
-      author_matched, search_link, raw
+      confidence, author_matched, seeders, my_snatched
     """
     if not lang_ids:
         lang_ids = [_ENGLISH_LANG_ID]
@@ -779,23 +873,55 @@ def _evaluate_results(
                 logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — non-English lang_code={lang_code} (no numeric language field)")
                 continue
 
-        # Check author match
-        author_ok = _author_match(authors, item)
-
-        # Score title match (take best of full title vs search term)
-        pct_full = _word_match_pct(calibre_title, mam_title)
-        pct_search = _word_match_pct(search_title, mam_title)
-        pct = max(pct_full, pct_search)
-
-        if pct < MATCH_MIN_PCT:
-            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — match {pct}% < {MATCH_MIN_PCT}% min")
-            continue  # junk result
-
         # Parse ebook formats from filetypes field. Same defensive coercion
         # as mam_title above — MAM occasionally returns numeric values here
         # for malformed catalog entries.
         filetypes_raw = str(item.get("filetype") or item.get("filetypes") or "")
         formats = _parse_formats(filetypes_raw)
+
+        # Explicit audiobook rejection: if no ebook formats were parsed,
+        # the torrent is audio-only (mp3, m4a, etc.) — skip it entirely.
+        if not formats and filetypes_raw.strip():
+            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — audio-only formats ({filetypes_raw.strip()})")
+            continue
+
+        # Category-based audiobook rejection: MAM categories like
+        # "AudioBooks - Fantasy" vs "Ebooks - Fantasy".
+        category = str(item.get("category") or "").strip()
+        if category.lower().startswith("audiobook"):
+            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — audiobook category ({category})")
+            continue
+
+        # ── Improved scoring via scoring.py ──
+        # Extract MAM author names for overlap scoring
+        mam_authors = _parse_author_info(item.get("author_info"))
+
+        # Combined score: 70% title similarity + 30% author overlap
+        # + series boost when known_series matches in the MAM title
+        score_full = score_match(
+            record_title=mam_title, record_authors=mam_authors,
+            search_title=calibre_title, search_authors=authors,
+            known_series=known_series,
+        )
+        score_search = score_match(
+            record_title=mam_title, record_authors=mam_authors,
+            search_title=search_title, search_authors=authors,
+            known_series=known_series,
+        )
+        confidence = max(score_full, score_search)
+
+        # Legacy compatibility: also compute the old percentage for the
+        # match_pct field (used by _pick_best_result sorting)
+        pct_full = _word_match_pct(calibre_title, mam_title)
+        pct_search = _word_match_pct(search_title, mam_title)
+        pct = max(pct_full, pct_search)
+
+        if confidence < MATCH_MIN_SCORE:
+            logger.debug(f"  Eval: SKIP '{mam_title[:50]}' — confidence {confidence:.2f} < {MATCH_MIN_SCORE} min")
+            continue  # junk result
+
+        # Legacy author match (kept for diagnostic logging)
+        author_ok = _author_match(authors, item)
 
         # MAM marks torrents the user has already snatched via "my_snatched"
         # (truthy when present). Capture so we can show a badge in the UI.
@@ -807,6 +933,7 @@ def _evaluate_results(
             "formats": formats,
             "format_str": ",".join(formats) if formats else filetypes_raw.strip(),
             "match_pct": pct,
+            "confidence": confidence,
             "author_matched": author_ok,
             "seeders": int(item.get("seeders", 0) or 0),
             "my_snatched": my_snatched,
@@ -826,6 +953,7 @@ async def check_book(
     format_priority: list[str] = None,
     delay: float = DEFAULT_DELAY,
     lang_ids: Optional[list[int]] = None,
+    series_name: str = "",
 ) -> dict:
     """
     Five-pass search cascade for a single book, with format preference scoring.
@@ -883,7 +1011,7 @@ async def check_book(
                     )
             except (ValueError, TypeError):
                 pass
-        matches = _evaluate_results(data, title, search_title, authors, lang_ids)
+        matches = _evaluate_results(data, title, search_title, authors, lang_ids, known_series=series_name)
 
         if not matches:
             return False
@@ -902,6 +1030,7 @@ async def check_book(
             return False
 
         pct = best["match_pct"]
+        conf = best.get("confidence", pct / 100.0)
 
         # Build candidate info
         candidate = {
@@ -911,13 +1040,18 @@ async def check_book(
             "formats": best["format_str"],
             "has_multiple": has_multiple,
             "match_pct": pct,
+            "confidence": conf,
             "best_format": best.get("best_format", ""),
             "author_matched": best["author_matched"],
             "my_snatched": best.get("my_snatched", False),
         }
 
-        # Promote to FOUND if match is strong and author checks out
-        if pct >= MATCH_PROMOTE_PCT and best["author_matched"]:
+        # Promote to FOUND using the combined confidence score
+        # (70% title similarity + 30% author overlap from scoring.py).
+        # The old threshold was: pct >= 50 AND author_matched (boolean).
+        # The new threshold uses the blended score which already accounts
+        # for both title and author quality in one number.
+        if conf >= MATCH_PROMOTE_SCORE:
             result["status"] = STATUS_FOUND
             result["passes_tried"].append(pass_num)
             result["mam_url"] = _torrent_url(best["torrent_id"])
@@ -927,11 +1061,12 @@ async def check_book(
             result["mam_has_multiple"] = has_multiple
             result["mam_my_snatched"] = best.get("my_snatched", False)
             result["match_pct"] = pct
+            result["confidence"] = conf
             result["best_format"] = best.get("best_format", "")
             return True  # stop cascade
 
         # Otherwise save as best possible so far
-        if best_possible is None or pct > best_possible["match_pct"]:
+        if best_possible is None or conf > best_possible.get("confidence", 0):
             best_possible = candidate
         return False
 
@@ -1041,17 +1176,21 @@ async def scan_books_batch(
                     "errors": 0, "error": None}
         placeholders = ",".join("?" * len(book_ids))
         rows = await db.execute_fetchall(f"""
-            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased
+            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased,
+                   s.name as series_name
             FROM books b
             JOIN authors a ON b.author_id = a.id
+            LEFT JOIN series s ON b.series_id = s.id
             WHERE b.id IN ({placeholders})
             ORDER BY b.owned DESC, b.id ASC
         """, tuple(book_ids))
     else:
         rows = await db.execute_fetchall(f"""
-            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased
+            SELECT b.id, b.title, a.name as author_name, b.owned, b.is_unreleased,
+                   s.name as series_name
             FROM books b
             JOIN authors a ON b.author_id = a.id
+            LEFT JOIN series s ON b.series_id = s.id
             WHERE {_NEEDS_SCAN_BASIC_ALIASED}
             ORDER BY b.owned DESC, b.id ASC
             LIMIT ?
@@ -1068,6 +1207,7 @@ async def scan_books_batch(
 
     for i, row in enumerate(rows):
         book_id, book_title, author_name = row[0], row[1], row[2]
+        book_series = row[5] if len(row) > 5 else ""
 
         logger.debug(f"MAM [{i+1}/{len(rows)}] {book_title[:65]} — {author_name[:35]}")
 
@@ -1078,7 +1218,7 @@ async def scan_books_batch(
         if on_progress:
             on_progress(dict(stats))
 
-        check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids)
+        check = await check_book(session_id, book_title, author_name, format_priority, delay, lang_ids=lang_ids, series_name=book_series or "")
         stats["scanned"] += 1
 
         # Write result to DB

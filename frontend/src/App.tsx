@@ -1,0 +1,217 @@
+import { useState, useEffect } from "react";
+import { THEMES, TC } from "./theme";
+import type {
+  ThemeName, Library, ScanProgress,
+  AuthCheckResponse, MamStatusResponse,
+  LibrariesResponse, ScanStatusResponse, SeriesSuggestionCountResponse,
+} from "./types";
+import { EVT } from "./types";
+import { api } from "./api";
+import { Ic } from "./icons";
+import { usePersist } from "./hooks/usePersist";
+import { NAV } from "./lib/constants";
+import { Btn } from "./components/Btn";
+import { Spin } from "./components/Spin";
+import { AddBookModal } from "./components/AddBookModal";
+import { UrlSearchModal } from "./components/UrlSearchModal";
+import { SetupWizard } from "./components/SetupWizard";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import LoginPage from "./pages/LoginPage";
+import Dashboard from "./pages/Dashboard";
+import ImportExportPage from "./pages/ImportExportPage";
+import HiddenPage from "./pages/HiddenPage";
+import LogsPage from "./pages/LogsPage";
+import AuthorsPage from "./pages/AuthorsPage";
+import BooksPage from "./pages/BooksPage";
+import AuthorDetailPage from "./pages/AuthorDetailPage";
+import MAMPage from "./pages/MAMPage";
+import DatabasePage from "./pages/DatabasePage";
+import SettingsPage from "./pages/SettingsPage";
+import SuggestionsPage from "./pages/SuggestionsPage";
+import Toaster from "./components/Toaster";
+
+// ─── Per-page content widths ────────────────────────────────
+// Data-heavy pages (book grids, large tables, MAM list) get a
+// wider container so book covers, columns, and metadata don't
+// crowd each other on modern displays. The navbar stays narrow
+// (1120px) regardless because nav items don't benefit from
+// stretching, and Settings/Dashboard/Logs/etc. stay narrow
+// because they're config/forms — line length matters.
+const NARROW_WIDTH = 1120;
+const WIDE_WIDTH   = 1400;
+const WIDE_PAGES = new Set([
+  "library", "authors", "author", "missing", "upcoming",
+  "mam", "suggestions", "hidden", "database",
+]);
+const widthFor = (pg: string): number => (WIDE_PAGES.has(pg) ? WIDE_WIDTH : NARROW_WIDTH);
+
+// ─── App Shell ──────────────────────────────────────────────
+
+export default function App(){
+  const[pg,setPg]=usePersist<string>("page","dashboard");
+  const[pa,setPa]=usePersist<number|string|null>("page_arg",null);
+  const[tn,setTn]=useState<ThemeName>(()=>{try{return (localStorage.getItem("cl_theme") as ThemeName)||"dark"}catch{return"dark"}});
+  const[showAdd,setShowAdd]=useState<string|null>(null);
+// Auth state — three meaningful shapes:
+//   {loading:true}                                    → initial /auth/check is in flight, render spinner
+//   {authenticated:false,firstRun:true|false}         → render LoginPage (setup or sign-in mode)
+//   {authenticated:true,...}                          → render the rest of the app
+// The `athenascout:auth-required` event (dispatched by api.js when any
+// fetch returns 401) drops us back to the unauthenticated state so the
+// user gets the login screen instead of stale UI fed by failed fetches.
+const[authState,setAuthState]=useState({loading:true,authenticated:false,firstRun:false});
+const checkAuth=async()=>{try{const r=await api.get<AuthCheckResponse>("/auth/check");setAuthState({loading:false,authenticated:!!r.authenticated,firstRun:!!r.first_run})}catch{setAuthState({loading:false,authenticated:false,firstRun:false})}};
+useEffect(()=>{checkAuth();const onAuthRequired=()=>setAuthState(s=>s.authenticated?{loading:false,authenticated:false,firstRun:false}:s);window.addEventListener(EVT.AuthRequired,onAuthRequired);return()=>window.removeEventListener(EVT.AuthRequired,onAuthRequired)},[]);
+const onLoginSuccess=()=>{setAuthState({loading:false,authenticated:true,firstRun:false})};
+const[firstRun,setFirstRun]=useState<boolean|null>(null);
+const[mamWarn,setMamWarn]=useState<boolean>(false);
+const[mamOn,setMamOn]=useState<boolean>(false);
+const[libs,setLibs]=useState<Library[]>([]);
+const[activeLib,setActiveLib]=useState<string>(()=>{try{return localStorage.getItem("cl_active_lib")||""}catch{return""}});
+useEffect(()=>{if(!authState.authenticated)return;api.get<LibrariesResponse>("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{})},[authState.authenticated]);
+// Check if this is a first-run scenario (setup wizard needed). Skipped until authenticated.
+useEffect(()=>{if(!authState.authenticated)return;api.get("/platform").then(r=>setFirstRun(r.first_run===true)).catch(()=>setFirstRun(false))},[authState.authenticated]);
+// MAM status is refetched on login and on explicit "athenascout:mam-state-changed"
+// events dispatched by SettingsPage when the user toggles MAM. It used to
+// refetch on every `pg` change (page nav) as a lazy refresh trigger, which
+// cost 1 API call per nav click. Event-driven is surgical and free.
+useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get<MamStatusResponse>("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{});refresh();window.addEventListener(EVT.MamStateChanged,refresh);return()=>window.removeEventListener(EVT.MamStateChanged,refresh)},[authState.authenticated]);
+// Pending series-suggestion count drives the badge number on the
+// Suggestions nav item. Refetched via the explicit
+// "athenascout:suggestions-changed" event that SuggestionsPage
+// dispatches after Apply/Ignore/Delete actions, plus a one-shot fetch
+// on initial auth — no polling.
+const[sugCount,setSugCount]=useState<number>(0);
+useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get<SeriesSuggestionCountResponse>("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener(EVT.SuggestionsChanged,refresh);return()=>window.removeEventListener(EVT.SuggestionsChanged,refresh)},[authState.authenticated]);
+
+// App-level scan-progress poller. Runs ONCE per app-mount (not per
+// page) so the unified Dashboard widget and every other page that
+// cares about scan completion (AuthorDetailPage refresh, AuthorsPage
+// bulk action) see consistent data without each maintaining its own
+// polling effect.
+//
+// Dispatches two custom events:
+//   athenascout:scans-updated   — on every poll, detail.scans = next
+//   athenascout:scan-completed  — when a scan transitions running→idle
+//
+// Cadence: 3s while any scan is in flight, 30s idle watchdog. Pauses
+// on backgrounded tabs via the Page Visibility API. Trigger sites can
+// dispatch `athenascout:scan-started` to demand an immediate poll
+// (no waiting for the next interval tick).
+useEffect(()=>{if(!authState.authenticated)return;let prev:ScanProgress[]=[];let cancelled=false;let iv:ReturnType<typeof setInterval>|null=null;const tick=async()=>{if(document.hidden||cancelled)return;try{const r=await api.get<ScanStatusResponse>("/scan-status");const next:ScanProgress[]=r.scans||[];for(const ns of next){const ps=prev.find(p=>p.kind===ns.kind);if(ps&&ps.running&&!ns.running){try{window.dispatchEvent(new CustomEvent(EVT.ScanCompleted,{detail:{kind:ns.kind,scan:ns}}))}catch{}}}prev=next;try{window.dispatchEvent(new CustomEvent(EVT.ScansUpdated,{detail:{scans:next}}))}catch{}const anyRunning=next.some(s=>s.running);const want=anyRunning?3000:30000;if(iv){clearInterval(iv);iv=setInterval(tick,want)}}catch{}};tick();iv=setInterval(tick,30000);const onStarted=()=>tick();const onVis=()=>{if(!document.hidden)tick()};window.addEventListener(EVT.ScanStarted,onStarted);document.addEventListener("visibilitychange",onVis);return()=>{cancelled=true;if(iv)clearInterval(iv);window.removeEventListener(EVT.ScanStarted,onStarted);document.removeEventListener("visibilitychange",onVis)}},[authState.authenticated]);
+  const theme=THEMES[tn]||THEMES.dark;
+  const nav=(p:string,a:number|string|null=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
+  useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);
+  const nextT=()=>{const n=Object.keys(THEMES) as ThemeName[];setTn(n[(n.indexOf(tn)+1)%n.length])};
+  const switchLib=async(slug:string)=>{if(slug===activeLib)return;try{await api.post("/libraries/active",{slug});setActiveLib(slug);try{localStorage.setItem("cl_active_lib",slug)}catch{}setPg("dashboard");setPa(null)}catch(e){console.error("Library switch failed:",e)}};
+
+  // Setup wizard completion — refresh libraries and show dashboard
+  const onWizardComplete=()=>{setFirstRun(false);api.get("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{});setPg("dashboard")};
+
+// Auth gate — render login or loading before the main shell.
+if(authState.loading)return<TC.Provider value={theme}><div style={{display:"flex",justifyContent:"center",alignItems:"center",minHeight:"100vh",background:theme.bg}}><Spin/></div></TC.Provider>;
+if(!authState.authenticated)return<TC.Provider value={theme}><LoginPage onLoginSuccess={onLoginSuccess} isFirstRun={authState.firstRun}/></TC.Provider>;
+
+return<TC.Provider value={theme}>
+<Toaster/>
+<style>{`*{box-sizing:border-box;margin:0}html{height:100%;background:${theme.bg}}body{background:${theme.bg};color:${theme.text2};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;min-height:100%;min-height:100dvh;min-height:-webkit-fill-available}::selection{background:${theme.accent}44}::-webkit-scrollbar{width:8px}::-webkit-scrollbar-track{background:${theme.bg}}::-webkit-scrollbar-thumb{background:${theme.border};border-radius:4px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slideIn{from{transform:translateX(100%)}to{transform:translateX(0)}}
+@keyframes slideOut{from{transform:translateX(0)}to{transform:translateX(100%)}}
+@keyframes fadeIn{from{opacity:0;transform:scale(0.97)}to{opacity:1;transform:scale(1)}}
+@keyframes fadeOverlay{from{opacity:0}to{opacity:1}}
+@keyframes pageIn{from{opacity:0}to{opacity:1}}
+button{font-family:inherit;transition:transform 0.1s,opacity 0.15s}button:active{transform:scale(0.96)}
+input,select{font-family:inherit}
+.sidebar-panel{animation:slideIn 0.25s ease-out}
+.sidebar-closing{animation:slideOut 0.2s ease-in forwards}
+.page-content{animation:pageIn 0.2s ease-out}
+.nav-items{position:relative}
+.nav-items::after{content:'';position:absolute;right:0;top:0;bottom:0;width:24px;background:linear-gradient(to right,transparent,${theme.bg}ee);pointer-events:none;opacity:0.8}
+@media(max-width:768px){
+  .nav-bar{position:relative!important}
+  .nav-items{gap:0!important;-webkit-overflow-scrolling:touch}
+  .nav-items button{padding:6px 10px!important;font-size:12px!important;white-space:nowrap}
+  .nav-items button span:first-child{display:none!important}
+  .main-content{padding:12px 12px 60px!important}
+  .bp-sticky,.bp-controls[style*="sticky"]{top:0!important}
+  .bp-controls{gap:10px!important}
+  .bp-right{flex-wrap:wrap!important;justify-content:flex-start!important;width:100%!important}
+  .bp-right select,.bp-right button{min-height:40px!important;font-size:13px!important}
+  .sidebar-panel,.sidebar-closing{width:100%!important;max-width:100vw!important;padding:20px!important}
+  .sb-actions{gap:12px!important}
+  .sb-actions button{min-height:44px!important;min-width:44px!important;font-size:15px!important}
+  .modal-panel{width:95vw!important;max-width:95vw!important}
+  .dash-stats{grid-template-columns:repeat(3,1fr)!important;gap:8px!important}
+  .lib-switcher select{max-width:120px!important;font-size:11px!important}
+  .author-header{flex-direction:column!important;gap:12px!important}
+  .author-controls{width:100%!important;justify-content:flex-start!important;flex-wrap:wrap!important}
+  .author-controls button{min-height:40px!important}
+  .settings-grid{grid-template-columns:1fr!important}
+}`}</style>
+<div style={{minHeight:"100vh"}}>
+
+{/* ── First-run loading state ── */}
+{firstRun===null?<div style={{display:"flex",justifyContent:"center",alignItems:"center",minHeight:"100vh"}}><Spin/></div>:firstRun?<SetupWizard onComplete={onWizardComplete}/>:<>
+
+{/* ── Sticky Nav ── */}
+<nav className="nav-bar" style={{position:"sticky",top:0,zIndex:50,background:theme.bg+"ee",backdropFilter:"blur(12px)",borderBottom:`1px solid ${theme.borderL}`}}>
+<div style={{maxWidth:1120,margin:"0 auto",padding:"0 20px",display:"flex",alignItems:"center",justifyContent:"space-between",height:56,gap:8}}>
+<button onClick={()=>nav("dashboard")} style={{background:"none",border:"none",cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",gap:8,position:"relative",paddingBottom:4}}>
+<svg viewBox="0 0 512 512" style={{width:28,height:28}}><defs><linearGradient id="ig" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:"#f0c060"}}/><stop offset="100%" style={{stopColor:"#d4a040"}}/></linearGradient></defs><circle cx="256" cy="256" r="240" fill="#2a1f4e" stroke="#d4a040" strokeWidth="12"/><circle cx="220" cy="200" r="22" fill="none" stroke="url(#ig)" strokeWidth="6"/><circle cx="292" cy="200" r="22" fill="none" stroke="url(#ig)" strokeWidth="6"/><circle cx="220" cy="200" r="8" fill="url(#ig)"/><circle cx="292" cy="200" r="8" fill="url(#ig)"/><path d="M248 220 L256 235 L264 220" fill="none" stroke="url(#ig)" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round"/><path d="M195 155 L212 178 L180 173" fill="url(#ig)" opacity="0.8"/><path d="M317 155 L300 178 L332 173" fill="url(#ig)" opacity="0.8"/><path d="M140 320 L256 290 L372 320 L372 365 C372 365 314 348 256 358 C198 348 140 365 140 365 Z" fill="url(#ig)" opacity="0.85"/></svg>
+<span style={{fontSize:18,fontWeight:700,color:theme.accent}}>AthenaScout</span>
+{pg==="dashboard"?<div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:theme.accent,borderRadius:1}}/>:null}
+</button>
+<div className="nav-items" style={{display:"flex",alignItems:"center",gap:2,overflowX:"auto",flex:1,minWidth:0}}>
+{/* Suggestions nav is always shown so users can reach
+    ignored items and delete them to let the next scan re-suggest.
+    The badge bubble below only renders when sugCount>0; empty
+    state shows just the icon and label. */}
+{NAV.filter(n=>(n.id!=="mam"||mamOn)).map(n=><button key={n.id} onClick={()=>nav(n.id)} style={{padding:"8px 14px",borderRadius:8,fontSize:14,fontWeight:500,border:"none",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,height:36,whiteSpace:"nowrap",flexShrink:0,background:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.bg4:"transparent",color:(pg===n.id||(n.id==="authors"&&pg==="author"))?theme.accent:theme.tf}}>
+<span style={{fontSize:15,lineHeight:1}}>{n.icon}</span>{n.label}
+{n.id==="suggestions"&&sugCount>0?<span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:18,height:18,padding:"0 5px",borderRadius:9,fontSize:11,fontWeight:700,background:theme.accent,color:theme.bg,marginLeft:2}}>{sugCount}</span>:null}
+</button>)}
+</div>
+<div style={{width:1,height:24,background:theme.borderL,flexShrink:0,margin:"0 6px"}}/>
+<div style={{display:"flex",alignItems:"center",gap:2,flexShrink:0}}>
+<div style={{position:"relative"}}>
+<button onClick={()=>setShowAdd(showAdd==="choose"?null:"choose")} style={{width:36,height:36,borderRadius:8,fontSize:14,border:"none",cursor:"pointer",background:showAdd==="choose"?theme.bg4:"transparent",color:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Add book">{Ic.plus}</button>
+{showAdd==="choose"&&<div style={{position:"absolute",top:"100%",right:0,marginTop:4,background:theme.bg2,border:`1px solid ${theme.border}`,borderRadius:8,overflow:"hidden",boxShadow:"0 4px 12px rgba(0,0,0,0.3)",zIndex:60,minWidth:180}}>
+<button onClick={e=>{e.stopPropagation();setShowAdd("url")}} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",fontSize:13,color:theme.text2,background:"transparent",border:"none",cursor:"pointer",width:"100%",textAlign:"left"}}>{Ic.search} Add from URL</button>
+<button onClick={e=>{e.stopPropagation();setShowAdd("manual")}} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",fontSize:13,color:theme.text2,background:"transparent",border:"none",cursor:"pointer",width:"100%",textAlign:"left",borderTop:`1px solid ${theme.borderL}`}}>{Ic.edit} Add Manually</button>
+</div>}
+</div>
+<button onClick={nextT} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:"transparent",color:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title={`Theme: ${theme.name}`}>{tn==="dark"?Ic.moon:tn==="light"?Ic.sun:Ic.cloudsun}</button>
+<button onClick={()=>nav("importexport")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="importexport"?theme.bg4:"transparent",color:pg==="importexport"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Import / Export">{Ic.arrows}</button>
+<button onClick={()=>nav("logs")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="logs"?theme.bg4:"transparent",color:pg==="logs"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Logs">&#x1f4cb;</button>
+<button onClick={()=>nav("database")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="database"?theme.bg4:"transparent",color:pg==="database"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Database">{Ic.database}</button>
+<button onClick={()=>nav("settings")} style={{width:36,height:36,borderRadius:8,border:"none",cursor:"pointer",background:pg==="settings"?theme.bg4:"transparent",color:pg==="settings"?theme.accent:theme.tf,display:"inline-flex",alignItems:"center",justifyContent:"center"}} title="Settings">{Ic.gear}</button>
+</div></div></nav>
+
+{/* MAM Validation Warning Banner */}
+{mamWarn?<div style={{maxWidth:widthFor(pg),margin:"12px auto 0",padding:"10px 16px",background:theme.ylw+"18",border:`1px solid ${theme.ylw}44`,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,fontSize:13}}><span style={{color:theme.ylwt}}>⚠ MAM session may have expired — scans are paused. <button onClick={()=>nav("settings")} style={{background:"none",border:"none",color:theme.accent,cursor:"pointer",fontWeight:600,fontSize:13,padding:0,textDecoration:"underline"}}>Go to Settings</button> to update your token and re-validate.</span><button onClick={()=>setMamWarn(false)} style={{background:"none",border:"none",color:theme.tg,cursor:"pointer",fontSize:16,padding:"0 4px",flexShrink:0}}>✕</button></div>:null}
+
+{/* ── Main Content ── */}
+<main className="main-content" style={{maxWidth:widthFor(pg),margin:"0 auto",padding:"28px 20px"}}>
+<ErrorBoundary onReset={()=>nav("dashboard")} key={pg+(pa||"")+activeLib}>
+<div className="page-content">
+{pg==="dashboard"&&<Dashboard onNav={nav} libs={libs} activeLib={activeLib} switchLib={switchLib}/>}
+{pg==="library"&&<BooksPage title="My Library" subtitle="books in your Calibre library" apiPath="/books" extraParams={{owned:true}} exportFilter="library"/>}
+{pg==="authors"&&<AuthorsPage onNav={nav}/>}
+{pg==="author"&&<AuthorDetailPage authorId={pa} onNav={nav}/>}
+{pg==="missing"&&<BooksPage title="Missing Books" subtitle="books to find" apiPath="/books" extraParams={{owned:false}} exportFilter="missing"/>}
+{pg==="upcoming"&&<BooksPage title="Upcoming Books" subtitle="unreleased books" apiPath="/upcoming" exportFilter="missing"/>}
+{pg==="hidden"&&<HiddenPage onNav={nav}/>}
+{pg==="importexport"&&<ImportExportPage/>}
+{pg==="mam"&&<MAMPage onNav={nav}/>}
+{pg==="suggestions"&&<SuggestionsPage onNav={nav}/>}
+{pg==="logs"&&<LogsPage/>}
+{pg==="database"&&<DatabasePage/>}
+{pg==="settings"&&<SettingsPage/>}
+</div></ErrorBoundary></main>
+
+{showAdd==="manual"&&<AddBookModal onClose={()=>setShowAdd(null)} onAdded={()=>{}}/>}
+{showAdd==="url"&&<UrlSearchModal onClose={()=>setShowAdd(null)} onAdded={()=>{}}/>}
+</>}
+</div>
+</TC.Provider>}

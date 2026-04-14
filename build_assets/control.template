@@ -6,9 +6,12 @@ Architecture: amd64
 Maintainer: Mark Baker <mnbaker117@users.noreply.github.com>
 Depends:
 Description: Self-hosted book library completionist tracker
- AthenaScout syncs Calibre libraries with metadata sources to identify
- missing books from collected authors and series. Supports Goodreads,
- Hardcover, Kobo, and MyAnonamouse integration.
+ AthenaScout syncs Calibre libraries with six metadata sources
+ (Goodreads, Hardcover, Kobo, Amazon, IBDB, Google Books) to identify
+ missing books from collected authors and series. Optional MyAnonamouse
+ integration with auto-rotating session cookies and one-click handoff
+ to Hermeece for downloads. Pen-name + co-author linking, ntfy push
+ notifications, encrypted credential storage, and an in-app log viewer.
  .
  Web UI accessible at http://localhost:8787 after launching.
 Homepage: https://github.com/mnbaker117/AthenaScout

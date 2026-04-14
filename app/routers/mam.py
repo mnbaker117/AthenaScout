@@ -43,10 +43,45 @@ from app.sources.mam import (
     _resolve_mam_languages,
 )
 from app import state
+from app.sources.mam import get_current_token as mam_get_current_token
 
 logger = logging.getLogger("athenascout")
 
 router = APIRouter(prefix="/api/mam", tags=["mam"])
+
+
+async def _notify_mam_done() -> None:
+    """Fire the MAM-scan-complete notification using the current
+    `_mam_scan_progress` snapshot. Best-effort — logs and swallows
+    any failure so notification problems can never break a scan."""
+    try:
+        from app.notify import notify_mam_scan_complete
+        await notify_mam_scan_complete(
+            scanned=int(state._mam_scan_progress.get("scanned", 0)),
+            found=int(state._mam_scan_progress.get("found", 0)),
+            possible=int(state._mam_scan_progress.get("possible", 0)),
+            not_found=int(state._mam_scan_progress.get("not_found", 0)),
+        )
+    except Exception:
+        logger.debug("MAM scan notify failed", exc_info=True)
+
+
+async def _get_mam_token() -> str:
+    """Get the active MAM token from the best source.
+
+    Priority: in-memory (cookie rotation) → encrypted store → settings.json.
+    """
+    token = mam_get_current_token()
+    if token:
+        return token
+    try:
+        from app.secrets import get_secret
+        token = await get_secret("mam_session_id")
+        if token:
+            return token
+    except Exception:
+        pass
+    return load_settings().get("mam_session_id", "")
 
 
 @router.post("/validate")
@@ -192,6 +227,7 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
                     state._mam_scan_progress.update({"status": "complete", "running": False})
                     logger.info(f"MAM scan complete (snapshot exhausted): {state._mam_scan_progress['scanned']}/{scan_total} scanned, {state._mam_scan_progress['found']} found")
                     await db.close()
+                    await _notify_mam_done()
                     return
                 result = await mam_scan_batch(
                     db, session_id=cs["mam_session_id"], limit=len(batch_ids),
@@ -223,6 +259,7 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
             if cursor >= scan_total:
                 state._mam_scan_progress.update({"status": "complete", "running": False})
                 logger.info(f"MAM scan complete: {state._mam_scan_progress['scanned']}/{scan_total} scanned, {state._mam_scan_progress['found']} found")
+                await _notify_mam_done()
                 return
             batch_num += 1
             state._mam_scan_progress["status"] = "paused"
@@ -348,6 +385,8 @@ async def mam_full_scan_start():
                 await db.close()
             if result["status"] in ("scan_complete", "error", "no_scan"):
                 state._mam_scan_progress.update({"running": False, "status": result["status"]})
+                if result["status"] == "scan_complete":
+                    await _notify_mam_done()
                 break
             elif result["status"] == "batch_complete":
                 # Fixed 5-minute pause between batches. The cadence
@@ -605,6 +644,7 @@ async def mam_scan_single_author(author_id: int):
                     state._mam_scan_progress["not_found"] += 1
             await bdb.commit()
             state._mam_scan_progress.update({"running": False, "status": "complete"})
+            await _notify_mam_done()
         except asyncio.CancelledError:
             state._mam_scan_progress.update({"running": False, "status": "cancelled"})
             raise

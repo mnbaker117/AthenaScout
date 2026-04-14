@@ -41,13 +41,18 @@ collector, I think you'll like it. **Please enjoy.**
 |---|---|---|
 | 📚 | **Library sync** | Reads your existing Calibre `metadata.db` directly. Read-only. No re-tagging, no parallel database to maintain. The sync layer is backend-agnostic — Calibre is the only supported backend today, but the [`LibraryApp`](app/library_apps/base.py) interface is built to grow. |
 | 🗂️ | **Multi-library** | Point at a parent directory and AthenaScout discovers every Calibre library inside it. Switch between them from the dashboard. |
-| 🔍 | **Three free sources** | Goodreads, Hardcover, and Kobo. Goodreads is the primary; the others fill gaps and act as a vote in the consensus pass. |
+| 🔍 | **Six metadata sources** | Goodreads, Hardcover, and Kobo are on by default; Amazon, IBDB, and Google Books are opt-in. Each contributes different signals — Amazon for series confirmation, IBDB for ISBN coverage, Google Books for descriptions — and the merge layer reconciles conflicts with field-level rules. |
 | 🎯 | **Author + series scanning** | Find every book an author has written, every entry in a series, and exactly which ones you're missing. Library-only mode lets you enrich your existing books without adding discovery noise. |
+| 👥 | **Pen-name + co-author linking** | Link two authors as pen names of the same person *or* as habitual co-authors. Source scans for either side dedup books across the linked identities, so William D. Arand ↔ Randi Darren and J.N. Chaney's collab catalog stop creating duplicate rows. |
 | 💡 | **Series-consensus suggestions** | When 2+ sources disagree with your stored series data, AthenaScout writes a *suggestion* you can review and Apply or Ignore — never a silent overwrite. |
-| 🎫 | **MAM integration (optional)** | Cross-reference missing books against MyAnonamouse with format priority, multi-language scanning, and scheduled background scans. Single-book, single-author, and full-library scan flavors. |
+| 📦 | **Omnibus detection** | Compilations and box-sets that match a known series name are flagged as `is_omnibus` and rendered separately so they don't shift series numbering. |
+| 🎫 | **MAM integration (optional)** | Cross-reference missing books against MyAnonamouse with confidence-scored matching, format priority, multi-language scanning, scheduled background scans, and **automatic session-cookie rotation** so you stop having to re-paste tokens every two weeks. |
+| 🚀 | **Send to Hermeece** | One-click hand-off of a found MAM match to a [Hermeece](https://github.com/mnbaker117/Hermeece) instance for automatic download + Calibre import. Available from the book sidebar, the per-row MAM page button, and bulk multi-select. |
+| 🔔 | **ntfy notifications** | Optional push notifications via [ntfy.sh](https://ntfy.sh) for scan completions, MAM hits, library sync, Hermeece sends, and cookie rotations. Toggle per event, or batch into a daily/weekly digest. |
 | 📊 | **Live unified scan widget** | Library sync, source scans, and MAM scans all surface in a single Dashboard widget with per-book progress and per-row Stop buttons — even when multiple scans run concurrently. |
+| 📋 | **In-app log viewer** | Color-coded, searchable, auto-scrolling viewer over the last 2000 log lines. Diagnose a stuck scan or a misbehaving source without `docker logs`. |
 | 🛠️ | **Database editor** | Built-in browser/editor for AthenaScout's SQLite databases. Inline cell editing with foreign-key resolution. |
-| 🔐 | **Single-admin auth** | bcrypt password hashing, signed session cookies, brute-force lockout. Designed for self-hosters with trusted network access. |
+| 🔐 | **Encrypted credential store** | MAM session token + Hardcover API key are stored Fernet-encrypted in a dedicated auth DB, keyed off a host-side `auth_secret` file (0600 perms). Single-admin auth with bcrypt passwords, signed session cookies, and brute-force lockout. |
 | 🎨 | **Three themes** | Light, dark, and dim. Inline-styled React, no CSS framework bloat. |
 | 🐳 | **Docker or native** | Official Docker image for self-hosters, plus PyInstaller binaries for Linux, Windows, and macOS desktops. |
 | 📥 | **Import / export** | Bulk-import books from a list of Goodreads/Hardcover URLs with full metadata, or export the current library as JSON. |
@@ -156,11 +161,22 @@ that any new metadata source plugin implements).
 
 If you'd like to add another metadata source (e.g. FantasticFiction,
 LibraryThing, OpenLibrary), the extension point is the `BaseSource`
-class in [`app/sources/base.py`](app/sources/base.py). The three
-existing sources under [`app/sources/`](app/sources/) — `goodreads.py`
-(HTML scraping), `hardcover.py` (GraphQL API), and `kobo.py`
-(cloudscraper-fronted Cloudflare bypass) — are reference
-implementations covering three different request patterns.
+class in [`app/sources/base.py`](app/sources/base.py). The six
+existing sources under [`app/sources/`](app/sources/) cover the
+common request patterns and should give you a reference impl close
+to whatever you're adding:
+
+- `goodreads.py` — HTML scraping
+- `hardcover.py` — GraphQL API
+- `kobo.py` — cloudscraper-fronted Cloudflare bypass
+- `amazon.py` — author-centric scraper with audiobook + junk-listing filters
+- `ibdb.py` — REST API supplementary source
+- `google_books.py` — public REST API supplementary source
+
+The orchestration layer in [`app/lookup.py`](app/lookup.py) walks
+sources via a typed `SourceSpec` registry with per-source timeouts
+and a global per-author wall-clock budget — adding a new source
+means one entry in `SOURCES` plus the `BaseSource` implementation.
 
 ### Adding a new library backend
 

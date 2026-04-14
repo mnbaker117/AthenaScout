@@ -98,10 +98,13 @@ async def list_series_suggestions(status: str = "pending"):
 
 @router.get("/series-suggestions/by-book/{book_id}")
 async def get_suggestion_for_book(book_id: int):
-    """Return the active (non-applied) suggestion for a specific book, or null.
+    """Return the pending suggestion for a specific book, or null.
 
     Used by BookSidebar.jsx to show an inline notice when the user
-    opens a book with a pending or ignored suggestion. Returns 200
+    opens a book with a pending suggestion. Only pending suggestions
+    are returned — ignored ones stay in the DB (so the consensus system
+    respects the ignore) but don't clutter the sidebar. Users can manage
+    ignored suggestions from the dedicated Suggestions page. Returns 200
     with `null` rather than 404 when no suggestion exists, so the
     frontend doesn't have to differentiate "no suggestion" from
     "endpoint error" in its loading logic.
@@ -113,7 +116,7 @@ async def get_suggestion_for_book(book_id: int):
             "sources_agreeing, current_series_name, current_series_index, "
             "status, created_at, updated_at "
             "FROM book_series_suggestions "
-            "WHERE book_id = ? AND status != 'applied'",
+            "WHERE book_id = ? AND status = 'pending'",
             (book_id,),
         )).fetchone()
         if not row:

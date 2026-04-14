@@ -28,13 +28,18 @@ Three things to know before reading:
      is created. This prevents orphaned series rows from leaking into
      the DB during library-only scans.
 """
-import time, re, logging, json
+import asyncio, time, re, logging, json
+from dataclasses import dataclass
+from typing import Any
 from difflib import SequenceMatcher
 from app.config import load_settings
 from app.database import get_db
 from app.sources.hardcover import HardcoverSource
 from app.sources.goodreads import GoodreadsSource
 from app.sources.kobo import KoboSource
+from app.sources.amazon import AmazonSource
+from app.sources.ibdb import IbdbSource
+from app.sources.google_books import GoogleBooksSource
 from app.sources.base import AuthorResult
 from app import state
 
@@ -106,6 +111,35 @@ _RX_FOREIGN_UNICODE = re.compile(
 )
 _RX_SERIES_REF_TITLE = re.compile(r'^.+\s+#\d+\s*$')
 
+# Omnibus / compilation detection. Titles matching these patterns get
+# the is_omnibus flag and their series_index is cleared so they don't
+# push other books out of position.
+_RX_OMNIBUS = re.compile(
+    r'(?i)\b('
+    r'omnibus|complete\s+(?:series|collection|trilogy|saga)'
+    r'|books?\s+\d+\s*[-–&]\s*\d+'  # "Books 1-3", "Book 1 & 2"
+    r'|(?:the\s+)?complete\s+\w+\s+(?:series|trilogy|saga)'
+    r'|compilation|anthology|box\s*set'
+    r')\b'
+)
+
+# Audiobook / non-ebook format detection. Matches titles and metadata
+# that indicate audiobook-only editions, narrator credits, or non-ebook
+# formats. Two-part detection:
+#   1. Format markers in/around the title: "[Audible Audio]", "Audio CD",
+#      "MP3 CD", "Audiobook" as standalone words or bracketed tags.
+#   2. Contributor-role markers: "(Narrator)", "(Read by)", "(Foreword)",
+#      "(Illustrator)" — these appear in author strings that some sources
+#      pack into the title field.
+_RX_AUDIOBOOK_FORMAT = re.compile(
+    r'(?i)\b(audible\s*audio|audio\s*cd|mp3\s*cd|audiobook)\b'
+    r'|\[audible\b'
+)
+_RX_CONTRIBUTOR_ROLE = re.compile(
+    r'\(\s*(?:narrator|read\s+by|foreword|illustrator|introduction)\s*\)',
+    re.IGNORECASE,
+)
+
 
 def _merge_source_urls(existing_json: str, source_name: str, new_url: str) -> str:
     """Merge a new source URL into the JSON dict stored in source_url column."""
@@ -124,14 +158,78 @@ def _merge_source_urls(existing_json: str, source_name: str, new_url: str) -> st
 hardcover = HardcoverSource()
 goodreads = GoodreadsSource()
 kobo = KoboSource()
+amazon = AmazonSource()
+ibdb = IbdbSource()
+google_books = GoogleBooksSource()
 
 
 def reload_sources():
-    global hardcover, goodreads, kobo
+    global hardcover, goodreads, kobo, amazon, ibdb, google_books
     s = load_settings()
     hardcover = HardcoverSource(api_key=s.get("hardcover_api_key", ""))
     goodreads = GoodreadsSource(rate_limit=s.get("rate_goodreads", 2))
     kobo = KoboSource(rate_limit=s.get("rate_kobo", 3))
+    amazon = AmazonSource(rate_limit=s.get("rate_amazon", 2))
+    ibdb = IbdbSource(rate_limit=s.get("rate_ibdb", 1))
+    google_books = GoogleBooksSource(rate_limit=s.get("rate_google_books", 0.5))
+
+
+# ─── Source orchestration registry ──────────────────────────
+# Centralizes per-source metadata so `lookup_author` walks a single
+# typed list instead of a hand-rolled if-chain. Each spec carries:
+#   - role: "primary" | "secondary" | "supplementary"
+#       Informational; not yet used to short-circuit. Hermeece's
+#       per-book enricher short-circuits at score >= 0.8, but
+#       AthenaScout legitimately *wants* every source's per-book
+#       signals (Amazon for series confirmation, IBDB for ISBN, GB
+#       for descriptions) so cross-source short-circuit would lose
+#       backfills. Kept here for future use (e.g., owned-only mode
+#       could skip supplementary).
+#   - timeout_sec: hard wall-clock cap on a single-author scan of
+#       this source. Generous enough that a normal scan completes,
+#       tight enough that a stuck source can't hang the whole pipeline.
+#       A timeout returns the partial work the source has already
+#       merged (writes happen incrementally during the scan), then
+#       the loop moves to the next source.
+#   - getter: returns the live module-level instance so reload_sources()
+#       takes effect without re-registering the table.
+#
+# A global per-author wall-clock budget on top of these caps the
+# total time even if every source individually stays under its
+# timeout — see PER_AUTHOR_BUDGET_SEC.
+@dataclass
+class SourceSpec:
+    name: str
+    setting_key: str
+    role: str
+    timeout_sec: float
+    getter: Any  # callable returning the live source instance
+    default_enabled: bool = True
+
+
+def _src_goodreads():    return goodreads
+def _src_hardcover():    return hardcover
+def _src_kobo():         return kobo
+def _src_amazon():       return amazon
+def _src_ibdb():         return ibdb
+def _src_google_books(): return google_books
+
+
+SOURCES: list[SourceSpec] = [
+    SourceSpec("goodreads",    "goodreads_enabled",    "primary",       300.0, _src_goodreads,    True),
+    SourceSpec("hardcover",    "hardcover_enabled",    "primary",       180.0, _src_hardcover,    True),
+    SourceSpec("kobo",         "kobo_enabled",         "secondary",     120.0, _src_kobo,         True),
+    SourceSpec("amazon",       "amazon_enabled",       "secondary",     180.0, _src_amazon,       False),
+    SourceSpec("ibdb",         "ibdb_enabled",         "supplementary",  90.0, _src_ibdb,         False),
+    SourceSpec("google_books", "google_books_enabled", "supplementary",  60.0, _src_google_books, False),
+]
+
+# Total wall-clock budget across all sources for a single author.
+# At 15 minutes, even worst-case (Goodreads timing out at 300s + a
+# couple of slow secondaries) leaves room. If hit, remaining sources
+# are skipped and a warning is logged — the partial result is still
+# committed because each source's writes are independent.
+PER_AUTHOR_BUDGET_SEC = 15 * 60
 
 
 def _smart_strip_subtitle(t: str) -> str:
@@ -283,6 +381,28 @@ def _fuzzy_match(a: str, b: str) -> bool:
         if na in pb and _len_ratio_ok(len(na), len(pb)): return True
     if _strip_prefix_ok(pa) and _strip_prefix_ok(pb) and pa == pb: return True
 
+    # Strip-suffix path: handles "BookTitle: SeriesName" against bare
+    # "BookTitle". The strip-prefix path above handles the inverse
+    # layout; this catches the case where the book title IS the prefix
+    # and the subtitle is a series name or edition tag. Example:
+    # "Otherlife Dreams: The Selfless Hero Trilogy" → prefix "otherlife
+    # dreams" matches bare "Otherlife Dreams".
+    #
+    # Two-word minimum on the prefix to prevent "A: Novel" style
+    # single-word matches from false-linking.
+    def _colon_prefix(t: str) -> str:
+        if ':' not in t:
+            return ''
+        p = t.split(':', 1)[0]
+        return _normalize(p)
+
+    ca = _colon_prefix(a)
+    cb = _colon_prefix(b)
+    if ca and len(ca.split()) >= 2:
+        if ca == nb: return True
+    if cb and len(cb.split()) >= 2:
+        if cb == na: return True
+
     return False
 
 
@@ -322,7 +442,8 @@ _SET_PATTERNS = re.compile(
     r'\d+\s*books?\s+in\s+\d|complete\s+series|book\s+set|'
     r'series\s+set|hardcover\s+set|paperback\s+set|'
     r'volumes?\s+\d+\s*[-–]\s*\d+|'
-    r'\d+\s+books?\s+collection|roleplaying\s+game)\b'
+    r'\d+\s+books?\s+collection|roleplaying\s+game|'
+    r'\d+\s+set)\b'  # "(4 Set)", "(6 Set)" etc.
 )
 # Bound-edition / anthology detector. A title like "The Dragon's Path /
 # Leviathan Wakes" is two distinct books pressed into one publishing
@@ -347,6 +468,39 @@ def _is_book_set(title: str) -> bool:
         return True
     if _RX_ANTHOLOGY.search(title):
         return True
+    # Semicolon-joined titles: "Book A; Book B; Book C" — almost always
+    # a multi-book bundle. Require 2+ semicolons to avoid false positives
+    # on titles that use a single semicolon as punctuation.
+    if title.count(';') >= 2:
+        return True
+    return False
+
+
+def _is_omnibus(title: str) -> bool:
+    """Detect omnibus editions and compilations.
+
+    Catches titles like:
+      - "The Selfless Hero Trilogy: Omnibus"
+      - "Mistborn: The Complete Trilogy"
+      - "Super Sales on Super Heroes Books 1-3"
+      - "The Expanse Box Set"
+    """
+    return bool(_RX_OMNIBUS.search(title))
+
+
+def _is_audiobook(title: str) -> bool:
+    """Detect audiobook-only editions and non-ebook formats.
+
+    Catches titles like:
+      - "Some Book [Audible Audio]"
+      - "Some Book (Audio CD)"
+      - "Some Book (Ray Porter (Narrator))"
+      - "Some Book: The Audiobook"
+    """
+    if _RX_AUDIOBOOK_FORMAT.search(title):
+        return True
+    if _RX_CONTRIBUTOR_ROLE.search(title):
+        return True
     return False
 
 
@@ -365,7 +519,7 @@ async def _validate_author(author_name: str, our_titles: list[str], result: Auth
     return False
 
 
-async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None, on_new_book=None):
+async def _merge_result(author_id: int, result: AuthorResult, source_name: str, languages: list[str], full_scan: bool = False, owned_only: bool = False, series_collector: dict | None = None, on_new_book=None, exclude_audiobooks: bool = True, linked_author_ids: list[int] = None):
     """Merge an AuthorResult, filtering by language. In full_scan mode, updates metadata on existing books.
 
     When owned_only=True (the "Library-only source scan" setting), the
@@ -402,11 +556,18 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         # what's currently stored without a second round-trip per book.
         # The smart-description and oldest-pub_date rules need to read the
         # current value to decide whether to overwrite.
+        # Load books for this author + any pen-name-linked authors.
+        # Linked author rows are included so fuzzy match can find them
+        # for dedup, but only the current author's rows get UPDATEd.
+        # Linked matches suppress the INSERT (the book already exists
+        # under the pen name).
+        all_author_ids = [author_id] + (linked_author_ids or [])
+        id_ph = ",".join("?" * len(all_author_ids))
         rows = await (await db.execute(
-            "SELECT id, title, source_url, series_id, series_index, source, "
-            "pub_date, expected_date, description "
-            "FROM books WHERE author_id = ?",
-            (author_id,)
+            f"SELECT id, title, source_url, series_id, series_index, source, "
+            f"pub_date, expected_date, description, isbn, author_id "
+            f"FROM books WHERE author_id IN ({id_ph})",
+            all_author_ids,
         )).fetchall()
         existing = {_normalize(r["title"]) for r in rows}
         # Build an O(1) prefilter: normalized-title → row. The book-merge
@@ -418,9 +579,27 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
         # linear loop stays as the fallback for substring and sequence-
         # matching cases the dict can't catch.
         rows_by_norm = {_normalize(r["title"]): r for r in rows}
+        # ISBN prefilter: ISBN → row for O(1) merge by ISBN. Strongest
+        # dedup signal — if a source's book has the same ISBN as an
+        # existing row, it's definitely the same book regardless of title.
+        rows_by_isbn = {}
+        for r in rows:
+            isbn = (r["isbn"] or "").strip().replace("-", "")
+            if isbn and len(isbn) >= 10:
+                rows_by_isbn[isbn] = r
+
+        # Series names for this author — used by the omnibus guard to
+        # distinguish "BookTitle: SeriesName" (omnibus) from
+        # "BookTitle: Subtitle" (dedup candidate).
+        author_series_rows = await (await db.execute(
+            "SELECT name FROM series WHERE author_id = ?", (author_id,)
+        )).fetchall()
+        author_series_norms = {
+            _normalize(r["name"]): r["name"] for r in author_series_rows if r["name"]
+        }
 
         # Source priority: Goodreads can overwrite series from any other source
-        SOURCE_PRIORITY = {"goodreads": 1, "hardcover": 2, "kobo": 3, "manual": 5, "import": 5, "calibre": 0}
+        SOURCE_PRIORITY = {"mam": 1, "goodreads": 2, "amazon": 3, "hardcover": 4, "kobo": 5, "ibdb": 6, "google_books": 6, "manual": 7, "import": 7, "calibre": 0}
         
         def _update_existing(matched_row, bk, series_id=None):
             """Build UPDATE for an existing book — URL merge always, series with priority, metadata in full_scan.
@@ -623,14 +802,55 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 if _is_book_set(bk.title): continue
                 if _is_series_ref_title(bk.title): continue
                 if "English" in languages and _looks_foreign(bk.title): continue
+                if exclude_audiobooks and _is_audiobook(bk.title): continue
                 norm = _normalize(bk.title)
                 matched_row = rows_by_norm.get(norm)
+                # ISBN merge: strongest dedup signal — same ISBN = same book
+                if matched_row is None and bk.isbn:
+                    clean_isbn = bk.isbn.strip().replace("-", "")
+                    if clean_isbn in rows_by_isbn:
+                        matched_row = rows_by_isbn[clean_isbn]
+                        logger.debug(f"    ISBN MERGE: '{bk.title}' → '{matched_row['title']}' (isbn={clean_isbn})")
                 if matched_row is None:
                     for r in rows:
                         if _fuzzy_match(bk.title, r["title"]):
                             matched_row = r
                             break
+                # ── Omnibus guard: "BookTitle: SeriesName" detection ──
+                # If the fuzzy match found a candidate via colon-prefix
+                # (the title before ":" matches an existing book) AND the
+                # suffix after ":" matches a known series name for this
+                # author, this is an omnibus — not a dedup merge. Reject
+                # the match so it falls through to the INSERT path with
+                # is_omnibus=1. Example: "Otherlife Dreams: The Selfless
+                # Hero Trilogy" → prefix "Otherlife Dreams" matches owned
+                # book, suffix "The Selfless Hero Trilogy" matches series
+                # → omnibus, don't merge into the owned book.
+                if matched_row and ':' in bk.title:
+                    prefix_norm = _normalize(bk.title.split(':', 1)[0])
+                    suffix_norm = _normalize(bk.title.split(':', 1)[1])
+                    matched_norm = _normalize(matched_row["title"])
+                    if (prefix_norm == matched_norm and
+                            suffix_norm in author_series_norms):
+                        logger.debug(
+                            f"    OMNIBUS GUARD: '{bk.title}' — prefix matches "
+                            f"'{matched_row['title']}' but suffix matches series "
+                            f"'{author_series_norms[suffix_norm]}' → treating as "
+                            f"omnibus, not merge"
+                        )
+                        matched_row = None  # reject the merge
                 if matched_row:
+                    # ── Pen-name dedup: matched a linked author's book ──
+                    # Don't UPDATE the linked author's row (that's their
+                    # book), just suppress the INSERT so we don't create
+                    # a duplicate under this author.
+                    if matched_row["author_id"] != author_id:
+                        logger.debug(
+                            f"    PEN-NAME DEDUP: '{bk.title}' matches "
+                            f"'{matched_row['title']}' under linked author "
+                            f"(id={matched_row['author_id']}) — skipping"
+                        )
+                        continue
                     # Lazy series upsert: only create the series row
                     # now that we know a real book is going to link to it.
                     sid_use = await _ensure_series()
@@ -660,26 +880,50 @@ async def _merge_result(author_id: int, result: AuthorResult, source_name: str, 
                 # Insert path: also needs the series row to exist.
                 sid_use = await _ensure_series()
                 initial_urls = json.dumps({source_name: bk.source_url}) if bk.source_url else "{}"
-                await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,series_id,series_index,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,{source_name}_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,?)",
-                    (bk.title, author_id, sid_use, bk.series_index, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, bk.external_id))
+                # Omnibus detection: regex patterns OR context-aware
+                # "BookTitle: SeriesName" pattern (the omnibus guard above
+                # rejected the merge for this reason).
+                omnibus = _is_omnibus(bk.title)
+                if not omnibus and ':' in bk.title:
+                    suffix_norm = _normalize(bk.title.split(':', 1)[1])
+                    prefix_norm = _normalize(bk.title.split(':', 1)[0])
+                    if suffix_norm in author_series_norms and prefix_norm in rows_by_norm:
+                        omnibus = True
+                s_idx = None if omnibus else bk.series_index
+                await db.execute(f"INSERT OR IGNORE INTO books (title,author_id,series_id,series_index,isbn,cover_url,pub_date,expected_date,is_unreleased,description,page_count,source,source_url,owned,is_new,is_omnibus,{source_name}_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?)",
+                    (bk.title, author_id, sid_use, s_idx, bk.isbn, bk.cover_url, bk.pub_date, bk.expected_date, 1 if bk.is_unreleased else 0, bk.description, bk.page_count, source_name, initial_urls, 1 if omnibus else 0, bk.external_id))
                 existing.add(norm); new_books += 1
                 if on_new_book:
                     on_new_book()
-                logger.debug(f"    NEW: '{bk.title}' → series '{sr.name}' from {source_name}")
+                logger.debug(f"    NEW: '{bk.title}' → series '{sr.name}'{' [OMNIBUS]' if omnibus else ''} from {source_name}")
 
         for bk in result.books:
             if not _lang_ok(bk.language, languages): continue
             if _is_book_set(bk.title): continue
             if _is_series_ref_title(bk.title): continue
             if "English" in languages and _looks_foreign(bk.title): continue
+            if exclude_audiobooks and _is_audiobook(bk.title): continue
             norm = _normalize(bk.title)
             matched_row = rows_by_norm.get(norm)
+            if matched_row is None and bk.isbn:
+                clean_isbn = bk.isbn.strip().replace("-", "")
+                if clean_isbn in rows_by_isbn:
+                    matched_row = rows_by_isbn[clean_isbn]
+                    logger.debug(f"    ISBN MERGE: '{bk.title}' → '{matched_row['title']}' (isbn={clean_isbn})")
             if matched_row is None:
                 for r in rows:
                     if _fuzzy_match(bk.title, r["title"]):
                         matched_row = r
                         break
             if matched_row:
+                # Pen-name dedup for standalone books
+                if matched_row["author_id"] != author_id:
+                    logger.debug(
+                        f"    PEN-NAME DEDUP: '{bk.title}' matches "
+                        f"'{matched_row['title']}' under linked author "
+                        f"(id={matched_row['author_id']}) — skipping"
+                    )
+                    continue
                 sql, vals = _update_existing(matched_row, bk)
                 await db.execute(sql, vals)
                 # Record `(None, None)` — this source thinks the book
@@ -746,13 +990,128 @@ _RX_CONSENSUS_TAIL = re.compile(
     re.IGNORECASE,
 )
 _RX_CONSENSUS_PUNCT = re.compile(r'[^\w\s]')
+# Parenthetical format/edition tags that sources append to series names
+# but don't affect identity. Example: "86--EIGHTY-SIX (Light Novel)"
+# and "86--EIGHTY-SIX" are the same series. Stripping these before
+# comparison prevents trivial rename suggestions.
+_RX_CONSENSUS_PARENS = re.compile(
+    r'\s*\(\s*(?:light\s+novel|ln|web\s+novel|wn|manga|comic|graphic\s+novel|'
+    r'audio|audiobook|omnibus|hardcover|paperback|ebook|kindle)\s*\)',
+    re.IGNORECASE,
+)
+
+
+# Regex for extracting series index from book titles:
+# "Super Sales on Super Heroes 4", "#4", "Book 4", trailing "(#4)" etc.
+_RX_TITLE_SERIES_IDX = re.compile(
+    r'(?:'
+    r'#(\d+(?:\.\d+)?)'        # #4, #3.5
+    r'|Book\s+(\d+(?:\.\d+)?)' # Book 4
+    r'|\b(\d+(?:\.\d+)?)\s*$'  # trailing number
+    r')',
+    re.IGNORECASE,
+)
+
+
+async def _title_to_series_pass(author_id: int):
+    """Post-scan pass: link standalone books to series by title substring.
+
+    For each book that has no series association, check if its title
+    contains the name of an existing series by the same author. If so,
+    extract the series index from the remaining title text and link it.
+
+    Example: "Super Sales on Super Heroes 4 (Super Sales on Super Heroes #4)"
+    → match series "Super Sales on Super Heroes", extract index 4.
+    """
+    db = await get_db()
+    try:
+        # Get all series for this author
+        series_rows = await (await db.execute(
+            "SELECT id, name FROM series WHERE author_id = ?",
+            (author_id,),
+        )).fetchall()
+        if not series_rows:
+            return 0
+
+        # Get all standalone books (no series) for this author
+        standalone = await (await db.execute(
+            "SELECT id, title FROM books WHERE author_id = ? AND series_id IS NULL",
+            (author_id,),
+        )).fetchall()
+        if not standalone:
+            return 0
+
+        # Sort series by name length descending — try longer names first
+        # to avoid "The Fold" matching before "The Fold Series"
+        series_list = sorted(series_rows, key=lambda r: len(r["name"]), reverse=True)
+
+        linked = 0
+        for book in standalone:
+            title = book["title"]
+            title_lower = title.lower()
+
+            for series in series_list:
+                sname = series["name"]
+                sname_lower = sname.lower()
+
+                if sname_lower not in title_lower:
+                    continue
+
+                # Series name found in title — extract index from remainder
+                # Remove the series name portion to get potential index text
+                remainder = title_lower.replace(sname_lower, "").strip()
+                # Also check the original title for parenthetical patterns
+                idx = None
+                m = _RX_TITLE_SERIES_IDX.search(remainder) or _RX_TITLE_SERIES_IDX.search(title)
+                if m:
+                    num_str = m.group(1) or m.group(2) or m.group(3)
+                    if num_str:
+                        try:
+                            idx = float(num_str)
+                        except ValueError:
+                            pass
+
+                # Link the book to the series
+                if idx is not None:
+                    await db.execute(
+                        "UPDATE books SET series_id = ?, series_index = ? WHERE id = ?",
+                        (series["id"], idx, book["id"]),
+                    )
+                else:
+                    await db.execute(
+                        "UPDATE books SET series_id = ? WHERE id = ?",
+                        (series["id"], book["id"]),
+                    )
+                linked += 1
+                logger.debug(
+                    f"    TITLE→SERIES: '{title}' → '{sname}'"
+                    f"{f' #{idx}' if idx else ''}"
+                )
+                break  # matched — don't try other series
+
+        if linked:
+            await db.commit()
+            logger.info(
+                f"  Title→series pass: linked {linked} standalone "
+                f"book(s) to existing series for author_id={author_id}"
+            )
+        return linked
+    finally:
+        await db.close()
 
 
 def _norm_consensus_series(name):
-    """Normalize a series name for consensus grouping. Returns "" for None."""
+    """Normalize a series name for consensus grouping. Returns "" for None.
+
+    Strips leading articles, trailing tail words (saga/series/trilogy…),
+    and common parenthetical format tags like "(Light Novel)", "(LN)",
+    "(Manga)" — these appear on some sources but not others and don't
+    affect series identity.
+    """
     if not name:
         return ""
     n = name.strip()
+    n = _RX_CONSENSUS_PARENS.sub('', n)
     n = _RX_CONSENSUS_LEAD.sub('', n)
     for _ in range(3):  # iterative tail strip handles "Mistborn Saga Series"
         new_n = _RX_CONSENSUS_TAIL.sub('', n)
@@ -824,6 +1183,36 @@ async def _compute_series_suggestions(author_id, series_collector):
             for r in rows
         }
 
+        # ── Calibre series trust: count books per series for this author ──
+        # If a Calibre series has 3+ books, we trust Calibre over any
+        # source claiming those books are standalone. This prevents
+        # sources that don't track series well from eroding the user's
+        # curated series structure.
+        series_counts = {}  # series_name → book count
+        series_confirmed = set()  # series names with source confirmation
+        count_rows = await (await db.execute(
+            "SELECT s.name, COUNT(b.id) as cnt FROM series s "
+            "JOIN books b ON b.series_id = s.id "
+            "WHERE s.author_id = ? GROUP BY s.id",
+            (author_id,),
+        )).fetchall()
+        for cr in count_rows:
+            series_counts[cr["name"]] = cr["cnt"]
+
+        # Also check which series have source-confirmed members: if ANY
+        # book in a series has a source agreeing on that series name,
+        # no other book in the same series should get a standalone suggestion.
+        for book_id, per_source in series_collector.items():
+            if book_id not in current_state:
+                continue
+            cur_name = current_state[book_id][0]
+            if not cur_name:
+                continue
+            for src_name, (raw_name, raw_idx) in per_source.items():
+                if raw_name and _norm_consensus_series(raw_name) == _norm_consensus_series(cur_name):
+                    series_confirmed.add(cur_name)
+                    break
+
         # Pull existing suggestion rows for these books in one query
         # so we don't issue N round-trips.
         existing_rows = await (await db.execute(
@@ -835,7 +1224,7 @@ async def _compute_series_suggestions(author_id, series_collector):
 
         # Source priority for tiebreaking the consensus vote. Mirrors
         # SOURCE_PRIORITY in _merge_result; lower number = higher trust.
-        SOURCE_RANK = {"goodreads": 1, "hardcover": 2, "kobo": 3}
+        SOURCE_RANK = {"mam": 1, "goodreads": 2, "amazon": 3, "hardcover": 4, "kobo": 5, "ibdb": 6, "google_books": 6}
 
         suggestions_created = 0
         suggestions_updated = 0
@@ -945,6 +1334,26 @@ async def _compute_series_suggestions(author_id, series_collector):
                 continue
 
             consensus_norm_name, consensus_norm_idx = largest_key
+
+            # ── Calibre series trust override ──
+            # If the consensus says "standalone" (empty series name) but
+            # the book is currently in a Calibre series, check whether
+            # we should trust Calibre over the sources:
+            #   - 3+ books in the series → always trust Calibre
+            #   - Any source confirmed the series on a sibling book → trust Calibre
+            # This prevents sources that don't track series well from
+            # generating noise suggestions like "86--EIGHTY-SIX #7 → standalone".
+            if not consensus_norm_name and cur_name:
+                count = series_counts.get(cur_name, 0)
+                if count >= 3 or cur_name in series_confirmed:
+                    logger.debug(
+                        f"    SERIES TRUST OVERRIDE: '{book_title}' "
+                        f"(book_id={book_id}) — consensus says standalone "
+                        f"but Calibre series '{cur_name}' has {count} books"
+                        f"{', source-confirmed' if cur_name in series_confirmed else ''}"
+                        f" — suppressing"
+                    )
+                    continue
 
             # Does the consensus actually differ from the current DB value?
             if (consensus_norm_name == cur_norm_name and
@@ -1084,7 +1493,7 @@ async def _compute_series_suggestions(author_id, series_collector):
         await db.close()
 
 
-async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None):
+async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True, linked_author_ids=None):
     """Try a single source with validation and detailed logging."""
     try:
         logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
@@ -1155,7 +1564,7 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
             logger.info(f"  [{source_name}] Author validation failed — skipping (likely wrong author)")
             return 0
 
-        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=on_new_book)
+        n, u = await _merge_result(author_id, full, source_name, languages, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector, on_new_book=on_new_book, exclude_audiobooks=exclude_audiobooks, linked_author_ids=linked_author_ids)
         parts = []
         if n > 0: parts.append(f"{n} new")
         if u > 0: parts.append(f"{u} updated")
@@ -1184,14 +1593,41 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     settings = load_settings()
     languages = settings.get("languages", ["English"])
     owned_only = bool(settings.get("author_scan_owned_only", False))
+    exclude_audiobooks = bool(settings.get("exclude_audiobooks", True))
     if owned_only:
         logger.info(f"  Library-only mode: only enriching owned books for '{author_name}', no new discoveries")
 
     db = await get_db()
     try:
-        rows = await (await db.execute("SELECT title FROM books WHERE author_id = ? AND owned = 1", (author_id,))).fetchall()
+        # ── Pen-name expansion: include linked authors' books for dedup ──
+        # If this author has pen-name links, owned titles and existing
+        # titles from the linked author(s) are included so dedup works
+        # across identities (e.g., William D. Arand ↔ Randi Darren).
+        linked_ids = [author_id]
+        pen_rows = await (await db.execute(
+            "SELECT canonical_author_id, alias_author_id FROM pen_name_links "
+            "WHERE canonical_author_id = ? OR alias_author_id = ?",
+            (author_id, author_id),
+        )).fetchall()
+        for pr in pen_rows:
+            for col in ("canonical_author_id", "alias_author_id"):
+                if pr[col] != author_id and pr[col] not in linked_ids:
+                    linked_ids.append(pr[col])
+        if len(linked_ids) > 1:
+            logger.info(f"  Pen-name expansion: {author_name} linked to {len(linked_ids)-1} other author(s)")
+        # IDs of linked authors (excluding self) — passed to _merge_result
+        pen_linked = [i for i in linked_ids if i != author_id]
+
+        id_placeholders = ",".join("?" * len(linked_ids))
+        rows = await (await db.execute(
+            f"SELECT title FROM books WHERE author_id IN ({id_placeholders}) AND owned = 1",
+            linked_ids,
+        )).fetchall()
         our_titles = [r["title"] for r in rows]
-        all_rows = await (await db.execute("SELECT title FROM books WHERE author_id = ?", (author_id,))).fetchall()
+        all_rows = await (await db.execute(
+            f"SELECT title FROM books WHERE author_id IN ({id_placeholders})",
+            linked_ids,
+        )).fetchall()
         existing_titles = set()
         for r in all_rows:
             t = re.sub(r'[^\w\s]', '', r["title"].lower()).strip()
@@ -1202,10 +1638,10 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         # uses this to prefer matching series candidates over deeper
         # sub-series in its own taxonomy.
         series_rows = await (await db.execute(
-            "SELECT DISTINCT s.name FROM series s "
-            "JOIN books b ON b.series_id = s.id "
-            "WHERE b.author_id = ? AND b.owned = 1 AND s.name IS NOT NULL",
-            (author_id,)
+            f"SELECT DISTINCT s.name FROM series s "
+            f"JOIN books b ON b.series_id = s.id "
+            f"WHERE b.author_id IN ({id_placeholders}) AND b.owned = 1 AND s.name IS NOT NULL",
+            linked_ids,
         )).fetchall()
         our_series_names = [r["name"] for r in series_rows]
     finally:
@@ -1233,6 +1669,9 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     goodreads._on_book = _on_book
     hardcover._on_book = _on_book
     kobo._on_book = _on_book
+    amazon._on_book = _on_book
+    ibdb._on_book = _on_book
+    google_books._on_book = _on_book
 
     # Per-book new-candidate counter. Fired by each source from inside
     # its slow DETAIL-fetch loop — same call sites as `_on_book` but
@@ -1257,10 +1696,96 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     goodreads._on_new_candidate = _on_new_candidate
     hardcover._on_new_candidate = _on_new_candidate
     kobo._on_new_candidate = _on_new_candidate
+    amazon._on_new_candidate = _on_new_candidate
+    ibdb._on_new_candidate = _on_new_candidate
+    google_books._on_new_candidate = _on_new_candidate
 
-    # 1. Goodreads (PRIMARY)
-    if settings.get("goodreads_enabled", True):
-        n = await _try_source(goodreads, author_name, author_id, our_titles, languages, "goodreads", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
+    # ── Walk the source registry ──────────────────────────────
+    # Iterates SOURCES in declared priority order. Each source is
+    # gated behind asyncio.wait_for() so a single hung HTTP call
+    # can't stall the whole scan. A timeout is logged but otherwise
+    # treated like a successful zero-result scan — partial writes
+    # made before the timeout are kept.
+    #
+    # A global per-author wall-clock budget (PER_AUTHOR_BUDGET_SEC)
+    # guards against the worst case where every source bumps up
+    # against its own cap and the scan still takes too long. Once
+    # the budget is exceeded, remaining sources are skipped.
+    scan_started_at = time.monotonic()
+    # Read Hardcover API key once; the source needs it injected before its
+    # _try_source runs. Same encrypted-store-then-legacy fallback as before.
+    try:
+        from app.secrets import get_secret as _get_secret
+        _hc_key = await _get_secret("hardcover_api_key") or settings.get("hardcover_api_key")
+    except Exception:
+        _hc_key = settings.get("hardcover_api_key")
+
+    for spec in SOURCES:
+        # Gate by user setting. default_enabled mirrors the historical
+        # behavior of the per-source if-block (Amazon/IBDB/GB default off).
+        if not settings.get(spec.setting_key, spec.default_enabled):
+            continue
+        # Hardcover requires a configured API key — silently skip otherwise
+        # so the user doesn't see a failed scan they never asked for.
+        if spec.name == "hardcover" and not _hc_key:
+            continue
+        # Global budget gate — if we've already burned our wall-clock
+        # budget, abandon the rest of the sources for this author.
+        elapsed = time.monotonic() - scan_started_at
+        if elapsed >= PER_AUTHOR_BUDGET_SEC:
+            logger.warning(
+                f"  Per-author scan budget ({PER_AUTHOR_BUDGET_SEC}s) exceeded for "
+                f"'{author_name}' — skipping remaining sources: "
+                f"{[s.name for s in SOURCES[SOURCES.index(spec):]]}"
+            )
+            break
+
+        source = spec.getter()
+        # Per-source pre-flight (Hardcover is the only one that needs it).
+        if spec.name == "hardcover":
+            source.update_api_key(_hc_key)
+            source._owned_titles = our_titles
+            source._owned_series_names = our_series_names
+
+        # Cap the source at its per-source timeout *or* the remaining
+        # budget, whichever is smaller. Prevents a slow source near the
+        # end of the scan from individually blowing the global budget.
+        timeout = min(spec.timeout_sec, max(1.0, PER_AUTHOR_BUDGET_SEC - elapsed))
+
+        try:
+            n = await asyncio.wait_for(
+                _try_source(
+                    source, author_name, author_id, our_titles, languages, spec.name,
+                    existing_titles=existing_titles, full_scan=full_scan,
+                    owned_only=owned_only, series_collector=series_collector,
+                    exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            # The source's HTTP requests get cancelled by wait_for.
+            # Anything it merged before the timeout is durable —
+            # _try_source commits incrementally. We just don't know
+            # the exact `n` for this source; conservatively count 0
+            # and let the visible counter re-sync from `total` below.
+            logger.warning(
+                f"  Source '{spec.name}' timed out after {timeout:.0f}s "
+                f"for '{author_name}' — keeping any partial writes, moving on"
+            )
+            n = 0
+        except asyncio.CancelledError:
+            # Cancellation propagates — the user clicked Stop.
+            raise
+        except Exception as e:
+            # An unhandled source exception shouldn't kill the whole
+            # author scan; log + continue with the next source so other
+            # signals still land.
+            logger.error(
+                f"  Source '{spec.name}' raised for '{author_name}': {e}",
+                exc_info=True,
+            )
+            n = 0
+
         total += n
         # Sync the visible count to the accurate post-merge total.
         # If candidates over-counted (filters/dedupe at merge time
@@ -1270,28 +1795,14 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
         if on_progress:
             on_progress(total)
 
-    # 2. Hardcover
-    if settings.get("hardcover_api_key") and settings.get("hardcover_enabled", True):
-        hardcover.update_api_key(settings["hardcover_api_key"])
-        hardcover._owned_titles = our_titles
-        hardcover._owned_series_names = our_series_names
-        n = await _try_source(hardcover, author_name, author_id, our_titles, languages, "hardcover", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
-        total += n
-        visible[0] = total
-        if on_progress:
-            on_progress(total)
-
-    # 3. Kobo
-    if settings.get("kobo_enabled", True):
-        n = await _try_source(kobo, author_name, author_id, our_titles, languages, "kobo", existing_titles=existing_titles, full_scan=full_scan, owned_only=owned_only, series_collector=series_collector)
-        total += n
-        visible[0] = total
-        if on_progress:
-            on_progress(total)
-
     # Clear current_book so the next author's scan widget doesn't show
     # the last book of THIS author until its first DETAIL fetch lands.
     state._lookup_progress["current_book"] = ""
+
+    # Post-scan pass: check standalone books whose titles contain a
+    # known series name and link them. Runs after all sources so
+    # series created by any source are available for matching.
+    await _title_to_series_pass(author_id)
 
     # Compute consensus and write pending suggestions for any per-book
     # disagreement that meets the 2+ sources threshold. Runs after all

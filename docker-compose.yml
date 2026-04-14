@@ -2,7 +2,7 @@ services:
   athena-scout:
     # ── Image Source ───────────────────────────────────────────
     # Option 1 (recommended): Use pre-built image. Pin to a specific
-    # version tag (e.g., :v2.0.0) for production rather than :latest
+    # version tag (e.g., :v1.1.0) for production rather than :latest
     # so unattended updates can't surprise you.
     image: ghcr.io/mnbaker117/athenascout:latest
     # Option 2: Build from source — uncomment below and comment out 'image:' above
@@ -56,16 +56,28 @@ services:
       # Hardcover API key (get from hardcover.app → Account → API).
       # Must include "Bearer " prefix, e.g.: Bearer eyJ...
       # Can also be configured via the Settings UI after first run.
+      # On first start, this value is migrated into the encrypted
+      # credential store (see SECURITY.md) and the env var becomes
+      # informational only.
       - HARDCOVER_API_KEY=
 
       # ── MyAnonamouse (optional) ──────────────────────────────
-      # MAM session cookie (mam_id) for cross-referencing book
-      # availability against MAM. Configure via Settings UI for the
-      # full setup flow including IP locking.
+      # MAM session cookie (mam_id or mbsc) for cross-referencing
+      # book availability against MAM. Configure via Settings UI for
+      # the full setup flow. Once configured, AthenaScout intercepts
+      # MAM's Set-Cookie rotations automatically — paste your token
+      # once, never re-paste. See docs/mam-integration.md.
       # - MAM_SESSION_ID=
       # How often the scheduled MAM scan checks books missing MAM data
       # (minutes; 0 = scheduled scans disabled, manual scans still work).
       - MAM_SCAN_INTERVAL_MINUTES=360
+
+      # ── Hermeece + ntfy (optional, configured via Settings UI) ─
+      # The Hermeece URL ("Send to Hermeece" buttons) and ntfy
+      # URL/topic + per-event toggles + digest schedule are all
+      # managed in Settings, not env vars — they live in
+      # settings.json so the UI can edit them. See docs/first-run.md
+      # sections 13 and 14.
 
       # ── Sync / Scan Intervals ────────────────────────────────
       # How often to re-sync the library source database (minutes, 0 = disabled).

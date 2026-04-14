@@ -8,7 +8,7 @@ COPY frontend/package.json frontend/package-lock.json* ./
 # This is the standard pattern for reproducible Docker builds and plays
 # nicely with the layer cache above (only re-runs when the lockfile or
 # package.json actually changes).
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+ARG GIT_SHA=unknown
+RUN echo "${GIT_SHA}" > /app/VERSION
 
 COPY app/ ./app/
 COPY --from=frontend-build /frontend/dist ./frontend/dist/
@@ -48,7 +51,7 @@ LABEL org.opencontainers.image.title="AthenaScout"
 LABEL org.opencontainers.image.description="A self-hosted book library completionist tracker"
 LABEL org.opencontainers.image.source="https://github.com/mnbaker117/AthenaScout"
 LABEL org.opencontainers.image.url="https://github.com/mnbaker117/AthenaScout"
-LABEL org.opencontainers.image.version="1.0.0"
+LABEL org.opencontainers.image.version="1.1.0"
 
 # ─── Library Discovery ───────────────────────────────────────
 # CALIBRE_PATH is the primary multi-library discovery root. AthenaScout
