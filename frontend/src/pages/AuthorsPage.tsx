@@ -12,11 +12,11 @@ import { usePersist } from "../hooks/usePersist";
 import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
 import { SearchBar } from "../components/SearchBar";
-import { VT } from "../components/VT";
+import { VT, type ViewMode } from "../components/VT";
 import { PB } from "../components/PB";
 import { toast } from "../lib/toast";
 
-export default function AuthorsPage({onNav}:any){const t=useTheme();const[aus,setAus]=useState<any[]>([]);const[ld,setLd]=useState(true);const[q,setQ]=usePersist<string>("ap_q","");const[sort,setSort]=usePersist<string>("ap_sort","name");const[vm,setVm]=usePersist<string>("ap_vm","list");
+export default function AuthorsPage({onNav}:any){const t=useTheme();const[aus,setAus]=useState<any[]>([]);const[ld,setLd]=useState(true);const[q,setQ]=usePersist<string>("ap_q","");const[sort,setSort]=usePersist<string>("ap_sort","name");const[vm,setVm]=usePersist<ViewMode>("ap_vm","list");
 const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState<Set<number>>(new Set());const[clearing,setClearing]=useState(false);const[scanning,setScanning]=useState(false);const[mamOn,setMamOn]=useState(false);
 const[linking,setLinking]=useState(false);
 useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);

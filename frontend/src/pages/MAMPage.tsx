@@ -4,7 +4,7 @@ import { api } from "../api";
 import { usePersist } from "../hooks/usePersist";
 import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
-import { VT } from "../components/VT";
+import { VT, type ViewMode } from "../components/VT";
 import { SearchBar } from "../components/SearchBar";
 import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
@@ -24,12 +24,12 @@ const[tab,setTab]=usePersist<string>("mam_tab","upload");
 const[books,setBooks]=useState<any[]>([]);const[total,setTotal]=useState(0);
 const[pg,setPg]=useState(1);const[q,setQ]=useState("");
 const[sort,setSort]=usePersist("mam_sort","title");
-const[vm,setVm]=usePersist("mam_vm","list");const[ld,setLd]=useState(true);
+const[vm,setVm]=usePersist<ViewMode>("mam_vm","list");const[ld,setLd]=useState(true);
 const perPage=50;
 // Counts
 const[counts,setCounts]=useState({upload:0,download:0,missing:0,unscanned:0});
 // Scan
-const[scanLimit,setScanLimit]=useState(100);
+const[scanLimit,setScanLimit]=useState<number|"">(100);
 const[scanStarting,setScanStarting]=useState(false);
 const[mamScan,setMamScan]=useState<any>(null);
 // Sidebar
@@ -46,7 +46,7 @@ api.get("/mam/scan/status").then(r=>{if(r.running)setMamScan(r)}).catch(()=>{});
 },[]);
 
 // Load section data
-const load=useCallback((page=1,signal)=>{setLd(true);const p=new URLSearchParams({section:tab,search:q,sort,page:String(page),per_page:String(perPage)});return api.get(`/mam/books?${p}`,signal).then(d=>{setBooks(d.books||[]);setTotal(d.total||0);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[tab,q,sort]);
+const load=useCallback((page:number=1,signal?:AbortSignal)=>{setLd(true);const p=new URLSearchParams({section:tab,search:q,sort,page:String(page),per_page:String(perPage)});return api.get(`/mam/books?${p}`,signal).then(d=>{setBooks(d.books||[]);setTotal(d.total||0);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[tab,q,sort]);
 useEffect(()=>{const c=new AbortController();load(1,c.signal);return()=>c.abort()},[load]);
 
 // Scan polling

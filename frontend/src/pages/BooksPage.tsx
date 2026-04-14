@@ -13,7 +13,7 @@ import { Ic } from "../icons";
 import { usePersist } from "../hooks/usePersist";
 import { Btn } from "../components/Btn";
 import { Load } from "../components/Load";
-import { VT } from "../components/VT";
+import { VT, type ViewMode } from "../components/VT";
 import { SearchBar } from "../components/SearchBar";
 import { Section } from "../components/Section";
 import { BGrid, BList } from "../components/BookViews";
@@ -22,7 +22,7 @@ import { toast } from "../lib/toast";
 import { ExportModal } from "../components/ExportModal";
 
 // ─── Books Page (Library/Missing/Upcoming) ──────────────────
-export default function BooksPage({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}:any){const t=useTheme();const[bks,setBks]=useState<any[]>([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist<string>(`bp_${title}_q`,"");const[vm,setVm]=usePersist<string>(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist<string>(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist<string>(`bp_${title}_sort`,"title");const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
+export default function BooksPage({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}:any){const t=useTheme();const[bks,setBks]=useState<any[]>([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist<string>(`bp_${title}_q`,"");const[vm,setVm]=usePersist<ViewMode>(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist<string>(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist<string>(`bp_${title}_sort`,"title");const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
 const[mamFilter,setMamFilter]=usePersist<string>(`bp_${title}_mam`,"");const[mamOn,setMamOn]=useState(false);
 const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState<Set<number>>(new Set());const[busy,setBusy]=useState(false);
 const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
@@ -32,7 +32,7 @@ const toggleSb=b=>{if(sb&&sb.id===b.id)closeSb();else{setSbClosing(false);setSb(
 const isGrouped=grp!=="all";
 const perPage=isGrouped?5000:60;
 const sortParam=grp==="author"?"author":grp==="series"?"series":sort;
-const load=useCallback((page=1,signal)=>{setLd(true);const p=new URLSearchParams({search:q,sort:sortParam,per_page:perPage,page,...extraParams});if(mamFilter)p.set("mam_status",mamFilter);return api.get(`${apiPath}?${p}`,signal).then(d=>{setBks(d.books);setTotal(d.total);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[q,sortParam,apiPath,grp,mamFilter]);
+const load=useCallback((page:number=1,signal?:AbortSignal)=>{setLd(true);const p=new URLSearchParams({search:q,sort:sortParam,per_page:String(perPage),page:String(page),...extraParams});if(mamFilter)p.set("mam_status",mamFilter);return api.get(`${apiPath}?${p}`,signal).then(d=>{setBks(d.books);setTotal(d.total);setPg(page);setLd(false)}).catch(e=>{if(!api.isAbort(e))setLd(false)})},[q,sortParam,apiPath,grp,mamFilter]);
 useEffect(()=>{const c=new AbortController();load(1,c.signal);return()=>c.abort()},[load]);
 useEffect(()=>{api.get("/mam/status").then(r=>setMamOn(!!r.enabled)).catch(()=>{})},[]);
 const totalPages=Math.max(1,Math.ceil(total/perPage));
