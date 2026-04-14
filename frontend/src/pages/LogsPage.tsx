@@ -6,11 +6,11 @@ import { Spin } from "../components/Spin";
 
 export default function LogsPage(){
   const t=useTheme();
-  const[lines,setLines]=useState([]);
+  const[lines,setLines]=useState<string[]>([]);
   const[loading,setLoading]=useState(true);
   const[auto,setAuto]=useState(true);
   const[filter,setFilter]=useState("");
-  const bottomRef=useRef(null);
+  const bottomRef=useRef<HTMLDivElement>(null);
 
   const load=async()=>{
     try{

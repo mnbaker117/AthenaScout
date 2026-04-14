@@ -13,7 +13,12 @@ import { api } from "../api";
 import { Btn } from "../components/Btn";
 import { Spin } from "../components/Spin";
 
-export default function LoginPage({onLoginSuccess,isFirstRun}){const t=useTheme();
+interface LoginPageProps {
+  onLoginSuccess?: () => void;
+  isFirstRun?: boolean;
+}
+
+export default function LoginPage({onLoginSuccess,isFirstRun}: LoginPageProps){const t=useTheme();
 const[username,setUsername]=useState("");const[password,setPassword]=useState("");const[confirm,setConfirm]=useState("");const[err,setErr]=useState("");const[busy,setBusy]=useState(false);
 const isSetup=!!isFirstRun;
 const submit=async()=>{setErr("");

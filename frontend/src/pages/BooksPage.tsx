@@ -22,9 +22,9 @@ import { toast } from "../lib/toast";
 import { ExportModal } from "../components/ExportModal";
 
 // ─── Books Page (Library/Missing/Upcoming) ──────────────────
-export default function BooksPage({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}){const t=useTheme();const[bks,setBks]=useState([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist(`bp_${title}_q`,"");const[vm,setVm]=usePersist(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist(`bp_${title}_sort`,"title");const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
-const[mamFilter,setMamFilter]=usePersist(`bp_${title}_mam`,"");const[mamOn,setMamOn]=useState(false);
-const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState(new Set());const[busy,setBusy]=useState(false);
+export default function BooksPage({title,subtitle,apiPath="/books",extraParams={},showAuthor=true,exportFilter}:any){const t=useTheme();const[bks,setBks]=useState<any[]>([]);const[total,setTotal]=useState(0);const[pg,setPg]=useState(1);const[ld,setLd]=useState(true);const[q,setQ]=usePersist<string>(`bp_${title}_q`,"");const[vm,setVm]=usePersist<string>(`bp_${title}_vm`,"grid");const[grp,setGrp]=usePersist<string>(`bp_${title}_grp`,"all");const[sort,setSort]=usePersist<string>(`bp_${title}_sort`,"title");const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);const[allCollapsed,setAllCollapsed]=useState(false);const[showExp,setShowExp]=useState(false);
+const[mamFilter,setMamFilter]=usePersist<string>(`bp_${title}_mam`,"");const[mamOn,setMamOn]=useState(false);
+const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState<Set<number>>(new Set());const[busy,setBusy]=useState(false);
 const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});
 const selectAllVisible=()=>setSel(new Set(bks.map(b=>b.id)));
 const closeSb=()=>{if(!sb)return;setSbClosing(true);setTimeout(()=>{setSb(null);setSbClosing(false)},200)};

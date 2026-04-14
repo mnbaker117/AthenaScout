@@ -12,28 +12,28 @@ import { Load } from "../components/Load";
 // deleting rows, and inspecting column schema. Always operates against
 // whichever library is currently active.
 export default function DatabasePage(){const t=useTheme();
-const[tables,setTables]=useState([]);
-const[tab,setTab]=usePersist("db_tab","books");
-const[schema,setSchema]=useState(null);
-const[rows,setRows]=useState([]);
+const[tables,setTables]=useState<any[]>([]);
+const[tab,setTab]=usePersist<string>("db_tab","books");
+const[schema,setSchema]=useState<any>(null);
+const[rows,setRows]=useState<any[]>([]);
 const[total,setTotal]=useState(0);
 const[pg,setPg]=useState(1);
 const[ld,setLd]=useState(true);
 const[q,setQ]=useState("");
-const[sort,setSort]=usePersist("db_sort","id");
-const[sortDir,setSortDir]=usePersist("db_dir","asc");
+const[sort,setSort]=usePersist<string>("db_sort","id");
+const[sortDir,setSortDir]=usePersist<string>("db_dir","asc");
 const perPage=50;
 const[showNames,setShowNames]=useState(false);
-const[fkLookup,setFkLookup]=useState({authors:{},series:{}});
+const[fkLookup,setFkLookup]=useState<any>({authors:{},series:{}});
 const[fkLoading,setFkLoading]=useState(false);
 // Editing state
-const[edits,setEdits]=useState({});
-const[editCell,setEditCell]=useState(null);// {rowId, col}
+const[edits,setEdits]=useState<any>({});
+const[editCell,setEditCell]=useState<any>(null);// {rowId, col}
 const[editVal,setEditVal]=useState("");
-const[saveMsg,setSaveMsg]=useState(null);
+const[saveMsg,setSaveMsg]=useState<any>(null);
 const[showAdd,setShowAdd]=useState(false);
-const[newRow,setNewRow]=useState({});
-const[deleting,setDeleting]=useState(null);
+const[newRow,setNewRow]=useState<any>({});
+const[deleting,setDeleting]=useState<any>(null);
 const editCount=Object.keys(edits).length;
 
 // Load table list on mount

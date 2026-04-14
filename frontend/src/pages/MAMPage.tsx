@@ -18,10 +18,10 @@ import { BookSidebar } from "../components/BookSidebar";
 // /api/mam/books — the heavy lifting happens server-side. The unified
 // scan widget on the Dashboard is what shows live scan progress; this
 // page just displays the latest results.
-export default function MAMPage({onNav}){const t=useTheme();
+export default function MAMPage({onNav}:any){const t=useTheme();
 // Tab + section data
-const[tab,setTab]=usePersist("mam_tab","upload");
-const[books,setBooks]=useState([]);const[total,setTotal]=useState(0);
+const[tab,setTab]=usePersist<string>("mam_tab","upload");
+const[books,setBooks]=useState<any[]>([]);const[total,setTotal]=useState(0);
 const[pg,setPg]=useState(1);const[q,setQ]=useState("");
 const[sort,setSort]=usePersist("mam_sort","title");
 const[vm,setVm]=usePersist("mam_vm","list");const[ld,setLd]=useState(true);
@@ -31,9 +31,9 @@ const[counts,setCounts]=useState({upload:0,download:0,missing:0,unscanned:0});
 // Scan
 const[scanLimit,setScanLimit]=useState(100);
 const[scanStarting,setScanStarting]=useState(false);
-const[mamScan,setMamScan]=useState(null);
+const[mamScan,setMamScan]=useState<any>(null);
 // Sidebar
-const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);
+const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);
 // Multi-select
 const[selMode,setSelMode]=useState(false);const[sel,setSel]=useState(new Set());const[busy,setBusy]=useState(false);
 const toggleSel=id=>setSel(p=>{const n=new Set(p);if(n.has(id))n.delete(id);else n.add(id);return n});

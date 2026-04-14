@@ -17,7 +17,7 @@ import { toast } from "../lib/toast";
 // NOTE: defined at module level (NOT inside AuthorDetailPage) to preserve
 // component identity across re-renders. Inlining inside the parent would
 // remount inputs on every keystroke (the focus-loss bug).
-function IS({series,vm,onAction,onBookClick,collapsed,authorId}){const t=useTheme();const[ld,setLd]=useState(false);const[bks,setBks]=useState(null);const load=()=>{if(bks)return;setLd(true);api.get(`/series/${series.id}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
+function IS({series,vm,onAction,onBookClick,collapsed,authorId}:any){const t=useTheme();const[ld,setLd]=useState(false);const[bks,setBks]=useState<any[]|null>(null);const load=()=>{if(bks)return;setLd(true);api.get(`/series/${series.id}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
 const isMulti=!!series.multi_author;
 const header=isMulti?<span>{series.name} <span style={{fontSize:11,color:useTheme().cyant,fontWeight:600,textTransform:"none",background:useTheme().cyan+"22",padding:"2px 8px",borderRadius:4,marginLeft:4}}>shared series</span></span>:series.name;
 // Separate regular books from omnibus entries for display
@@ -34,11 +34,11 @@ return<Section title={header} count={countStr} ownedCount={ownCount} totalCount=
 </>:null}</Section>}
 
 // ─── Standalone Section ─────────────────────────────────────
-function SA({books,vm,onAction,onBookClick,collapsed}){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
+function SA({books,vm,onAction,onBookClick,collapsed}:any){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
 
 // ─── Author Detail ──────────────────────────────────────────
-export default function AuthorDetailPage({authorId,onNav}){const t=useTheme();const[a,setA]=useState(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[mamRef,setMamRef]=useState(false);const[vm,setVm]=usePersist("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);const[mamOn,setMamOn]=useState(false);
-const[penLinks,setPenLinks]=useState([]);const[penQ,setPenQ]=useState("");const[penResults,setPenResults]=useState([]);const[penBusy,setPenBusy]=useState(false);const[penType,setPenType]=usePersist("adp_pen_type","pen_name");
+export default function AuthorDetailPage({authorId,onNav}:any){const t=useTheme();const[a,setA]=useState<any>(null);const[ld,setLd]=useState(true);const[ref,setRef]=useState(false);const[mamRef,setMamRef]=useState(false);const[vm,setVm]=usePersist<string>("adp_vm","grid");const[rk,setRk]=useState(0);const[sb,setSb]=useState<any>(null);const[sbClosing,setSbClosing]=useState(false);const[allCol,setAllCol]=useState(false);const[mamOn,setMamOn]=useState(false);
+const[penLinks,setPenLinks]=useState<any[]>([]);const[penQ,setPenQ]=useState("");const[penResults,setPenResults]=useState<any[]>([]);const[penBusy,setPenBusy]=useState(false);const[penType,setPenType]=usePersist<string>("adp_pen_type","pen_name");
 useEffect(()=>{if(!authorId)return;api.get(`/authors/${authorId}/pen-names`).then(r=>setPenLinks(r.links||[])).catch(()=>{})},[authorId]);
 useEffect(()=>{if(penQ.length<2){setPenResults([]);return}const tm=setTimeout(()=>{api.get(`/authors?search=${encodeURIComponent(penQ)}`).then(r=>setPenResults((r.authors||[]).filter(x=>x.id!==parseInt(authorId)))).catch(()=>{})},300);return()=>clearTimeout(tm)},[penQ,authorId]);
 const linkPen=async(aliasId)=>{setPenBusy(true);try{await api.post("/authors/link-pen-names",{canonical_author_id:parseInt(authorId),alias_author_id:aliasId,link_type:penType});const r=await api.get(`/authors/${authorId}/pen-names`);setPenLinks(r.links||[]);setPenQ("");setPenResults([]);toast.success(penType==="co_author"?"Co-author linked":"Pen name linked")}catch(e){toast.error(e.message||"Link failed")}setPenBusy(false)};

@@ -4,17 +4,17 @@ import { api } from "../api";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 
-export function SetupWizard({onComplete}){
+export function SetupWizard({onComplete}:any){
 const t=useTheme();
 const[step,setStep]=useState(0);
-const[platform,setPlatform]=useState(null);
+const[platform,setPlatform]=useState<any>(null);
 // Step 2: Library paths
-const[sources,setSources]=useState([]);
+const[sources,setSources]=useState<any[]>([]);
 const[srcPath,setSrcPath]=useState("");
 const[srcType,setSrcType]=useState("root");
 const[srcApp,setSrcApp]=useState("calibre");
 const[validating,setValidating]=useState(false);
-const[valResult,setValResult]=useState(null);
+const[valResult,setValResult]=useState<any>(null);
 // Step 3: Sources
 const[hcKey,setHcKey]=useState("");
 const[mamToken,setMamToken]=useState("");
@@ -22,8 +22,8 @@ const[mamToken,setMamToken]=useState("");
 const[saving,setSaving]=useState(false);
 const[saveStep,setSaveStep]=useState("");
 const[done,setDone]=useState(false);
-const[result,setResult]=useState(null);
-const[error,setError]=useState(null);
+const[result,setResult]=useState<any>(null);
+const[error,setError]=useState<any>(null);
 
 useEffect(()=>{api.get("/platform").then(setPlatform).catch(console.error)},[]);
 

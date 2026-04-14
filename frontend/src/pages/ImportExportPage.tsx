@@ -15,18 +15,18 @@ import { Spin } from "../components/Spin";
 import { ExportModal } from "../components/ExportModal";
 
 export default function ImportExportPage(){const t=useTheme();
-const[urls,setUrls]=useState("");const[results,setResults]=useState(null);const[fetching,setFetching]=useState(false);const[progress,setProgress]=useState("");
-const[adding,setAdding]=useState(false);const[addResult,setAddResult]=useState(null);
+const[urls,setUrls]=useState("");const[results,setResults]=useState<any[]|null>(null);const[fetching,setFetching]=useState(false);const[progress,setProgress]=useState("");
+const[adding,setAdding]=useState(false);const[addResult,setAddResult]=useState<any>(null);
 const[showExp,setShowExp]=useState(false);
 
 const fetchPreview=async()=>{const lines=urls.split("\n").map(u=>u.trim()).filter(u=>u.startsWith("http"));if(!lines.length){return}
 setFetching(true);setResults(null);setAddResult(null);setProgress(`Fetching ${lines.length} book(s)...`);
-try{const d=await api.post("/books/import-preview",{urls:lines});setResults(d.results||[]);setProgress("")}catch(e){setProgress("Error fetching books")}setFetching(false)};
+try{const d:any=await api.post("/books/import-preview",{urls:lines});setResults(d.results||[]);setProgress("")}catch(e){setProgress("Error fetching books")}setFetching(false)};
 
-const addBooks=async(books)=>{setAdding(true);setAddResult(null);
+const addBooks=async(books:any[])=>{setAdding(true);setAddResult(null);
 try{const d=await api.post("/books/import-add",{books});setAddResult(d);
 // Re-check: mark added ones in results
-if(results){setResults(prev=>prev.map(r=>{if(r.status==="new"&&books.some(b=>b.title===r.book?.title))return{...r,status:"added"};return r}))}}catch{setAddResult({error:true})}setAdding(false)};
+if(results){setResults((prev:any[]|null)=>(prev||[]).map((r:any)=>{if(r.status==="new"&&books.some((b:any)=>b.title===r.book?.title))return{...r,status:"added"};return r}))}}catch{setAddResult({error:true})}setAdding(false)};
 
 const newBooks=results?results.filter(r=>r.status==="new"&&r.book):[];
 const statusColors={new:t.grnt,owned:t.cyant,tracked:t.ylwt,error:t.redt,added:t.grnt};

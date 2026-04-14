@@ -25,16 +25,16 @@ function notifyChanged() {
   try { window.dispatchEvent(new CustomEvent("athenascout:suggestions-changed")); } catch {}
 }
 
-function fmtSeriesValue(name, idx) {
+function fmtSeriesValue(name: string | null | undefined, idx: number | null | undefined) {
   if (!name) return <em style={{ opacity: 0.7 }}>standalone</em>;
   return idx != null ? `${name} #${idx}` : name;
 }
 
-export default function SuggestionsPage({ onNav }) {
+export default function SuggestionsPage({ onNav }: { onNav: (p: string, a?: any) => void }) {
   const t = useTheme();
   const [status, setStatus] = useState("pending");
-  const [data, setData] = useState(null);
-  const [busy, setBusy] = useState({});
+  const [data, setData] = useState<any>(null);
+  const [busy, setBusy] = useState<any>({});
 
   const load = () => {
     setData(null);

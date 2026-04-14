@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
-import { THEMES, TC, useTheme } from "./theme";
+import { THEMES, TC } from "./theme";
+import type { ThemeName, Library, ScanProgress } from "./types";
+import { EVT } from "./types";
 import { api } from "./api";
 import { Ic } from "./icons";
 import { usePersist } from "./hooks/usePersist";
@@ -37,15 +39,15 @@ const WIDE_PAGES = new Set([
   "library", "authors", "author", "missing", "upcoming",
   "mam", "suggestions", "hidden", "database",
 ]);
-const widthFor = (pg) => (WIDE_PAGES.has(pg) ? WIDE_WIDTH : NARROW_WIDTH);
+const widthFor = (pg: string): number => (WIDE_PAGES.has(pg) ? WIDE_WIDTH : NARROW_WIDTH);
 
 // ─── App Shell ──────────────────────────────────────────────
 
 export default function App(){
-  const[pg,setPg]=usePersist("page","dashboard");
-  const[pa,setPa]=usePersist("page_arg",null);
-  const[tn,setTn]=useState(()=>{try{return localStorage.getItem("cl_theme")||"dark"}catch{return"dark"}});
-  const[showAdd,setShowAdd]=useState(null);
+  const[pg,setPg]=usePersist<string>("page","dashboard");
+  const[pa,setPa]=usePersist<number|string|null>("page_arg",null);
+  const[tn,setTn]=useState<ThemeName>(()=>{try{return (localStorage.getItem("cl_theme") as ThemeName)||"dark"}catch{return"dark"}});
+  const[showAdd,setShowAdd]=useState<string|null>(null);
 // Auth state — three meaningful shapes:
 //   {loading:true}                                    → initial /auth/check is in flight, render spinner
 //   {authenticated:false,firstRun:true|false}         → render LoginPage (setup or sign-in mode)
@@ -55,13 +57,13 @@ export default function App(){
 // user gets the login screen instead of stale UI fed by failed fetches.
 const[authState,setAuthState]=useState({loading:true,authenticated:false,firstRun:false});
 const checkAuth=async()=>{try{const r=await api.get("/auth/check");setAuthState({loading:false,authenticated:!!r.authenticated,firstRun:!!r.first_run})}catch{setAuthState({loading:false,authenticated:false,firstRun:false})}};
-useEffect(()=>{checkAuth();const onAuthRequired=()=>setAuthState(s=>s.authenticated?{loading:false,authenticated:false,firstRun:false}:s);window.addEventListener("athenascout:auth-required",onAuthRequired);return()=>window.removeEventListener("athenascout:auth-required",onAuthRequired)},[]);
+useEffect(()=>{checkAuth();const onAuthRequired=()=>setAuthState(s=>s.authenticated?{loading:false,authenticated:false,firstRun:false}:s);window.addEventListener(EVT.AuthRequired,onAuthRequired);return()=>window.removeEventListener(EVT.AuthRequired,onAuthRequired)},[]);
 const onLoginSuccess=()=>{setAuthState({loading:false,authenticated:true,firstRun:false})};
-const[firstRun,setFirstRun]=useState(null);
-const[mamWarn,setMamWarn]=useState(false);
-const[mamOn,setMamOn]=useState(false);
-const[libs,setLibs]=useState([]);
-const[activeLib,setActiveLib]=useState(()=>{try{return localStorage.getItem("cl_active_lib")||""}catch{return""}});
+const[firstRun,setFirstRun]=useState<boolean|null>(null);
+const[mamWarn,setMamWarn]=useState<boolean>(false);
+const[mamOn,setMamOn]=useState<boolean>(false);
+const[libs,setLibs]=useState<Library[]>([]);
+const[activeLib,setActiveLib]=useState<string>(()=>{try{return localStorage.getItem("cl_active_lib")||""}catch{return""}});
 useEffect(()=>{if(!authState.authenticated)return;api.get("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{})},[authState.authenticated]);
 // Check if this is a first-run scenario (setup wizard needed). Skipped until authenticated.
 useEffect(()=>{if(!authState.authenticated)return;api.get("/platform").then(r=>setFirstRun(r.first_run===true)).catch(()=>setFirstRun(false))},[authState.authenticated]);
@@ -69,14 +71,14 @@ useEffect(()=>{if(!authState.authenticated)return;api.get("/platform").then(r=>s
 // events dispatched by SettingsPage when the user toggles MAM. It used to
 // refetch on every `pg` change (page nav) as a lazy refresh trigger, which
 // cost 1 API call per nav click. Event-driven is surgical and free.
-useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{});refresh();window.addEventListener("athenascout:mam-state-changed",refresh);return()=>window.removeEventListener("athenascout:mam-state-changed",refresh)},[authState.authenticated]);
+useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/mam/status").then((r:any)=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{});refresh();window.addEventListener(EVT.MamStateChanged,refresh);return()=>window.removeEventListener(EVT.MamStateChanged,refresh)},[authState.authenticated]);
 // Pending series-suggestion count drives the badge number on the
 // Suggestions nav item. Refetched via the explicit
 // "athenascout:suggestions-changed" event that SuggestionsPage
 // dispatches after Apply/Ignore/Delete actions, plus a one-shot fetch
 // on initial auth — no polling.
-const[sugCount,setSugCount]=useState(0);
-useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/series-suggestions/count").then(r=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener("athenascout:suggestions-changed",refresh);return()=>window.removeEventListener("athenascout:suggestions-changed",refresh)},[authState.authenticated]);
+const[sugCount,setSugCount]=useState<number>(0);
+useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/series-suggestions/count").then((r:any)=>setSugCount(r.pending||0)).catch(()=>{});refresh();window.addEventListener(EVT.SuggestionsChanged,refresh);return()=>window.removeEventListener(EVT.SuggestionsChanged,refresh)},[authState.authenticated]);
 
 // App-level scan-progress poller. Runs ONCE per app-mount (not per
 // page) so the unified Dashboard widget and every other page that
@@ -92,12 +94,12 @@ useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get("/se
 // on backgrounded tabs via the Page Visibility API. Trigger sites can
 // dispatch `athenascout:scan-started` to demand an immediate poll
 // (no waiting for the next interval tick).
-useEffect(()=>{if(!authState.authenticated)return;let prev=[];let cancelled=false;let iv=null;const tick=async()=>{if(document.hidden||cancelled)return;try{const r=await api.get("/scan-status");const next=r.scans||[];for(const ns of next){const ps=prev.find(p=>p.kind===ns.kind);if(ps&&ps.running&&!ns.running){try{window.dispatchEvent(new CustomEvent("athenascout:scan-completed",{detail:{kind:ns.kind,scan:ns}}))}catch{}}}prev=next;try{window.dispatchEvent(new CustomEvent("athenascout:scans-updated",{detail:{scans:next}}))}catch{}const anyRunning=next.some(s=>s.running);const want=anyRunning?3000:30000;if(iv){clearInterval(iv);iv=setInterval(tick,want)}}catch{}};tick();iv=setInterval(tick,30000);const onStarted=()=>tick();const onVis=()=>{if(!document.hidden)tick()};window.addEventListener("athenascout:scan-started",onStarted);document.addEventListener("visibilitychange",onVis);return()=>{cancelled=true;if(iv)clearInterval(iv);window.removeEventListener("athenascout:scan-started",onStarted);document.removeEventListener("visibilitychange",onVis)}},[authState.authenticated]);
+useEffect(()=>{if(!authState.authenticated)return;let prev:ScanProgress[]=[];let cancelled=false;let iv:ReturnType<typeof setInterval>|null=null;const tick=async()=>{if(document.hidden||cancelled)return;try{const r:any=await api.get("/scan-status");const next:ScanProgress[]=r.scans||[];for(const ns of next){const ps=prev.find(p=>p.kind===ns.kind);if(ps&&ps.running&&!ns.running){try{window.dispatchEvent(new CustomEvent(EVT.ScanCompleted,{detail:{kind:ns.kind,scan:ns}}))}catch{}}}prev=next;try{window.dispatchEvent(new CustomEvent(EVT.ScansUpdated,{detail:{scans:next}}))}catch{}const anyRunning=next.some(s=>s.running);const want=anyRunning?3000:30000;if(iv){clearInterval(iv);iv=setInterval(tick,want)}}catch{}};tick();iv=setInterval(tick,30000);const onStarted=()=>tick();const onVis=()=>{if(!document.hidden)tick()};window.addEventListener(EVT.ScanStarted,onStarted);document.addEventListener("visibilitychange",onVis);return()=>{cancelled=true;if(iv)clearInterval(iv);window.removeEventListener(EVT.ScanStarted,onStarted);document.removeEventListener("visibilitychange",onVis)}},[authState.authenticated]);
   const theme=THEMES[tn]||THEMES.dark;
-  const nav=(p,a=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
+  const nav=(p:string,a:number|string|null=null)=>{setPg(p);setPa(a);window.scrollTo(0,0)};
   useEffect(()=>{try{localStorage.setItem("cl_theme",tn)}catch{}},[tn]);
-  const nextT=()=>{const n=Object.keys(THEMES);setTn(n[(n.indexOf(tn)+1)%n.length])};
-  const switchLib=async(slug)=>{if(slug===activeLib)return;try{await api.post("/libraries/active",{slug});setActiveLib(slug);try{localStorage.setItem("cl_active_lib",slug)}catch{}setPg("dashboard");setPa(null)}catch(e){console.error("Library switch failed:",e)}};
+  const nextT=()=>{const n=Object.keys(THEMES) as ThemeName[];setTn(n[(n.indexOf(tn)+1)%n.length])};
+  const switchLib=async(slug:string)=>{if(slug===activeLib)return;try{await api.post("/libraries/active",{slug});setActiveLib(slug);try{localStorage.setItem("cl_active_lib",slug)}catch{}setPg("dashboard");setPa(null)}catch(e){console.error("Library switch failed:",e)}};
 
   // Setup wizard completion — refresh libraries and show dashboard
   const onWizardComplete=()=>{setFirstRun(false);api.get("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{});setPg("dashboard")};

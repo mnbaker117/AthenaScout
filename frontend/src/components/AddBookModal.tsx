@@ -4,9 +4,9 @@ import { api } from "../api";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 
-export function AddBookModal({onClose,onAdded}){const t=useTheme();const[f,setF]=useState({title:"",author_name:"",series_name:"",series_index:"",pub_date:"",expected_date:"",description:"",isbn:"",is_unreleased:false});const[saving,setSaving]=useState(false);const[err,setErr]=useState("");
+export function AddBookModal({onClose,onAdded}:any){const t=useTheme();const[f,setF]=useState<any>({title:"",author_name:"",series_name:"",series_index:"",pub_date:"",expected_date:"",description:"",isbn:"",is_unreleased:false});const[saving,setSaving]=useState(false);const[err,setErr]=useState("");
 const save=async()=>{if(!f.title||!f.author_name){setErr("Title and author are required");return}setSaving(true);try{await api.post("/books/add",f);onAdded&&onAdded();onClose()}catch{setErr("Failed to add")}setSaving(false)};
-const upF=(field,val)=>setF(prev=>({...prev,[field]:val}));
+const upF=(field:string,val:any)=>setF((prev:any)=>({...prev,[field]:val}));
 const ist={padding:"8px 10px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:6,color:t.text2,fontSize:13,width:"100%"};
 const lbl={fontSize:11,fontWeight:600,color:t.tg,textTransform:"uppercase"};
 return<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeOverlay 0.2s ease-out"}} onClick={onClose}><div onClick={e=>e.stopPropagation()} className="modal-panel" style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12,padding:24,animation:"fadeIn 0.2s ease-out",width:460,maxWidth:"90vw",maxHeight:"80vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:14}}>

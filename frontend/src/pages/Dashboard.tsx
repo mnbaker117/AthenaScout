@@ -8,7 +8,7 @@ import { Spin } from "../components/Spin";
 import { Load } from "../components/Load";
 import { toast } from "../lib/toast";
 
-export default function Dashboard({onNav,libs=[],activeLib="",switchLib}){const t=useTheme();const[d,setD]=useState(null);const[sy,setSy]=useState(false);const[scans,setScans]=useState([]);const[sugCount,setSugCount]=useState(0);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
+export default function Dashboard({onNav,libs=[],activeLib="",switchLib}:any){const t=useTheme();const[d,setD]=useState<any>(null);const[sy,setSy]=useState(false);const[scans,setScans]=useState<any[]>([]);const[sugCount,setSugCount]=useState(0);useEffect(()=>{api.get("/stats").then(setD).catch(console.error)},[]);
 // Pending-suggestions count for the Dashboard card. Refetched on the
 // same `athenascout:suggestions-changed` event the navbar uses, so
 // Apply/Ignore actions on the SuggestionsPage immediately reflect here.
