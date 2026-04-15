@@ -290,8 +290,11 @@ async def lifespan(app: FastAPI):
             state._lookup_progress.update({"checked": data["checked"], "total": data["total"],
                                      "current_author": data["current_author"], "new_books": data["new_books"]})
         try:
-            await run_full_lookup(on_progress=_progress)
-            state._lookup_progress.update({"running": False, "status": "complete"})
+            result = await run_full_lookup(on_progress=_progress)
+            state._lookup_progress.update({
+                "running": False, "status": "complete",
+                "source_timeouts": result.get("source_timeouts") or {},
+            })
             try:
                 from app.notify import notify_scan_complete
                 await notify_scan_complete(
@@ -370,6 +373,13 @@ async def lifespan(app: FastAPI):
             # scheduler fires; it does NOT trigger a full library scan.
             scan_limit = min(150, total_remaining)
             logger.info(f"MAM scheduled scan starting ({scan_limit} books, {total_remaining} total remaining)")
+            # Reset the cancel flag at the start of each scheduled scan
+            # so a stale cancel from a prior iteration doesn't preempt
+            # the new one. Cancel flow: /mam/scan/cancel sees type=
+            # "scheduled" and flips this True; the closure below surfaces
+            # it to mam_scan_batch as its cancel_check, which aborts
+            # the batch on the next per-book boundary.
+            state._scheduled_mam_cancel_requested = False
             state._mam_scan_progress = {"running": True, "scanned": 0, "total": scan_limit,
                                   "found": 0, "possible": 0, "not_found": 0,
                                   "errors": 0, "current_book": "",
@@ -385,6 +395,8 @@ async def lifespan(app: FastAPI):
                     # Forward in-flight book title from the source layer.
                     "current_book": stats.get("current_book", ""),
                 })
+            def _sched_cancel_check():
+                return state._scheduled_mam_cancel_requested
             db = await get_db()
             try:
                 result = await mam_scan_batch(
@@ -392,21 +404,34 @@ async def lifespan(app: FastAPI):
                     delay=s.get("rate_mam", 2), skip_ip_update=True,
                     format_priority=s.get("mam_format_priority"),
                     on_progress=_sched_progress,
+                    cancel_check=_sched_cancel_check,
                     lang_ids=_resolve_mam_languages(s.get("languages", ["English"])),
                 )
+                was_cancelled = state._scheduled_mam_cancel_requested
                 state._mam_scan_progress.update({
                     "running": False,
-                    "status": "complete" if not result.get("error") else f"error: {result.get('error')}",
+                    "status": (
+                        "cancelled" if was_cancelled
+                        else "complete" if not result.get("error")
+                        else f"error: {result.get('error')}"
+                    ),
                 })
+                if was_cancelled:
+                    logger.info("MAM scheduled scan cancelled by user")
                 await db.execute(
                     "INSERT INTO sync_log (sync_type, started_at, finished_at, status, books_found, books_new) VALUES (?,?,?,?,?,?)",
                     ("mam", time.time(), time.time(),
-                     "complete" if not result.get("error") else "error",
+                     "cancelled" if was_cancelled
+                     else "complete" if not result.get("error")
+                     else "error",
                      result.get("scanned", 0), result.get("found", 0))
                 )
                 await db.commit()
                 logger.info(f"MAM scheduled scan done: {result.get('scanned', 0)} scanned, {result.get('found', 0)} found")
-                if not result.get("error"):
+                # Skip the "scan complete" ntfy when the user cancelled
+                # — they already know, and a false "done!" push would be
+                # noise.
+                if not result.get("error") and not was_cancelled:
                     try:
                         from app.notify import notify_mam_scan_complete
                         await notify_mam_scan_complete(

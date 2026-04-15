@@ -128,6 +128,7 @@ export interface Book {
   series_name?: string | null;
   series_index?: number | null;
   series_total?: number;
+  mainline_total?: number;
   owned?: 0 | 1;
   hidden?: 0 | 1;
   is_unreleased?: 0 | 1;

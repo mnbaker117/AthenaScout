@@ -31,9 +31,22 @@ router = APIRouter(prefix="/api", tags=["books"])
 # "visible books in this series" even when the outer query has
 # `include_hidden=True`. Standalone books (series_id IS NULL) come back
 # as `series_total=0` via the COALESCE in the projection below.
+#
+# `mainline_total` counts only whole-numbered entries ≥ 1 (1, 2, 3…),
+# excluding novellas/prequels at 0.5, 1.5, etc. The frontend uses this
+# for the "#X of Y" series-position label so book #4 of a 4-mainline +
+# 1-prequel series reads "#4 of 4" and the prequel reads "#0.5 of 4".
+# `series_total` continues to count every visible non-omnibus book
+# (5 in that example) for the overall "how many books in the series"
+# count shown on author/series browse views.
 _SERIES_TOTAL_JOIN = """
 LEFT JOIN (
-    SELECT series_id, COUNT(*) AS series_total
+    SELECT series_id,
+           COUNT(*) AS series_total,
+           SUM(CASE WHEN series_index IS NOT NULL
+                     AND series_index >= 1
+                     AND series_index = CAST(series_index AS INTEGER)
+                    THEN 1 ELSE 0 END) AS mainline_total
     FROM books
     WHERE hidden=0 AND series_id IS NOT NULL AND COALESCE(is_omnibus,0)=0
     GROUP BY series_id
@@ -42,7 +55,8 @@ LEFT JOIN (
 
 _BOOKS_SELECT = (
     "SELECT b.*, a.name as author_name, s.name as series_name, "
-    "COALESCE(st.series_total, 0) as series_total "
+    "COALESCE(st.series_total, 0) as series_total, "
+    "COALESCE(st.mainline_total, 0) as mainline_total "
     "FROM books b "
     "JOIN authors a ON b.author_id=a.id "
     "LEFT JOIN series s ON b.series_id=s.id "

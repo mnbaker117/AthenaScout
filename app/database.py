@@ -148,6 +148,8 @@ CREATE TABLE IF NOT EXISTS authors (
     goodreads_id TEXT,
     kobo_id TEXT,
     fictiondb_id TEXT,
+    ibdb_id TEXT,
+    google_books_id TEXT,
     image_url TEXT,
     bio TEXT,
     verified INTEGER NOT NULL DEFAULT 0,
@@ -419,6 +421,14 @@ MIGRATIONS = [
     # entries, got silently skipped on every DB past v44, surfaced as
     # "no such column: mam_category" on the first MAM scan post-update.
     "ALTER TABLE books ADD COLUMN mam_category TEXT",
+    # v1.1.9: authors table was missing ibdb_id / google_books_id —
+    # columns landed on `books` in Sprint 4 but never on `authors`.
+    # lookup.py's UPDATE authors SET {source}_id=? pattern raised
+    # "no such column: ibdb_id" on every ibdb scan. google_books hit
+    # the same path but was rate-limited out before it ever tried to
+    # write, so the bug only surfaced via ibdb.
+    "ALTER TABLE authors ADD COLUMN ibdb_id TEXT",
+    "ALTER TABLE authors ADD COLUMN google_books_id TEXT",
 ]
 
 
@@ -641,6 +651,8 @@ async def init_db(slug=None):
             ("books", "amazon_id", "TEXT"),
             ("books", "is_omnibus", "INTEGER NOT NULL DEFAULT 0"),
             ("pen_name_links", "link_type", "TEXT NOT NULL DEFAULT 'pen_name'"),
+            ("authors", "ibdb_id", "TEXT"),
+            ("authors", "google_books_id", "TEXT"),
         ]
         for table, col, coltype in _ensure_columns:
             try:

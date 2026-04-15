@@ -7,6 +7,121 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.9] — 2026-04-15
+
+Concurrent-scan reliability sprint. All reported symptoms came
+from contention between the source-scan merge path and a MAM
+scan holding the SQLite writer lock (plus two latent bugs that
+only surfaced after the schema gap got closed).
+
+### Added
+
+- **Series "#X of Y" now counts mainline entries only.** Added
+  a parallel `mainline_total` aggregate alongside `series_total`
+  in the books/series/mam router SQL. The position label now
+  reads "#4 of 4" for a mainline book in a 4-mainline + 1-prequel
+  series instead of the confusing "#4 of 5"; the prequel reads
+  "#0.5 of 4". `series_total` (which the Series browser uses for
+  the "N books in the series" count) is unchanged — it still
+  includes prequels and novellas. Frontend updated across
+  `BookSidebar.tsx`, `BookViews.tsx` (grid + list views), and
+  `types.ts`.
+
+- **Bulk source-scan timeout summary.** `lookup_author` accepts an
+  optional `timeout_collector` dict; `run_full_lookup` /
+  `run_full_rescan` create one, pass it through, and log a
+  per-source summary at end-of-scan ("Source 'goodreads' timed
+  out for 3 authors — those authors may be under-scanned:
+  Jay Aury, ..."). The counts also surface on the Dashboard scan
+  widget as a yellow warning line when the scan completes, so a
+  primary source silently losing the race on a chunk of the
+  library doesn't disappear into debug-level logs. No retry — just
+  visibility. The retry-from-position feature is deferred to v1.2.
+
+- **Top navbar widened from 1120px to 1280px.** Fits a 4-digit
+  Suggestions badge count without triggering the nav-items row's
+  horizontal scroll. No layout shift in the main content area.
+
+### Fixed
+
+- **`no such column: ibdb_id` on every single-author scan.** Not
+  a migration-reordering regression — the `authors` table was
+  genuinely missing `ibdb_id` and `google_books_id` columns. When
+  those sources were added in Sprint 4 the columns landed on
+  `books` but never on `authors`. `lookup.py`'s UPDATE authors
+  SET `{source}_id=?` pattern crashed for ibdb every time; the
+  google_books path would have done the same but was rate-limited
+  out before it got to write. Fix: added both to the authors
+  SCHEMA block for fresh installs, appended two ALTER migrations,
+  and extended the `_ensure_columns` startup safety net so
+  DBs that somehow miss both auto-repair on next boot.
+
+- **ibdb field-name mappings were wrong against the live API.**
+  The source was written for a pre-2026 `ibdb.dev` response shape
+  and expected snake_case keys (`isbn_13`, `publication_date`)
+  plus a bare URL string for `cover`/`image`/`thumbnail`. Live API
+  now returns camelCase (`isbn13`, `synopsis`, `publicationDate`)
+  and `image` as a *dict* `{id, url, width, height}`. So ibdb was
+  shoving a dict into `BookResult.cover_url`, which then crashed
+  sqlite3 parameter binding with `type 'dict' is not supported`.
+  Pre-1.1.9 the missing-`ibdb_id`-column error masked this entirely
+  (the SQL bombed before reaching the per-book path); closing the
+  schema gap unmasked it. Fix: prefer camelCase keys with snake_case
+  as fallback, extract `image.url` when image is a dict, and
+  type-guard `description`/`page_count`/`language` against
+  dict/unexpected values landing in scalar slots. After the fix
+  ibdb contributes real metadata — verified merging 11 updated
+  books for a test author where previously it merged zero.
+
+- **Concurrent MAM scan starved source-scan merges of the writer
+  lock.** Observed in dev2 and dev3 testing: a MAM full scan
+  would hit `UPDATE books` in its per-book loop and hold the
+  SQLite single-writer lock long enough that a source scan's
+  subsequent `UPDATE authors` would sit through the whole 30-second
+  `busy_timeout` and die with `database is locked`. Amazon, then
+  Goodreads, then Hardcover all lost entire per-author merges
+  this way. The fix landed in three layers:
+
+  1. **MAM pauses when a source scan is active.** New
+     `state._source_scan_refs: int` counter, incremented in
+     `lookup_author`'s entry and decremented in its `finally` so
+     exceptions/cancellations can't leave MAM stranded. MAM's
+     per-book loop checks the counter before each `check_book`
+     HTTP+UPDATE cycle; if non-zero, it commits any pending
+     transaction and sleeps 1s until the counter drops to 0. A
+     20-minute safety cap guards against a stuck refcount.
+  2. **MAM commits its transaction before the pause-sleep.** Without
+     this, MAM's mid-batch UPDATE sits in an open implicit
+     transaction holding the writer lock while MAM sleeps, which
+     re-creates the exact starvation bug we were trying to prevent.
+     Verified in logs: with the commit-before-pause, Goodreads'
+     UPDATE authors lands in ~40ms instead of waiting the full 30s.
+  3. **Retry-on-lock for the final author-stamp UPDATE.** The
+     `UPDATE authors SET verified=1, last_lookup_at=?` at the end
+     of `lookup_author` opens a fresh connection just for that one
+     write, so the refcount pause doesn't help there. Wrapped it
+     in a 5-attempt exponential-backoff retry (1/2/4/8s); on
+     persistent lock we log a WARNING and let the scan complete —
+     the per-source merges already committed and the next scheduled
+     lookup will re-attempt the stamp.
+
+- **Scheduled MAM scan couldn't be cancelled from the UI.** The
+  scheduled scan runs inline inside the long-lived `_mam_scheduler`
+  task (via `state.supervised_task`), not as a discrete task, so
+  `_mam_scan_task.cancel()` had nothing to target. Clicking Stop
+  silently did nothing and the `/mam/scan/cancel` fallback branch
+  returned `{"message": "No MAM scan running"}` — which the
+  frontend toast dressed up as a success message. Fix:
+  `state._scheduled_mam_cancel_requested` flag, reset by the
+  scheduler on each iteration, set by `/mam/scan/cancel` when the
+  active scan is `type=scheduled`, read via a `cancel_check`
+  closure that the scheduler now passes to `mam_scan_batch`.
+  Cancel latency: ≤2s (the per-book HTTP round-trip boundary).
+  The cancelled scan also writes `status='cancelled'` to
+  `sync_log` instead of "complete" and suppresses the "scan
+  complete" ntfy push, so you don't get a false "done!" push
+  right after clicking Stop.
+
 ## [1.1.8] — 2026-04-14
 
 ### Fixed

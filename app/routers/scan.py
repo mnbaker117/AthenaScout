@@ -148,8 +148,11 @@ async def trigger_lookup():
                                  "current_author": data["current_author"], "new_books": data["new_books"]})
     async def _do():
         try:
-            await run_full_lookup(on_progress=_progress)
-            state._lookup_progress.update({"running": False, "status": "complete"})
+            result = await run_full_lookup(on_progress=_progress)
+            state._lookup_progress.update({
+                "running": False, "status": "complete",
+                "source_timeouts": result.get("source_timeouts") or {},
+            })
             try:
                 from app.notify import notify_scan_complete
                 await notify_scan_complete(
@@ -268,6 +271,11 @@ def _project_lookup() -> dict:
         "completed_at": _stamp_completed(p),
         "extra": {
             "new_books": p.get("new_books", 0),
+            # Per-source author-timeout counts from the most recent bulk
+            # scan. Dashboard surfaces this so a primary source (Goodreads)
+            # silently under-scanning a batch of authors doesn't get lost
+            # in the logs. Empty dict when nothing timed out.
+            "source_timeouts": p.get("source_timeouts") or {},
         },
     }
 
@@ -377,8 +385,11 @@ async def trigger_full_rescan():
                                  "current_author": data["current_author"], "new_books": data["new_books"]})
     async def _do():
         try:
-            await run_full_rescan(on_progress=_progress)
-            state._lookup_progress.update({"running": False, "status": "complete"})
+            result = await run_full_rescan(on_progress=_progress)
+            state._lookup_progress.update({
+                "running": False, "status": "complete",
+                "source_timeouts": result.get("source_timeouts") or {},
+            })
             try:
                 from app.notify import notify_scan_complete
                 await notify_scan_complete(

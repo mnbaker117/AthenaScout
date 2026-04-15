@@ -39,6 +39,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from app import state
 from app.scoring import score_match
 
 logger = logging.getLogger("athenascout.mam")
@@ -1215,6 +1216,45 @@ async def scan_books_batch(
     for i, row in enumerate(rows):
         book_id, book_title, author_name = row[0], row[1], row[2]
         book_series = row[5] if len(row) > 5 else ""
+
+        # Yield to concurrent source scans. `state._source_scan_refs` is
+        # incremented by lookup_author and decremented in its finally.
+        # SQLite's single-writer lock means a long MAM batch (tens of
+        # UPDATE books per minute) can starve a source scan's merge
+        # writes past the 30s busy_timeout — observed in v1.1.9-dev2
+        # where Amazon's whole merge lost the race. Pausing here before
+        # the HTTP + UPDATE cycle lets the source scan grab the writer
+        # lock cleanly; MAM resumes on the next iteration with no lost
+        # progress. 20-minute cap is a safety net for a stuck refcount
+        # (shouldn't happen — finally block guarantees decrement) so a
+        # bug can't strand MAM forever.
+        #
+        # CRITICAL: commit before the pause-sleep loop. The previous
+        # iteration's UPDATE books call started an implicit transaction
+        # that only flushes at the every-10-books `db.commit()` below.
+        # Without the explicit commit here, MAM's uncommitted writer
+        # transaction keeps the writer lock for however long the source
+        # scan runs — which re-creates the exact starvation bug we're
+        # trying to prevent. v1.1.9-dev3 testing confirmed: Goodreads
+        # spent 30s blocked on UPDATE authors while MAM sat paused with
+        # book 4's UPDATE uncommitted.
+        if state._source_scan_refs > 0:
+            await db.commit()
+            logger.info(
+                f"MAM [{i+1}/{len(rows)}] paused — {state._source_scan_refs} "
+                f"source scan(s) in progress"
+            )
+            paused_at = asyncio.get_event_loop().time()
+            while state._source_scan_refs > 0:
+                if asyncio.get_event_loop().time() - paused_at > 1200:
+                    logger.warning(
+                        f"MAM [{i+1}/{len(rows)}] paused 20min — refcount "
+                        f"stuck at {state._source_scan_refs}, resuming anyway"
+                    )
+                    break
+                await asyncio.sleep(1.0)
+            else:
+                logger.info(f"MAM [{i+1}/{len(rows)}] resumed — source scan finished")
 
         logger.debug(f"MAM [{i+1}/{len(rows)}] {book_title[:65]} — {author_name[:35]}")
 

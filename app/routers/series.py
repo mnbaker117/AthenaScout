@@ -35,12 +35,18 @@ async def get_series(sid: int):
         # series_total is identical — the old code computed it N times.
         s["books"] = [dict(b) for b in await (await db.execute(f"""
             SELECT b.*, a.name as author_name, sr.name as series_name,
-                COALESCE(st.series_total, 0) as series_total
+                COALESCE(st.series_total, 0) as series_total,
+                COALESCE(st.mainline_total, 0) as mainline_total
             FROM books b
             JOIN authors a ON b.author_id=a.id
             LEFT JOIN series sr ON b.series_id=sr.id
             LEFT JOIN (
-                SELECT series_id, COUNT(*) AS series_total
+                SELECT series_id,
+                       COUNT(*) AS series_total,
+                       SUM(CASE WHEN series_index IS NOT NULL
+                                 AND series_index >= 1
+                                 AND series_index = CAST(series_index AS INTEGER)
+                                THEN 1 ELSE 0 END) AS mainline_total
                 FROM books
                 WHERE hidden=0 AND series_id IS NOT NULL
                 GROUP BY series_id

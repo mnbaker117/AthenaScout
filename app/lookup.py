@@ -32,6 +32,7 @@ import asyncio, time, re, logging, json
 from dataclasses import dataclass
 from typing import Any
 from difflib import SequenceMatcher
+import aiosqlite
 from app.config import load_settings
 from app.database import get_db
 from app.sources.hardcover import HardcoverSource
@@ -1578,7 +1579,26 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
         return 0
 
 
-async def lookup_author(author_id: int, author_name: str, full_scan: bool = False, on_progress=None):
+def _log_source_timeout_summary(timeouts: dict[str, list[str]]) -> None:
+    """Emit a single warning per source that hit its wall-clock cap during
+    a bulk scan. Each line names the source, count, and author list so the
+    user can see at a glance whether a primary source (Goodreads) under-
+    scanned a meaningful chunk of the library. No-op when nothing timed
+    out. Called at the end of `run_full_lookup` / `run_full_rescan`."""
+    if not timeouts:
+        return
+    for source_name, author_names in timeouts.items():
+        if not author_names:
+            continue
+        preview = ", ".join(author_names[:8])
+        more = f" (+{len(author_names) - 8} more)" if len(author_names) > 8 else ""
+        logger.warning(
+            f"Source '{source_name}' timed out for {len(author_names)} "
+            f"author(s) — those authors may be under-scanned: {preview}{more}"
+        )
+
+
+async def lookup_author(author_id: int, author_name: str, full_scan: bool = False, on_progress=None, timeout_collector: dict | None = None):
     """Scan all enabled sources for one author and merge results.
 
     `on_progress`, if supplied, is called after each source completes
@@ -1587,8 +1607,34 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     Dashboard scan widget shows the count climbing in real time
     instead of jumping from 0 to the final value at the end. Up to
     three callbacks fire per author scan (one per enabled source).
+
+    `timeout_collector`, if supplied, accumulates per-source timeout
+    occurrences across a bulk scan. On timeout for source X, the
+    collector dict gets `X` → list of author names appended. Bulk
+    callers (`run_full_lookup`, `run_full_rescan`) surface the
+    aggregate in the final summary so the user can see which
+    authors may be under-scanned when a primary source (Goodreads)
+    blows its 300s cap repeatedly. None (the default) is a no-op
+    for single-author scans, where the per-source warning log line
+    is enough on its own.
     """
     logger.info(f"{'Full re-scan' if full_scan else 'Looking up'} author: {author_name}")
+    # Signal MAM to pause its batch loop while we hold the writer
+    # lock for merges. Counter (not boolean) so overlapping scans
+    # don't let MAM sneak writes through between them. Wrapped in
+    # try/finally so exceptions, cancellation, or early returns
+    # never leave MAM stranded.
+    state._source_scan_refs += 1
+    try:
+        return await _lookup_author_inner(
+            author_id, author_name, full_scan=full_scan,
+            on_progress=on_progress, timeout_collector=timeout_collector,
+        )
+    finally:
+        state._source_scan_refs = max(0, state._source_scan_refs - 1)
+
+
+async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool = False, on_progress=None, timeout_collector: dict | None = None):
     total = 0
     settings = load_settings()
     languages = settings.get("languages", ["English"])
@@ -1772,6 +1818,8 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
                 f"  Source '{spec.name}' timed out after {timeout:.0f}s "
                 f"for '{author_name}' — keeping any partial writes, moving on"
             )
+            if timeout_collector is not None:
+                timeout_collector.setdefault(spec.name, []).append(author_name)
             n = 0
         except asyncio.CancelledError:
             # Cancellation propagates — the user clicked Stop.
@@ -1810,12 +1858,33 @@ async def lookup_author(author_id: int, author_name: str, full_scan: bool = Fals
     if series_collector:
         await _compute_series_suggestions(author_id, series_collector)
 
-    db2 = await get_db()
-    try:
-        await db2.execute("UPDATE authors SET verified=1, last_lookup_at=? WHERE id=?", (time.time(), author_id))
-        await db2.commit()
-    finally:
-        await db2.close()
+    # Final author marker write. Retry on `database is locked` because a
+    # concurrent MAM scan can hold a writer lock for longer than the
+    # default 30s busy_timeout — observed in v1.1.9 testing where a full
+    # MAM scan was running while the user kicked off a single-author
+    # re-scan. Failing this UPDATE used to bubble all the way out and
+    # kill the entire author-scan task; the source-scan results were
+    # already committed, so losing the verified=1/last_lookup_at stamp
+    # was the only visible damage. We try a few times with backoff and
+    # then log + continue (the next scheduled lookup will re-attempt
+    # the stamp because last_lookup_at stayed at its prior value).
+    for attempt in range(5):
+        db2 = await get_db()
+        try:
+            await db2.execute("UPDATE authors SET verified=1, last_lookup_at=? WHERE id=?", (time.time(), author_id))
+            await db2.commit()
+            break
+        except aiosqlite.OperationalError as e:
+            if "locked" not in str(e).lower() or attempt == 4:
+                logger.warning(
+                    f"Could not stamp last_lookup_at for '{author_name}' "
+                    f"(attempt {attempt + 1}/5): {e}. Source-scan writes "
+                    f"already committed; next scheduled lookup will retry."
+                )
+                break
+            await asyncio.sleep(2 ** attempt)
+        finally:
+            await db2.close()
 
     logger.info(f"{'Full re-scan' if full_scan else 'Lookup'} complete for '{author_name}': {total} new books found across all sources")
     return total
@@ -1851,6 +1920,7 @@ async def run_full_lookup(on_progress=None):
         rows = await (await db.execute("SELECT id, name FROM authors WHERE COALESCE(last_lookup_at,0) < ? AND id IN (SELECT DISTINCT author_id FROM books) ORDER BY COALESCE(last_lookup_at,0) ASC", (time.time() - cache_sec,))).fetchall()
         authors = list(rows)
         total = 0; checked = 0
+        timeouts: dict[str, list[str]] = {}
         for a in authors:
             if on_progress:
                 on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": total})
@@ -1861,14 +1931,15 @@ async def run_full_lookup(on_progress=None):
             def _bump(running, _baseline=total):
                 if on_progress:
                     on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": _baseline + int(running)})
-            try: total += await lookup_author(a["id"], a["name"], on_progress=_bump); checked += 1
+            try: total += await lookup_author(a["id"], a["name"], on_progress=_bump, timeout_collector=timeouts); checked += 1
             except Exception as e: logger.error(f"Error for {a['name']}: {e}")
         if on_progress:
             on_progress({"checked": checked, "total": len(authors), "current_author": "", "new_books": total})
         await db.execute("UPDATE sync_log SET finished_at=?,status='complete',books_found=?,books_new=? WHERE id=?", (time.time(), checked, total, sid))
         await db.commit()
         logger.info(f"Lookup done: {checked} authors, {total} new books")
-        return {"authors_checked": checked, "new_books": total}
+        _log_source_timeout_summary(timeouts)
+        return {"authors_checked": checked, "new_books": total, "source_timeouts": {k: len(v) for k, v in timeouts.items()}}
     except Exception as e:
         if sid:
             try:
@@ -1910,6 +1981,7 @@ async def run_full_rescan(on_progress=None):
         rows = await (await db.execute("SELECT id, name FROM authors WHERE id IN (SELECT DISTINCT author_id FROM books) ORDER BY sort_name ASC")).fetchall()
         authors = list(rows)
         total = 0; checked = 0
+        timeouts: dict[str, list[str]] = {}
         for a in authors:
             if on_progress:
                 on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": total})
@@ -1918,14 +1990,15 @@ async def run_full_rescan(on_progress=None):
             def _bump(running, _baseline=total):
                 if on_progress:
                     on_progress({"checked": checked, "total": len(authors), "current_author": a["name"], "new_books": _baseline + int(running)})
-            try: total += await lookup_author(a["id"], a["name"], full_scan=True, on_progress=_bump); checked += 1
+            try: total += await lookup_author(a["id"], a["name"], full_scan=True, on_progress=_bump, timeout_collector=timeouts); checked += 1
             except Exception as e: logger.error(f"Full re-scan error for {a['name']}: {e}")
         if on_progress:
             on_progress({"checked": checked, "total": len(authors), "current_author": "", "new_books": total})
         await db.execute("UPDATE sync_log SET finished_at=?,status='complete',books_found=?,books_new=? WHERE id=?", (time.time(), checked, total, sid))
         await db.commit()
         logger.info(f"Full re-scan done: {checked} authors, {total} new books")
-        return {"authors_checked": checked, "new_books": total}
+        _log_source_timeout_summary(timeouts)
+        return {"authors_checked": checked, "new_books": total, "source_timeouts": {k: len(v) for k, v in timeouts.items()}}
     except Exception as e:
         if sid:
             try:

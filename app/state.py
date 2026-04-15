@@ -135,6 +135,31 @@ _lookup_progress: Dict[str, Any] = {
 }
 
 
+# ─── Source-scan pressure counter (MAM yields to source scans) ──
+# Incremented by `lookup_author` on entry, decremented in its
+# finally block. MAM's per-book loop checks this before each HTTP
+# request and pauses (sub-2s granularity) until it reaches 0.
+# Purpose: stop MAM's write-heavy batch loop from starving a
+# source scan's merge writes on the SQLite writer lock — observed
+# in v1.1.9-dev2 testing where Amazon's 4-book merge got locked
+# out entirely during a concurrent 132-book MAM full scan. A
+# counter (not a boolean) so nested/overlapping scans don't
+# prematurely unblock MAM when the outer scan ends.
+_source_scan_refs: int = 0
+
+
+# ─── Scheduled-MAM-scan cancel flag ──────────────────────────
+# Set by the /mam/scan/cancel endpoint when the active scan is
+# type=scheduled (which runs inside the long-lived _mam_scheduler
+# task, not _mam_scan_task, so the regular task.cancel() path
+# can't touch it). Cleared by the scheduler on entry to each
+# iteration. The scheduled scan's `mam_scan_batch` call passes a
+# closure that reads this flag as its cancel_check callback, so
+# setting it to True aborts the current batch at the next
+# per-book boundary.
+_scheduled_mam_cancel_requested: bool = False
+
+
 # ─── MAM scan state ──────────────────────────────────────────
 _mam_scan_task: Optional[asyncio.Task] = None
 _mam_scan_progress: Dict[str, Any] = {

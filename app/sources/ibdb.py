@@ -89,10 +89,35 @@ class IbdbSource(BaseSource):
             if sc < 0.3:
                 continue
 
-            isbn = item.get("isbn_13") or item.get("isbn") or item.get("isbn_10")
-            cover = item.get("cover") or item.get("image") or item.get("thumbnail")
-            pub_date = item.get("publication_date") or item.get("publish_date")
-            pages = item.get("pages") or item.get("page_count")
+            # ibdb.dev's actual response shape (verified live 2026-04-15):
+            #   isbn13         (string, no underscore)
+            #   synopsis       (string)
+            #   publicationDate (string, e.g. "2022-03" or "2022-11-30")
+            #   image          (DICT with .url/.width/.height — never a bare URL)
+            #   id             (uuid string)
+            # No native series field; series info is sometimes embedded in the
+            # title ("A Touch of Light: Book 1 in The Ashes of Avarin") but
+            # not exposed as structured data, so we don't try to parse it
+            # and let the consensus pass align with goodreads/hardcover.
+            # The pre-2026 mappings (isbn_13 / publication_date / etc.) are
+            # kept as fallbacks in case the API drifts back, but in practice
+            # only the camelCase keys ever match.
+            isbn = item.get("isbn13") or item.get("isbn_13") or item.get("isbn") or item.get("isbn_10")
+            cover_raw = item.get("image") or item.get("cover") or item.get("thumbnail")
+            # `image` is always a dict with a .url field. Older fallback keys
+            # could in theory be a bare string URL — handle both shapes so a
+            # future API revision doesn't crash sqlite binding (the v1.1.9
+            # bug: dict went straight into cover_url and crashed on UPDATE
+            # books with "type 'dict' is not supported").
+            if isinstance(cover_raw, dict):
+                cover = cover_raw.get("url")
+            elif isinstance(cover_raw, str):
+                cover = cover_raw
+            else:
+                cover = None
+            pub_date = item.get("publicationDate") or item.get("publication_date") or item.get("publish_date")
+            pages = item.get("pageCount") or item.get("pages") or item.get("page_count")
+            description = item.get("synopsis") or item.get("description") or item.get("summary")
             series_name = item.get("series") or item.get("series_name")
             series_index = None
             if item.get("series_number") or item.get("series_index"):
@@ -108,9 +133,9 @@ class IbdbSource(BaseSource):
                 isbn=str(isbn).replace("-", "") if isbn else None,
                 cover_url=cover,
                 pub_date=str(pub_date)[:10] if pub_date else None,
-                description=item.get("description") or item.get("summary"),
-                page_count=int(pages) if pages else None,
-                language=item.get("language"),
+                description=description if isinstance(description, str) else None,
+                page_count=int(pages) if isinstance(pages, (int, str)) and str(pages).isdigit() else None,
+                language=item.get("language") if isinstance(item.get("language"), str) else None,
                 external_id=str(item.get("id", "")),
                 source="ibdb",
             )

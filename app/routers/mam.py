@@ -296,11 +296,45 @@ async def mam_scan_endpoint(limit: int = Query(None, ge=1)):
 
 @router.post("/scan/cancel")
 async def mam_scan_cancel():
-    """Cancel the currently running MAM scan."""
+    """Cancel the currently running MAM scan.
+
+    Three kinds of MAM scan can be active at once (in theory), each
+    in a different task, so the cancel plumbing has three paths:
+
+      - Manual scan (POST /mam/scan):  runs as `_mam_scan_task` and
+        is cancelled via `task.cancel()` — the CancelledError
+        propagates through the await and the task's own handler
+        flips `running` to False.
+      - Scheduled scan (via `_mam_scheduler`): runs inline inside
+        the long-lived scheduler loop, NOT as a discrete task, so
+        `task.cancel()` would kill the whole scheduler. Instead we
+        set `_scheduled_mam_cancel_requested` — the scheduler's
+        `mam_scan_batch` call receives it through a `cancel_check`
+        closure and aborts at the next per-book boundary. The
+        scheduler also bumps `last_scan_at` after the cancel so
+        its next-tick re-trigger doesn't fire a new scan immediately
+        (you'd see a cancel-then-instant-restart otherwise).
+      - Full scan (POST /mam/full-scan): has its own endpoint at
+        /mam/full-scan/cancel — this endpoint explicitly doesn't
+        touch `_mam_full_scan_task` to avoid overlap.
+
+    Pre-v1.1.9 this endpoint only handled the manual case, so
+    clicking Stop on a scheduled scan silently did nothing and
+    the misleading "No MAM scan running" fallback response made
+    it look like the UI was desynced.
+    """
     if state._mam_scan_task and not state._mam_scan_task.done():
         state._mam_scan_task.cancel()
         state._mam_scan_progress.update({"running": False, "status": "cancelled"})
         logger.info("MAM scan cancelled by user")
+        return {"status": "ok", "message": "MAM scan cancelled"}
+    # Scheduled-scan path: the scheduler owns the task, not us.
+    # Flip the cooperative-cancel flag and let the per-book loop
+    # inside mam_scan_batch notice it at the next boundary (≤2s).
+    if (state._mam_scan_progress.get("running")
+            and state._mam_scan_progress.get("type") == "scheduled"):
+        state._scheduled_mam_cancel_requested = True
+        logger.info("MAM scheduled scan cancel requested")
         return {"status": "ok", "message": "MAM scan cancelled"}
     return {"status": "ok", "message": "No MAM scan running"}
 
@@ -529,11 +563,17 @@ async def mam_books_endpoint(section: str = "upload", search: str = "",
         # Pre-aggregated series_total (same refactor as routers/books.py) —
         # replaces a correlated COUNT(*) that fired once per returned row.
         data_sql = f"""SELECT b.*, a.name as author_name, s.name as series_name,
-            COALESCE(st.series_total, 0) as series_total
+            COALESCE(st.series_total, 0) as series_total,
+            COALESCE(st.mainline_total, 0) as mainline_total
             FROM books b JOIN authors a ON b.author_id=a.id
             LEFT JOIN series s ON b.series_id=s.id
             LEFT JOIN (
-                SELECT series_id, COUNT(*) AS series_total
+                SELECT series_id,
+                       COUNT(*) AS series_total,
+                       SUM(CASE WHEN series_index IS NOT NULL
+                                 AND series_index >= 1
+                                 AND series_index = CAST(series_index AS INTEGER)
+                                THEN 1 ELSE 0 END) AS mainline_total
                 FROM books
                 WHERE hidden=0 AND series_id IS NOT NULL
                 GROUP BY series_id
