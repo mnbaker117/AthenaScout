@@ -12,13 +12,30 @@ import { Section } from "../components/Section";
 import { BGrid, BList } from "../components/BookViews";
 import { BookSidebar } from "../components/BookSidebar";
 import { toast } from "../lib/toast";
-import type { NavFn, PenNameLink, Author, AuthorsResponse, PenNamesResponse, MamStatusResponse } from "../types";
+import type { NavFn, PenNameLink, Author, AuthorsResponse, PenNamesResponse, MamStatusResponse, Book, Series } from "../types";
 
 // ─── Inline Series (for Author Detail) ─────────────────────
 // NOTE: defined at module level (NOT inside AuthorDetailPage) to preserve
 // component identity across re-renders. Inlining inside the parent would
 // remount inputs on every keystroke (the focus-loss bug).
-function IS({series,vm,onAction,onBookClick,collapsed,authorId}:any){const t=useTheme();const[ld,setLd]=useState(false);const[bks,setBks]=useState<any[]|null>(null);const load=()=>{if(bks)return;setLd(true);api.get(`/series/${series.id}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
+// Shared view-mode + action shape for both inline section renderers.
+// Split into its own type so IS and SA both pick it up without
+// re-declaring the same callback signatures twice.
+type BookViewMode = "list" | "grid";
+interface SectionSharedProps {
+  vm: BookViewMode;
+  onAction?: (action: string, book: Book) => void;
+  onBookClick?: (book: Book) => void;
+  collapsed?: boolean;
+}
+interface ISProps extends SectionSharedProps {
+  series: Series;
+  // Matches AuthorDetailPageProps.authorId — parent passes through
+  // whatever the router gave it (number on the canonical nav path,
+  // string via URL params).
+  authorId: number | string;
+}
+function IS({series,vm,onAction,onBookClick,collapsed,authorId}:ISProps){const t=useTheme();const[ld,setLd]=useState(false);const[bks,setBks]=useState<Book[]|null>(null);const load=()=>{if(bks)return;setLd(true);api.get<{books?:Book[]}>(`/series/${series.id}`).then(d=>{setBks(d.books||[]);setLd(false)}).catch(()=>setLd(false))};useEffect(()=>{load()},[]);
 const isMulti=!!series.multi_author;
 const header=isMulti?<span>{series.name} <span style={{fontSize:11,color:useTheme().cyant,fontWeight:600,textTransform:"none",background:useTheme().cyan+"22",padding:"2px 8px",borderRadius:4,marginLeft:4}}>shared series</span></span>:series.name;
 // Separate regular books from omnibus entries for display
@@ -29,13 +46,16 @@ const regCount=regular?regular.length:(series.book_count||0);
 const ownCount=regular?regular.filter(b=>b.owned===1).length:(series.owned_count||0);
 const countStr=isMulti?`${ownCount}/${regCount} · ${series.book_count||0} total`:`${ownCount}/${regCount}`;
 return<Section title={header} count={countStr} ownedCount={ownCount} totalCount={regCount} defaultOpen={!collapsed}>{ld?<Load/>:bks?<>
-{vm==="list"?<BList books={regular} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>:<BGrid books={regular} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>}
+{vm==="list"?<BList books={regular||[]} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>:<BGrid books={regular||[]} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>}
 {omnibus&&omnibus.length>0?<><div style={{display:"flex",alignItems:"center",gap:8,margin:"12px 0 8px"}}><div style={{flex:1,height:1,background:t.borderL}}/><span style={{fontSize:10,fontWeight:600,color:t.tg,textTransform:"uppercase",letterSpacing:"0.06em",flexShrink:0}}>Omnibus / Collections</span><div style={{flex:1,height:1,background:t.borderL}}/></div>
-{vm==="list"?<BList books={omnibus} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>:<BGrid books={omnibus} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>}</>:null}
+{vm==="list"?<BList books={omnibus||[]} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>:<BGrid books={omnibus||[]} onAction={onAction} onBookClick={onBookClick} showAuthor={isMulti} highlightAuthorId={authorId}/>}</>:null}
 </>:null}</Section>}
 
 // ─── Standalone Section ─────────────────────────────────────
-function SA({books,vm,onAction,onBookClick,collapsed}:any){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
+interface SAProps extends SectionSharedProps {
+  books: Book[];
+}
+function SA({books,vm,onAction,onBookClick,collapsed}:SAProps){return<Section title="Standalone" count={books.length} defaultOpen={!collapsed}>{vm==="list"?<BList books={books} onAction={onAction} onBookClick={onBookClick}/>:<BGrid books={books} onAction={onAction} onBookClick={onBookClick}/>}</Section>}
 
 // ─── Author Detail ──────────────────────────────────────────
 interface AuthorDetailPageProps {

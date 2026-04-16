@@ -27,7 +27,7 @@ URL-backfill emit) but NOT on filter-noise skips, so the unified scan
 widget never flickers through "skipped translator", "skipped foreign",
 etc.
 """
-import logging, re, json
+import asyncio, logging, re, json
 from datetime import datetime
 from typing import Optional
 from bs4 import BeautifulSoup
@@ -77,7 +77,22 @@ class GoodreadsSource(BaseSource):
     default_timeout = 60.0
     # follow_redirects=True is the base default
 
-    # No custom __init__ — base handles rate_limit, logger, client
+    def __init__(self, rate_limit: float = 2.0):
+        super().__init__(rate_limit=rate_limit)
+        # Resume-from-position state for the v1.2 retry feature.
+        # Populated after each book's detail page is merged into the
+        # local `books`/`series_map`, then either cleared on normal
+        # return (clean completion — nothing to resume) or preserved
+        # across a CancelledError raised by the caller's wait_for
+        # timeout. The caller (`lookup_author`) checks this after a
+        # Goodreads timeout; if populated AND the scan budget has time
+        # left, it kicks off a second call with start_at=index to
+        # process the remainder. The second call inherits the prior
+        # books/series_map snapshot so partial work from the first
+        # call isn't lost even when the retry only finishes part of
+        # the remainder. Per-source-instance (not global) so pen-name
+        # linked pairs or concurrent scans don't cross-contaminate.
+        self._partial_state: Optional[dict] = None
     # No custom _get — base provides it
 
     async def _get_book_details(self, book_id: str, title: str) -> dict:
@@ -272,7 +287,7 @@ class GoodreadsSource(BaseSource):
             logger.error(f"Goodreads search error '{author_name}': {e}")
             return None
 
-    async def get_author_books(self, author_id: str, existing_titles: set = None, owned_titles: list = None, owned_only: bool = False) -> Optional[AuthorResult]:
+    async def get_author_books(self, author_id: str, existing_titles: set = None, owned_titles: list = None, owned_only: bool = False, start_at: int = 0) -> Optional[AuthorResult]:
         """Scrape an author's full book list and visit per-book detail pages.
 
         Validates author identity from list-page titles BEFORE running
@@ -286,11 +301,37 @@ class GoodreadsSource(BaseSource):
         visit for them up front. This saves ~2s per skipped book at
         the rate limit, which dominates total scan time for prolific
         authors.
+
+        `start_at` is the v1.2 resume-from-position parameter. When
+        the first call for an author times out mid-detail-loop, the
+        caller saves `self._partial_state["index"]` and invokes the
+        source a second time with `start_at=<index>`. The loop skips
+        book entries with `i < start_at` and inherits the prior
+        call's `books` / `series_map` snapshots so partial work
+        isn't lost. `start_at=0` (the default) is a fresh call.
         """
         if existing_titles is None:
             existing_titles = set()
         if owned_titles is None:
             owned_titles = []
+        # Resume from a prior partial state if the caller is retrying
+        # this same author (matching author_id + start_at > 0). Prior
+        # books/series are inherited so the returned AuthorResult from
+        # the retry call covers 0..end, not just start_at..end.
+        if start_at > 0 and self._partial_state and self._partial_state.get("author_id") == author_id:
+            resume_books = list(self._partial_state["books"])
+            resume_series_map = {
+                sr.name: SeriesResult(name=sr.name, books=list(sr.books))
+                for sr in self._partial_state["series"]
+            }
+            logger.info(
+                f"  Goodreads: resuming author_id={author_id} from book "
+                f"{start_at}/{self._partial_state.get('total', '?')} "
+                f"with {len(resume_books) + sum(len(s.books) for s in resume_series_map.values())} prior books preserved"
+            )
+        else:
+            resume_books = None
+            resume_series_map = None
         try:
             r = await self._get(f"{BASE}/author/list/{author_id}", retries=2, params={"per_page": 100})
             soup = BeautifulSoup(r.text, "lxml")
@@ -455,11 +496,15 @@ class GoodreadsSource(BaseSource):
             total = len(raw_books)
             logger.info(f"  Goodreads: found {total} books on list page, fetching details...")
 
-            books = []
-            series_map = {}
+            # Inherit from a prior partial state on a resume call;
+            # otherwise start fresh. See start_at docstring above.
+            books = resume_books if resume_books is not None else []
+            series_map = resume_series_map if resume_series_map is not None else {}
             skipped = {"foreign": 0, "set": 0, "translation": 0}
 
             for i, rb in enumerate(raw_books):
+                if i < start_at:
+                    continue
                 if not rb["book_id"]:
                     continue
 
@@ -630,6 +675,25 @@ class GoodreadsSource(BaseSource):
                     books.append(br)
                     logger.debug(f"    INCLUDE: '{rb['title']}' → standalone")
 
+                # Resume-point snapshot. Updated at the END of each
+                # iteration so a CancelledError at the NEXT iteration's
+                # first await preserves a consistent state: index =
+                # next-book-to-process, books/series = what's been
+                # committed through book i. Snapshot is a shallow-ish
+                # copy of the lists + a rebuilt series list so mutating
+                # the live series_map[sname].books in a later iteration
+                # doesn't retroactively alter the saved snapshot.
+                self._partial_state = {
+                    "author_id": author_id,
+                    "books": list(books),
+                    "series": [
+                        SeriesResult(name=s.name, books=list(s.books))
+                        for s in series_map.values()
+                    ],
+                    "index": i + 1,
+                    "total": total,
+                }
+
             if any(skipped.values()):
                 parts = []
                 if skipped.get("known"): parts.append(f"{skipped['known']} already known")
@@ -640,10 +704,23 @@ class GoodreadsSource(BaseSource):
                 if skipped.get("unowned"): parts.append(f"{skipped['unowned']} unowned (library-only)")
                 logger.info(f"  Goodreads: skipped {', '.join(parts)}")
 
+            # Normal completion — clear any partial state from a prior
+            # iteration or resume. Leaving it set would cause the NEXT
+            # author's scan to accidentally think it's resuming if it
+            # happened to pass a non-zero start_at.
+            self._partial_state = None
             return AuthorResult(
                 name=author_name, external_id=author_id, image_url=author_img,
                 books=books, series=list(series_map.values()),
             )
+        except asyncio.CancelledError:
+            # Caller's wait_for timed out. Preserve `_partial_state` so
+            # the caller can inspect it and optionally retry with
+            # start_at=state["index"].
+            raise
         except Exception as e:
             logger.error(f"Goodreads author error id={author_id}: {type(e).__name__}: {e}")
+            # Non-cancellation failure — clear state so a later
+            # unrelated scan doesn't resume from a dead context.
+            self._partial_state = None
             return None

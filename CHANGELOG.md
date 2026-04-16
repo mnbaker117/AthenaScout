@@ -7,6 +7,66 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.2.0] — 2026-04-15
+
+Feature sprint closing out the v1.2 backlog. Two new source-
+reliability features + TypeScript tightening (Tier 2 + partial
+Tier 3). No runtime regressions — TS changes are build-time only.
+
+### Added
+
+- **Google Books circuit breaker.** After 5 consecutive 429
+  responses from Google's Books API, the source auto-disables by
+  flipping `google_books_enabled` to False and stamping
+  `google_books_auto_disabled_at` in settings. A yellow Dashboard
+  banner surfaces the auto-disable ("Google Books auto-disabled —
+  API quota likely exhausted") with a link to Settings. The
+  Settings page's Google Books toggle shows "Auto-disabled" as a
+  distinct state from user-disabled, with a contextual description.
+  Re-enabling in Settings clears the timestamp and rebuilds the
+  source instance with a fresh counter. The anonymous Google Books
+  API quota is low enough that most users will hit this on their
+  first bulk scan — the circuit breaker prevents wasting ~15s of
+  per-author scan budget on guaranteed-to-fail requests.
+
+- **Goodreads resume-from-position retry.** Phase 2 of the
+  source-timeout visibility feature (Phase 1 shipped in v1.1.9).
+  When Goodreads times out mid-detail-loop, the source now
+  preserves a `_partial_state` snapshot (books/series processed so
+  far + the next-book index). After all other sources finish for
+  that author, the orchestration layer checks if scan budget
+  remains (≥30s) and retries Goodreads with `start_at=<index>`.
+  The retry inherits the prior call's books/series snapshot so
+  partial work from the first call isn't lost. On a second
+  timeout, the log reports "processed N/M books total; ~X likely
+  unscanned" so the user has a concrete number instead of just
+  "Goodreads timed out." Sources that don't expose
+  `_partial_state` are automatically skipped in the retry pass —
+  adding resume support to another source later requires only
+  implementing the same instance-attribute contract.
+
+### Changed
+
+- **TS Tier 2: inline subcomponent typing.** Replaced `({...}:any)`
+  with proper interfaces on inline subcomponents across the five
+  dense pages called out in the v1.2 TS backlog:
+    * `BookViews.tsx`: `BookViewItemProps` + `BookViewListProps`
+    * `SettingsPage.tsx`: `LangSelectProps`, `SFProps`, `STogProps`,
+      `SSectionProps`
+    * `AuthorDetailPage.tsx`: `SectionSharedProps` + `ISProps` /
+      `SAProps` + `BookViewMode` union
+    * `SetupWizard.tsx`: `SetupWizardProps`
+
+- **TS Tier 3 partial: `strictNullChecks` enabled.** Full strict
+  mode surfaced 176 errors — 114 were TS7006 implicit-any on
+  callback params (`.map(l => ...)`, `(e) => ...`), which per the
+  TS backlog memory's own guidance ("100% strict mode. The point
+  of TS is leverage, not legalism") are not worth chasing.
+  Compromise: enabled `strictNullChecks` only (the high-safety
+  subset). 11 null-safety errors fixed across App.tsx,
+  AuthorDetailPage, AuthorsPage, Dashboard, ImportExportPage, and
+  MAMPage. `noImplicitAny` stays off — deferred permanently.
+
 ## [1.1.9] — 2026-04-15
 
 Concurrent-scan reliability sprint. All reported symptoms came

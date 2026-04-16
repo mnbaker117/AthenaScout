@@ -97,6 +97,13 @@ DEFAULT_SETTINGS = {
     "amazon_enabled": False,
     "ibdb_enabled": False,
     "google_books_enabled": False,
+    # Unix timestamp of the last Google Books auto-disable trip, or None
+    # if never tripped (or if the user has since re-enabled). Set by
+    # GoogleBooksSource's circuit breaker when it hits the consecutive-
+    # 429 threshold; cleared in /api/settings when the user re-enables
+    # `google_books_enabled`. The Dashboard polls this and shows a
+    # yellow "auto-disabled — quota likely exhausted" banner while set.
+    "google_books_auto_disabled_at": None,
     "theme": "dark",
     "languages": ["English"],
     "lookup_interval_days": 3,

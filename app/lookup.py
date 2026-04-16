@@ -1494,10 +1494,20 @@ async def _compute_series_suggestions(author_id, series_collector):
         await db.close()
 
 
-async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True, linked_author_ids=None):
-    """Try a single source with validation and detailed logging."""
+async def _try_source(source, author_name, author_id, our_titles, languages, source_name, existing_titles=None, full_scan=False, owned_only=False, series_collector=None, on_new_book=None, exclude_audiobooks=True, linked_author_ids=None, start_at=0):
+    """Try a single source with validation and detailed logging.
+
+    `start_at` is forwarded to `source.get_author_books()` for the
+    Goodreads resume-from-position feature (v1.2). Sources that don't
+    accept the kwarg hit the TypeError fallback path below and run
+    normally — `start_at` is a Goodreads-only opt-in, not a required
+    part of the base interface.
+    """
     try:
-        logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
+        if start_at > 0:
+            logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}' (resuming from book {start_at})...")
+        else:
+            logger.info(f"  [{source_name}] {'Full scan' if full_scan else 'Searching'} for '{author_name}'...")
         # Hardcover needs `owned_titles` to search by book title, and
         # `owned_series_names` so its per-book series picker can prefer
         # candidates that match what Calibre already has (this is what
@@ -1528,25 +1538,35 @@ async def _try_source(source, author_name, author_id, our_titles, languages, sou
         else:
             # In full_scan mode, pass empty existing_titles to force page visits
             scan_existing = set() if full_scan else (existing_titles or set())
+            # Signature fallback ladder: newest kwargs first (start_at for
+            # Goodreads resume), then owned_only, then older shapes. The
+            # TypeError catches are for sources that haven't adopted the
+            # newer kwargs — they run with whatever subset they accept.
             try:
                 full = await source.get_author_books(
                     found.external_id,
                     existing_titles=scan_existing,
                     owned_titles=our_titles or [],
                     owned_only=owned_only,
+                    start_at=start_at,
                 )
             except TypeError:
-                # Fallback: source has an older signature without owned_only.
-                # Behavior is unchanged (still slow on library-only scans for
-                # those sources) until they adopt the kwarg.
                 try:
                     full = await source.get_author_books(
                         found.external_id,
                         existing_titles=scan_existing,
                         owned_titles=our_titles or [],
+                        owned_only=owned_only,
                     )
                 except TypeError:
-                    full = await source.get_author_books(found.external_id)
+                    try:
+                        full = await source.get_author_books(
+                            found.external_id,
+                            existing_titles=scan_existing,
+                            owned_titles=our_titles or [],
+                        )
+                    except TypeError:
+                        full = await source.get_author_books(found.external_id)
         
         if not full:
             logger.info(f"  [{source_name}] No books returned")
@@ -1758,6 +1778,11 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
     # against its own cap and the scan still takes too long. Once
     # the budget is exceeded, remaining sources are skipped.
     scan_started_at = time.monotonic()
+    # Specs that timed out in the main source loop below. Fed into the
+    # retry pass after the loop for sources that expose `_partial_state`
+    # (Goodreads today) so a slow primary source gets a second shot
+    # with whatever scan budget is left over.
+    per_author_timed_out: list = []
     # Read Hardcover API key once; the source needs it injected before its
     # _try_source runs. Same encrypted-store-then-legacy fallback as before.
     try:
@@ -1820,6 +1845,12 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
             )
             if timeout_collector is not None:
                 timeout_collector.setdefault(spec.name, []).append(author_name)
+            # Tag this source for the retry pass below. Only sources that
+            # expose a `_partial_state` attribute actually benefit from
+            # the retry (Goodreads is the only one today), but listing
+            # every timed-out spec here keeps the retry logic uniform —
+            # specs without partial state are filtered out later.
+            per_author_timed_out.append(spec)
             n = 0
         except asyncio.CancelledError:
             # Cancellation propagates — the user clicked Stop.
@@ -1842,6 +1873,72 @@ async def _lookup_author_inner(author_id: int, author_name: str, full_scan: bool
         visible[0] = total
         if on_progress:
             on_progress(total)
+
+    # ── Retry pass for sources that timed out and preserved state ──
+    # v1.2: currently only Goodreads participates — it's the slowest
+    # primary source and the one where a prolific author's book list
+    # can blow the 300s cap. The retry gets whatever remains of the
+    # per-author budget (capped at the source's own timeout) and picks
+    # up from where the first call left off. On a second timeout we
+    # log the "likely missed" count and move on; the Phase 1 timeout
+    # collector already surfaced the author to the Dashboard so this
+    # just adds detail for the log reader.
+    for spec in per_author_timed_out:
+        source = spec.getter()
+        partial = getattr(source, '_partial_state', None)
+        if not partial:
+            continue  # source doesn't support resume — nothing to retry
+        elapsed = time.monotonic() - scan_started_at
+        remaining = PER_AUTHOR_BUDGET_SEC - elapsed
+        if remaining < 30:
+            logger.info(
+                f"  [{spec.name}] retry skipped for '{author_name}' — "
+                f"only {remaining:.0f}s left in per-author budget"
+            )
+            break  # remaining sources would hit the same budget wall
+        retry_timeout = min(spec.timeout_sec, remaining)
+        start_at = partial["index"]
+        total_books = partial.get("total", 0)
+        logger.info(
+            f"  [{spec.name}] retry for '{author_name}' — resuming from "
+            f"book {start_at}/{total_books} with {retry_timeout:.0f}s budget"
+        )
+        try:
+            n = await asyncio.wait_for(
+                _try_source(
+                    source, author_name, author_id, our_titles, languages, spec.name,
+                    existing_titles=existing_titles, full_scan=full_scan,
+                    owned_only=owned_only, series_collector=series_collector,
+                    exclude_audiobooks=exclude_audiobooks, linked_author_ids=pen_linked,
+                    start_at=start_at,
+                ),
+                timeout=retry_timeout,
+            )
+            total += n
+            visible[0] = total
+            if on_progress:
+                on_progress(total)
+        except asyncio.TimeoutError:
+            # Second timeout: surface how far we got so the log reader
+            # has a concrete "N of M books processed" number instead of
+            # just "Goodreads timed out twice". The partial state has
+            # been updated in place during the retry, so it reflects
+            # the furthest point reached across both calls.
+            retry_partial = getattr(source, '_partial_state', None) or partial
+            reached = retry_partial.get("index", start_at)
+            missed = max(0, retry_partial.get("total", 0) - reached)
+            logger.warning(
+                f"  [{spec.name}] retry ALSO timed out for '{author_name}' — "
+                f"processed {reached}/{retry_partial.get('total', '?')} "
+                f"books total; ~{missed} likely unscanned"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(
+                f"  [{spec.name}] retry raised for '{author_name}': {e}",
+                exc_info=True,
+            )
 
     # Clear current_book so the next author's scan widget doesn't show
     # the last book of THIS author until its first DETAIL fetch lands.

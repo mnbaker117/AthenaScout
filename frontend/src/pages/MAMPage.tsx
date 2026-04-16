@@ -157,7 +157,7 @@ return<div style={{display:"flex",flexDirection:"column",gap:16}}>
 </div>:null}
 
 {/* Book list */}
-{ld?<Load/>:books.length===0?<div style={{textAlign:"center",padding:40,color:t.tg}}>No books in this section</div>:vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"} onSendToHermeece={hermConf&&tab==="download"?sendToHermeece:null} selMode={selMode} sel={sel} onToggleSel={toggleSel}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"} onSendToHermeece={hermConf&&tab==="download"?sendToHermeece:null} selMode={selMode} sel={sel} onToggleSel={toggleSel}/>}
+{ld?<Load/>:books.length===0?<div style={{textAlign:"center",padding:40,color:t.tg}}>No books in this section</div>:vm==="list"?<BList books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"} onSendToHermeece={hermConf&&tab==="download"?sendToHermeece:undefined} selMode={selMode} sel={sel} onToggleSel={toggleSel}/>:<BGrid books={books} onAction={onAction} onBookClick={toggleSb} showAuthor={true} showMamLink={tab==="download"} onSendToHermeece={hermConf&&tab==="download"?sendToHermeece:undefined} selMode={selMode} sel={sel} onToggleSel={toggleSel}/>}
 
 {/* Pagination */}
 {totalPages>1&&!ld?<div style={{display:"flex",justifyContent:"center",gap:6,paddingTop:8}}>

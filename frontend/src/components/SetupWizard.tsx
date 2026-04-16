@@ -4,7 +4,10 @@ import { api } from "../api";
 import { Btn } from "./Btn";
 import { Spin } from "./Spin";
 
-export function SetupWizard({onComplete}:any){
+interface SetupWizardProps {
+  onComplete: () => void;
+}
+export function SetupWizard({onComplete}:SetupWizardProps){
 const t=useTheme();
 const[step,setStep]=useState(0);
 const[platform,setPlatform]=useState<any>(null);

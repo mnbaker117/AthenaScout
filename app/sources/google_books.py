@@ -15,7 +15,10 @@ model. Uses the scoring system for match quality evaluation.
 """
 import logging
 import re
+import time
 from typing import Optional
+
+import httpx
 
 from app.sources.base import BaseSource, AuthorResult, SeriesResult, BookResult
 from app.scoring import score_match
@@ -23,6 +26,17 @@ from app.scoring import score_match
 logger = logging.getLogger("athenascout.google_books")
 
 _API = "https://www.googleapis.com/books/v1/volumes"
+
+# Circuit-breaker threshold: after this many consecutive 429 responses,
+# auto-disable the source by flipping `google_books_enabled` to False
+# in settings. The anonymous Google Books quota can run out for days on
+# a modest library scan, and without this every subsequent scan wastes
+# a full per-book budget slot on a source that's guaranteed to 429.
+# 5 is tight enough to catch sustained exhaustion quickly without
+# tripping on a transient blip (one retry-after a rate-limit window).
+# Reset to 0 on any successful response — so a day-later scan after
+# the quota resets naturally clears the counter on its first hit.
+_CIRCUIT_BREAKER_THRESHOLD = 5
 
 
 class GoogleBooksSource(BaseSource):
@@ -34,6 +48,13 @@ class GoogleBooksSource(BaseSource):
 
     def __init__(self, rate_limit: float = 1.5):
         super().__init__(rate_limit=rate_limit)
+        # Consecutive 429 counter for the circuit breaker. Instance-level
+        # so `reload_sources()` (fired on every settings save) resets it
+        # when the user re-enables Google Books in Settings — without that
+        # reset, re-enabling after a trip would immediately re-trip on
+        # the first request because the counter would still be past the
+        # threshold.
+        self._consecutive_429s = 0
 
     async def _get(self, url: str, retries: int = 0, **kwargs):
         """Override base _get with no retries for Google Books.
@@ -41,8 +62,48 @@ class GoogleBooksSource(BaseSource):
         Google's free API has a daily quota (~1000 req). Retrying on 429
         just burns the quota faster — better to fail fast and let the
         enricher fall through to the next source.
+
+        Also implements the auto-disable circuit breaker: tracks
+        consecutive 429 responses and flips `google_books_enabled` to
+        False when the threshold trips. The enricher loop gates on that
+        setting via `SourceSpec.setting_key`, so the very next author
+        skips Google Books entirely instead of burning 60s on a
+        guaranteed-to-fail request.
         """
-        return await super()._get(url, retries=0, **kwargs)
+        try:
+            resp = await super()._get(url, retries=0, **kwargs)
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 429:
+                self._consecutive_429s += 1
+                if self._consecutive_429s >= _CIRCUIT_BREAKER_THRESHOLD:
+                    self._trip_circuit_breaker()
+            raise
+        # Any non-429 success resets the counter. A transient 429 that
+        # resolves on the next request (quota-window boundary) stays well
+        # under the threshold and doesn't trip.
+        self._consecutive_429s = 0
+        return resp
+
+    def _trip_circuit_breaker(self) -> None:
+        """Auto-disable Google Books in settings after repeated 429s.
+
+        Flips `google_books_enabled` to False and logs a WARNING. Safe to
+        call multiple times — if the setting is already False (a prior
+        trip on this process), this is a no-op. The user re-enables in
+        Settings when quota resets; the save triggers `reload_sources()`,
+        which builds a fresh source instance with counter=0."""
+        from app.config import load_settings, save_settings
+        s = load_settings()
+        if not s.get("google_books_enabled"):
+            return  # already off — another caller tripped first
+        s["google_books_enabled"] = False
+        s["google_books_auto_disabled_at"] = time.time()
+        save_settings(s)
+        logger.warning(
+            f"Google Books auto-disabled after {self._consecutive_429s} "
+            f"consecutive 429 responses (API quota likely exhausted). "
+            f"Re-enable in Settings when quota resets."
+        )
 
     async def search_author(self, author_name: str) -> Optional[AuthorResult]:
         """Search Google Books for an author."""

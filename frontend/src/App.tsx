@@ -66,6 +66,11 @@ const onLoginSuccess=()=>{setAuthState({loading:false,authenticated:true,firstRu
 const[firstRun,setFirstRun]=useState<boolean|null>(null);
 const[mamWarn,setMamWarn]=useState<boolean>(false);
 const[mamOn,setMamOn]=useState<boolean>(false);
+// Google Books auto-disable banner. Set from /api/settings whenever
+// `google_books_auto_disabled_at` is a non-null timestamp — the v1.2
+// circuit breaker writes this when Google Books returns N consecutive
+// 429s. Cleared when the user re-enables Google Books in Settings.
+const[gbDisabled,setGbDisabled]=useState<boolean>(false);
 const[libs,setLibs]=useState<Library[]>([]);
 const[activeLib,setActiveLib]=useState<string>(()=>{try{return localStorage.getItem("cl_active_lib")||""}catch{return""}});
 useEffect(()=>{if(!authState.authenticated)return;api.get<LibrariesResponse>("/libraries").then(r=>{const ll=r.libraries||[];setLibs(ll);const act=ll.find(l=>l.active);if(act){setActiveLib(act.slug);try{localStorage.setItem("cl_active_lib",act.slug)}catch{}}}).catch(()=>{})},[authState.authenticated]);
@@ -76,6 +81,14 @@ useEffect(()=>{if(!authState.authenticated)return;api.get("/platform").then(r=>s
 // refetch on every `pg` change (page nav) as a lazy refresh trigger, which
 // cost 1 API call per nav click. Event-driven is surgical and free.
 useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get<MamStatusResponse>("/mam/status").then(r=>{setMamOn(!!r.enabled);if(r.enabled&&r.validation_ok===false)setMamWarn(true);else setMamWarn(false)}).catch(()=>{});refresh();window.addEventListener(EVT.MamStateChanged,refresh);return()=>window.removeEventListener(EVT.MamStateChanged,refresh)},[authState.authenticated]);
+// Google Books circuit-breaker banner. Polls /api/settings on login,
+// on page nav (cheap — settings is one JSON read), and reacts to
+// SettingsPage's save event so the banner clears immediately when
+// the user re-enables Google Books. The banner shows whenever the
+// backend has a non-null `google_books_auto_disabled_at` timestamp —
+// not gated on `google_books_enabled` so the banner persists through
+// the next scan (which skips GB because the setting is off).
+useEffect(()=>{if(!authState.authenticated)return;const refresh=()=>api.get<any>("/settings").then(r=>setGbDisabled(!!r?.google_books_auto_disabled_at)).catch(()=>{});refresh();window.addEventListener("athenascout:settings-saved",refresh);return()=>window.removeEventListener("athenascout:settings-saved",refresh)},[authState.authenticated,pg]);
 // Pending series-suggestion count drives the badge number on the
 // Suggestions nav item. Refetched via the explicit
 // "athenascout:suggestions-changed" event that SuggestionsPage
@@ -191,6 +204,13 @@ input,select{font-family:inherit}
 {/* MAM Validation Warning Banner */}
 {mamWarn?<div style={{maxWidth:widthFor(pg),margin:"12px auto 0",padding:"10px 16px",background:theme.ylw+"18",border:`1px solid ${theme.ylw}44`,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,fontSize:13}}><span style={{color:theme.ylwt}}>⚠ MAM session may have expired — scans are paused. <button onClick={()=>nav("settings")} style={{background:"none",border:"none",color:theme.accent,cursor:"pointer",fontWeight:600,fontSize:13,padding:0,textDecoration:"underline"}}>Go to Settings</button> to update your token and re-validate.</span><button onClick={()=>setMamWarn(false)} style={{background:"none",border:"none",color:theme.tg,cursor:"pointer",fontSize:16,padding:"0 4px",flexShrink:0}}>✕</button></div>:null}
 
+{/* Google Books circuit-breaker banner. Shown while the backend has a
+    non-null `google_books_auto_disabled_at` timestamp — cleared when
+    the user re-enables Google Books in Settings. ✕ only dismisses the
+    banner for this session; the underlying setting state (and next
+    scan behavior) is controlled entirely from the Settings page. */}
+{gbDisabled?<div style={{maxWidth:widthFor(pg),margin:"12px auto 0",padding:"10px 16px",background:theme.ylw+"18",border:`1px solid ${theme.ylw}44`,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,fontSize:13}}><span style={{color:theme.ylwt}}>⚠ Google Books auto-disabled — API quota likely exhausted (too many 429 responses). <button onClick={()=>nav("settings")} style={{background:"none",border:"none",color:theme.accent,cursor:"pointer",fontWeight:600,fontSize:13,padding:0,textDecoration:"underline"}}>Go to Settings</button> to re-enable when quota resets.</span><button onClick={()=>setGbDisabled(false)} style={{background:"none",border:"none",color:theme.tg,cursor:"pointer",fontSize:16,padding:"0 4px",flexShrink:0}}>✕</button></div>:null}
+
 {/* ── Main Content ── */}
 <main className="main-content" style={{maxWidth:widthFor(pg),margin:"0 auto",padding:"28px 20px"}}>
 <ErrorBoundary onReset={()=>nav("dashboard")} key={pg+(pa||"")+activeLib}>
@@ -198,7 +218,7 @@ input,select{font-family:inherit}
 {pg==="dashboard"&&<Dashboard onNav={nav} libs={libs} activeLib={activeLib} switchLib={switchLib}/>}
 {pg==="library"&&<BooksPage title="My Library" subtitle="books in your Calibre library" apiPath="/books" extraParams={{owned:true}} exportFilter="library"/>}
 {pg==="authors"&&<AuthorsPage onNav={nav}/>}
-{pg==="author"&&<AuthorDetailPage authorId={pa} onNav={nav}/>}
+{pg==="author"&&pa!=null&&<AuthorDetailPage authorId={pa} onNav={nav}/>}
 {pg==="missing"&&<BooksPage title="Missing Books" subtitle="books to find" apiPath="/books" extraParams={{owned:false}} exportFilter="missing"/>}
 {pg==="upcoming"&&<BooksPage title="Upcoming Books" subtitle="unreleased books" apiPath="/upcoming" exportFilter="missing"/>}
 {pg==="hidden"&&<HiddenPage onNav={nav}/>}

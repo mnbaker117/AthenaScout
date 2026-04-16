@@ -10,10 +10,15 @@ import { Load } from "../components/Load";
 // helpers inside the parent render function makes React see them
 // as new components every render and unmounts every input on each
 // keystroke — the focus-loss bug we hit during early development.
-function LangSelect({selected,options,onChange}:any){const t=useTheme();const[open,setOpen]=useState(false);const[q,setQ]=useState("");const ref=useRef<HTMLDivElement>(null);
-useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h)},[]);
-const filtered=(options||[]).filter(l=>l.toLowerCase().includes(q.toLowerCase()));
-const toggle=lang=>{if(selected.includes(lang))onChange(selected.filter(l=>l!==lang));else onChange([...selected,lang])};
+interface LangSelectProps {
+  selected: string[];
+  options: string[];
+  onChange: (next: string[]) => void;
+}
+function LangSelect({selected,options,onChange}:LangSelectProps){const t=useTheme();const[open,setOpen]=useState(false);const[q,setQ]=useState("");const ref=useRef<HTMLDivElement>(null);
+useEffect(()=>{const h=(e:MouseEvent)=>{if(ref.current&&!ref.current.contains(e.target as Node))setOpen(false)};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h)},[]);
+const filtered=(options||[]).filter((l:string)=>l.toLowerCase().includes(q.toLowerCase()));
+const toggle=(lang:string)=>{if(selected.includes(lang))onChange(selected.filter(l=>l!==lang));else onChange([...selected,lang])};
 return<div ref={ref} style={{position:"relative",width:300}}>
 <div onClick={()=>setOpen(!open)} style={{padding:"8px 12px",background:t.inp,border:`1px solid ${t.border}`,borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",minHeight:36}}><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{selected.length===0?<span style={{color:t.tg,fontSize:13}}>Select languages...</span>:selected.map(l=><span key={l} style={{background:t.abg,color:t.ylwt,padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:500,display:"flex",alignItems:"center",gap:4}}>{l}<button onClick={e=>{e.stopPropagation();toggle(l)}} style={{background:"none",border:"none",color:t.ylwt,cursor:"pointer",padding:0,fontSize:13}}>×</button></span>)}</div><span style={{color:t.tg,fontSize:10}}>▼</span></div>
 {open&&<div style={{position:"absolute",top:"100%",left:0,right:0,marginTop:4,background:t.bg2,border:`1px solid ${t.border}`,borderRadius:8,zIndex:50,maxHeight:240,overflow:"hidden",boxShadow:"0 4px 12px rgba(0,0,0,0.3)"}}>
@@ -22,10 +27,29 @@ return<div ref={ref} style={{position:"relative",width:300}}>
 </div>}
 
 // ─── Settings Helpers (outside SettingsPage to prevent re-mount on state change) ───
-function SF({label,desc,children,warn}:any){const t=useTheme();return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 0",borderBottom:`1px solid ${t.borderL}`}}><div style={{flex:1}}><div style={{fontSize:14,fontWeight:500,color:t.text2}}>{label}</div>{desc?<div style={{fontSize:12,color:t.tf,marginTop:2}}>{desc}</div>:null}{warn?<div style={{fontSize:11,color:t.ylwt,marginTop:2}}>⚠ {warn}</div>:null}</div><div>{children}</div></div>}
-function STog({on,onToggle,disabled}:any){const t=useTheme();return<div onClick={disabled?undefined:onToggle} style={{width:44,height:24,borderRadius:12,background:on?t.grn:t.bg4,cursor:disabled?"not-allowed":"pointer",padding:3,transition:"background 0.2s",opacity:disabled?0.5:1}}><div style={{width:18,height:18,borderRadius:"50%",background:"#fff",transform:on?"translateX(20px)":"translateX(0)",transition:"transform 0.2s"}}/></div>}
+// Prop interfaces for the three inline presentational helpers below.
+// Kept local (not exported) because these helpers are private to
+// SettingsPage — the shapes are small and page-specific.
+interface SFProps {
+  label: React.ReactNode;
+  desc?: React.ReactNode;
+  warn?: React.ReactNode;
+  children?: React.ReactNode;
+}
+function SF({label,desc,children,warn}:SFProps){const t=useTheme();return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 0",borderBottom:`1px solid ${t.borderL}`}}><div style={{flex:1}}><div style={{fontSize:14,fontWeight:500,color:t.text2}}>{label}</div>{desc?<div style={{fontSize:12,color:t.tf,marginTop:2}}>{desc}</div>:null}{warn?<div style={{fontSize:11,color:t.ylwt,marginTop:2}}>⚠ {warn}</div>:null}</div><div>{children}</div></div>}
+interface STogProps {
+  on: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}
+function STog({on,onToggle,disabled}:STogProps){const t=useTheme();return<div onClick={disabled?undefined:onToggle} style={{width:44,height:24,borderRadius:12,background:on?t.grn:t.bg4,cursor:disabled?"not-allowed":"pointer",padding:3,transition:"background 0.2s",opacity:disabled?0.5:1}}><div style={{width:18,height:18,borderRadius:"50%",background:"#fff",transform:on?"translateX(20px)":"translateX(0)",transition:"transform 0.2s"}}/></div>}
 
-function SSection({title,defaultOpen=true,children}:any){const t=useTheme();const[open,setOpen]=useState(defaultOpen);return<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12}}><div onClick={()=>setOpen(!open)} style={{display:"flex",alignItems:"center",gap:8,padding:"14px 20px",cursor:"pointer",userSelect:"none"}}><span style={{transform:open?"rotate(0)":"rotate(-90deg)",transition:"transform 0.2s",fontSize:11,color:t.tg}}>▼</span><span style={{fontSize:13,fontWeight:600,color:t.text,textTransform:"uppercase",letterSpacing:"0.05em"}}>{title}</span></div>{open?<div style={{padding:"0 20px 16px"}}>{children}</div>:null}</div>}
+interface SSectionProps {
+  title: React.ReactNode;
+  defaultOpen?: boolean;
+  children?: React.ReactNode;
+}
+function SSection({title,defaultOpen=true,children}:SSectionProps){const t=useTheme();const[open,setOpen]=useState(defaultOpen);return<div style={{background:t.bg2,border:`1px solid ${t.border}`,borderRadius:12}}><div onClick={()=>setOpen(!open)} style={{display:"flex",alignItems:"center",gap:8,padding:"14px 20px",cursor:"pointer",userSelect:"none"}}><span style={{transform:open?"rotate(0)":"rotate(-90deg)",transition:"transform 0.2s",fontSize:11,color:t.tg}}>▼</span><span style={{fontSize:13,fontWeight:600,color:t.text,textTransform:"uppercase",letterSpacing:"0.05em"}}>{title}</span></div>{open?<div style={{padding:"0 20px 16px"}}>{children}</div>:null}</div>}
 
 // ─── Settings ───────────────────────────────────────────────
 export default function SettingsPage(){const t=useTheme();const[s,setS]=useState<any>(null);const[sv,setSv]=useState(false);const[msg,setMsg]=useState("");const[buildSha,setBuildSha]=useState("");
@@ -36,7 +60,7 @@ const[mamVld,setMamVld]=useState(false);const[mamRes,setMamRes]=useState<any>(nu
 // onChange-fires-fetch-per-keystroke version triggered ~18 API calls
 // for a 12-character author name; only the last result matters.
 useEffect(()=>{const q=s?._scanClearQ||"";if(q.length<2){setS(o=>o&&o._scanClearResults?.length?{...o,_scanClearResults:[]}:o);return}const tm=setTimeout(()=>{api.get(`/authors?search=${encodeURIComponent(q)}`).then(r=>setS(o=>o?{...o,_scanClearResults:r.authors||[]}:o)).catch(()=>{})},300);return()=>clearTimeout(tm)},[s?._scanClearQ]);
-const save=async()=>{setSv(true);setMsg("");try{const toSave={...s};if(s._editingKey&&s._newKey){toSave.hardcover_api_key=s._newKey}delete toSave._editingKey;delete toSave._newKey;delete toSave._editingMam;delete toSave._newMam;delete toSave._scanClearQ;delete toSave._scanClearResults;delete toSave._scanClearSel;delete toSave.hardcover_api_key_set;delete toSave.language_options;delete toSave._discovered_libraries;delete toSave._extra_mount_paths;delete toSave._newSrcApp;await api.post("/settings",toSave);setMsg("Saved!");upd("_editingKey",false);upd("_newKey","");const fresh=await api.get("/settings");setS(fresh);setTimeout(()=>setMsg(""),2000)}catch(e){setMsg("Error")}setSv(false)};
+const save=async()=>{setSv(true);setMsg("");try{const toSave={...s};if(s._editingKey&&s._newKey){toSave.hardcover_api_key=s._newKey}delete toSave._editingKey;delete toSave._newKey;delete toSave._editingMam;delete toSave._newMam;delete toSave._scanClearQ;delete toSave._scanClearResults;delete toSave._scanClearSel;delete toSave.hardcover_api_key_set;delete toSave.language_options;delete toSave._discovered_libraries;delete toSave._extra_mount_paths;delete toSave._newSrcApp;await api.post("/settings",toSave);setMsg("Saved!");upd("_editingKey",false);upd("_newKey","");const fresh=await api.get("/settings");setS(fresh);window.dispatchEvent(new CustomEvent("athenascout:settings-saved"));setTimeout(()=>setMsg(""),2000)}catch(e){setMsg("Error")}setSv(false)};
 const doValidate=async()=>{setMamVld(true);setMamRes(null);try{const r=await api.post("/mam/validate");setMamRes(r);if(r.success){const fresh=await api.get("/settings");setS(fresh)}}catch(e){setMamRes({success:false,message:"Network error"})}setMamVld(false)};
 const resetMam=async()=>{if(!confirm("Reset all MAM scan data? This clears mam_url and mam_status on every book. You will need to re-scan."))return;try{await api.post("/mam/reset");setMsg("MAM data cleared!");setTimeout(()=>setMsg(""),2000)}catch{}};
 const reorderFmt=(from,to)=>{if(from===to)return;const arr=[...(s.mam_format_priority||[])];const[item]=arr.splice(from,1);arr.splice(to,0,item);upd("mam_format_priority",arr)};
@@ -114,7 +138,7 @@ return<div style={{paddingBottom:40}}>
 <SF label="3. Kobo" desc="Web scraping for ebooks"><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.kobo_enabled?t.grnt:t.tg,fontWeight:600}}>{s.kobo_enabled?"Active":"Disabled"}</span><STog on={s.kobo_enabled} onToggle={()=>upd("kobo_enabled",!s.kobo_enabled)}/></div></SF>
 <SF label="4. Amazon" desc="Web scraping for series data. Best source for standalone vs series confirmation. Slower due to anti-bot measures."><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.amazon_enabled?t.grnt:t.tg,fontWeight:600}}>{s.amazon_enabled?"Active":"Disabled"}</span><STog on={!!s.amazon_enabled} onToggle={()=>upd("amazon_enabled",!s.amazon_enabled)}/></div></SF>
 <SF label="5. IBDB" desc="REST API, no auth required. Supplementary source for ISBN and publisher backfill."><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.ibdb_enabled?t.grnt:t.tg,fontWeight:600}}>{s.ibdb_enabled?"Active":"Disabled"}</span><STog on={!!s.ibdb_enabled} onToggle={()=>upd("ibdb_enabled",!s.ibdb_enabled)}/></div></SF>
-<SF label="6. Google Books" desc="Public API, no auth required. Supplementary source for ISBN, publisher, and description."><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.google_books_enabled?t.grnt:t.tg,fontWeight:600}}>{s.google_books_enabled?"Active":"Disabled"}</span><STog on={!!s.google_books_enabled} onToggle={()=>upd("google_books_enabled",!s.google_books_enabled)}/></div></SF>
+<SF label="6. Google Books" desc={s.google_books_auto_disabled_at?"Auto-disabled after repeated 429 responses — API quota likely exhausted. Re-enable to retry; the circuit breaker will trip again if quota is still out.":"Public API, no auth required. Supplementary source for ISBN, publisher, and description."}><div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:12,color:s.google_books_enabled?t.grnt:s.google_books_auto_disabled_at?t.ylwt:t.tg,fontWeight:600}}>{s.google_books_enabled?"Active":s.google_books_auto_disabled_at?"Auto-disabled":"Disabled"}</span><STog on={!!s.google_books_enabled} onToggle={()=>upd("google_books_enabled",!s.google_books_enabled)}/></div></SF>
 
 <div style={{fontSize:12,fontWeight:600,color:t.tm,textTransform:"uppercase",letterSpacing:"0.06em",padding:"10px 0 6px"}}>Rate Limits (seconds between requests)</div>
 <SF label="Goodreads"><input {...numP("rate_goodreads",2)}/></SF>
