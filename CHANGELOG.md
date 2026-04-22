@@ -7,6 +7,24 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.2.1] — 2026-04-22
+
+Security-only patch release. No behavior changes.
+
+### Security
+
+- **Bumped `lxml` from `==5.2.0` to `>=6.1.0`** to close
+  CVE-2026-41066 (GHSA-vfmq-68hx-4jfw). The lxml 6.0-and-earlier
+  default configuration of `iterparse()` and `ETCompatXMLParser()`
+  allowed XXE (XML external entity) resolution against local
+  files. AthenaScout doesn't parse untrusted XML directly, but the
+  scraper stack uses lxml transitively through BeautifulSoup's
+  "lxml" parser when fetching source HTML — a compromised or
+  malicious source response could otherwise have triggered local
+  file disclosure during a scan. Patched in 6.1.0.
+
+---
+
 ## [1.2.0] — 2026-04-15
 
 Feature sprint closing out the v1.2 backlog. Two new source-
